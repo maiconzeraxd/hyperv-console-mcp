@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hyperv-console-mcp"
+version = "0.1.0"
+description = "A local, policy-gated MCP server for Hyper-V management, guest automation, and console input."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "hyperv-console-mcp contributors" }]
+keywords = ["hyper-v", "mcp", "windows", "virtualization", "automation"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Win32 (MS Windows)",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: System :: Systems Administration",
+]
+dependencies = ["mcp>=2.3,<3", "Pillow>=10,<13"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "build>=1.2,<2"]
+
+[project.scripts]
+hyperv-console-mcp = "hyperv_console_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hyperv_console_mcp = ["bridge/*.ps1"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

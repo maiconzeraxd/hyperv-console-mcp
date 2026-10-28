@@ -1,0 +1,27 @@
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Runtime data
+*.log
+*.jsonl
+audit/
+captures/
+*.png
+
+# Editors and OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
