@@ -113,6 +113,22 @@ function Get-InputDevice {
     return $devices[0]
 }
 
+function Convert-KeyName {
+    param([Parameter(Mandatory)][string]$Name)
+    $codes = @{
+        ctrl = 0x11; shift = 0x10; alt = 0x12; win = 0x5B; enter = 0x0D
+        escape = 0x1B; tab = 0x09; space = 0x20; backspace = 0x08
+        delete = 0x2E; insert = 0x2D; home = 0x24; end = 0x23
+        pageup = 0x21; pagedown = 0x22; up = 0x26; down = 0x28
+        left = 0x25; right = 0x27
+    }
+    1..12 | ForEach-Object { $codes["f$_"] = 0x70 + $_ - 1 }
+    0..9 | ForEach-Object { $codes["$_"] = 0x30 + $_ }
+    0..25 | ForEach-Object { $codes[[char](0x61 + $_)] = 0x41 + $_ }
+    if (-not $codes.ContainsKey($Name)) { throw "Unsupported key name '$Name'." }
+    return [uint32]$codes[$Name]
+}
+
 function Invoke-InputMethod {
     param(
         [Parameter(Mandatory)]$Device,
@@ -157,6 +173,17 @@ function Convert-ToBase64Text {
     return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Text))
 }
 
+function Invoke-GuestQuery {
+    param(
+        [Parameter(Mandatory)]$Vm,
+        [Parameter(Mandatory)]$Request,
+        [Parameter(Mandatory)][scriptblock]$Query,
+        [object[]]$Arguments = @()
+    )
+    $credential = New-GuestCredential -Request $Request
+    return Invoke-Command -VMName $Vm.Name -Credential $credential -ArgumentList $Arguments -ScriptBlock $Query
+}
+
 function Invoke-BridgeOperation {
     param([Parameter(Mandatory)][string]$Operation, [Parameter(Mandatory)]$Request)
     Import-Module Hyper-V -ErrorAction Stop
@@ -193,6 +220,8 @@ function Invoke-BridgeOperation {
                 'start' { Start-VM -VM $vm -Confirm:$false | Out-Null }
                 'shutdown' { Stop-VM -VM $vm -Confirm:$false | Out-Null }
                 'save' { Stop-VM -VM $vm -Save -Confirm:$false | Out-Null }
+                'pause' { Suspend-VM -VM $vm -Confirm:$false | Out-Null }
+                'resume' { Resume-VM -VM $vm -Confirm:$false | Out-Null }
                 'turn_off' { Stop-VM -VM $vm -TurnOff -Force -Confirm:$false | Out-Null }
                 'reset' { Restart-VM -VM $vm -Force -Confirm:$false | Out-Null }
                 default { throw 'Unsupported power action.' }
@@ -222,6 +251,78 @@ function Invoke-BridgeOperation {
             Remove-VMSnapshot -VMSnapshot $snapshot -Confirm:$false
             $result = @{ deleted = $true; checkpoint = $converted }
         }
+        'guest_status' {
+            $vm = Get-ExactVm -Name $request.vm
+            $status = Invoke-GuestQuery -Vm $vm -Request $request -Query {
+                $os = Get-CimInstance -ClassName 'Win32_OperatingSystem'
+                $computer = Get-CimInstance -ClassName 'Win32_ComputerSystem'
+                $kd = (& bcdedit.exe /enum '{dbgsettings}' 2>&1 | Out-String)
+                [pscustomobject]@{
+                    computer_name = $env:COMPUTERNAME
+                    windows_caption = $os.Caption
+                    windows_version = $os.Version
+                    last_boot_time = $os.LastBootUpTime.ToString('o')
+                    free_system_drive_bytes = [Int64](Get-PSDrive -Name $env:SystemDrive.TrimEnd(':')).Free
+                    memory_total_bytes = [Int64]$computer.TotalPhysicalMemory
+                    memory_free_bytes = [Int64]$os.FreePhysicalMemory * 1KB
+                    kernel_debug_settings = $kd
+                }
+            }
+            $result = @{ vm = $vm.Name; guest = $status }
+        }
+        'guest_processes' {
+            $vm = Get-ExactVm -Name $request.vm
+            $filter = [string]$request.name_contains
+            $processes = Invoke-GuestQuery -Vm $vm -Request $request -Arguments $filter -Query {
+                param($Filter)
+                Get-Process | Where-Object { -not $Filter -or $_.ProcessName -like "*$Filter*" } |
+                    Sort-Object -Property CPU -Descending | Select-Object -First 200 |
+                    ForEach-Object {
+                        [pscustomobject]@{
+                            id = $_.Id; name = $_.ProcessName
+                            cpu_seconds = if ($null -eq $_.CPU) { $null } else { [Math]::Round($_.CPU, 3) }
+                            working_set_bytes = [Int64]$_.WorkingSet64
+                        }
+                    }
+            }
+            $result = @{ vm = $vm.Name; processes = @($processes) }
+        }
+        'guest_services' {
+            $vm = Get-ExactVm -Name $request.vm
+            $filter = [string]$request.name_contains
+            $services = Invoke-GuestQuery -Vm $vm -Request $request -Arguments $filter, ([bool]$request.include_stopped) -Query {
+                param($Filter, $IncludeStopped)
+                Get-CimInstance -ClassName 'Win32_Service' |
+                    Where-Object {
+                        (-not $Filter -or $_.Name -like "*$Filter*" -or $_.DisplayName -like "*$Filter*") -and
+                        ($IncludeStopped -or $_.State -eq 'Running')
+                    } | Sort-Object Name | Select-Object -First 200 |
+                    ForEach-Object {
+                        [pscustomobject]@{ name = $_.Name; display_name = $_.DisplayName; state = $_.State; start_mode = $_.StartMode }
+                    }
+            }
+            $result = @{ vm = $vm.Name; services = @($services) }
+        }
+        'guest_events' {
+            $vm = Get-ExactVm -Name $request.vm
+            $events = Invoke-GuestQuery -Vm $vm -Request $request -Arguments @(
+                [string]$request.log_name, [int]$request.max_events, $request.event_id, $request.level, [int]$request.hours
+            ) -Query {
+                param($LogName, $MaximumEvents, $EventId, $Level, $Hours)
+                $filter = @{ LogName = $LogName; StartTime = (Get-Date).AddHours(-$Hours) }
+                if ($null -ne $EventId) { $filter['Id'] = [int]$EventId }
+                if ($null -ne $Level) { $filter['Level'] = [int]$Level }
+                Get-WinEvent -FilterHashtable $filter -MaxEvents $MaximumEvents -ErrorAction Stop |
+                    ForEach-Object {
+                        [pscustomobject]@{
+                            record_id = $_.RecordId; time = $_.TimeCreated.ToString('o')
+                            id = $_.Id; level = [int]$_.Level; provider = $_.ProviderName
+                            message = $_.Message
+                        }
+                    }
+            }
+            $result = @{ vm = $vm.Name; events = @($events) }
+        }
         'guest_exec' {
             $vm = Get-ExactVm -Name $request.vm
             $credential = New-GuestCredential -Request $request
@@ -236,7 +337,7 @@ function Invoke-BridgeOperation {
                     $exitCode = 0
                     try {
                         $ErrorActionPreference = 'Stop'
-                    $global:LASTEXITCODE = $null
+                        $global:LASTEXITCODE = $null
                         $output = (& ([ScriptBlock]::Create($command)) 2>&1 | Out-String -Width 4096)
                         if ($null -ne $LASTEXITCODE) {
                             $exitCode = [int]$LASTEXITCODE
@@ -370,20 +471,10 @@ function Invoke-BridgeOperation {
         'console_press_keys' {
             $vm = Get-ExactVm -Name $request.vm
             $keyboard = Get-InputDevice -Vm $vm -ClassName 'Msvm_Keyboard'
-            $codes = @{
-                ctrl = 0x11; shift = 0x10; alt = 0x12; win = 0x5B; enter = 0x0D
-                escape = 0x1B; tab = 0x09; space = 0x20; backspace = 0x08
-                delete = 0x2E; insert = 0x2D; home = 0x24; end = 0x23
-                pageup = 0x21; pagedown = 0x22; up = 0x26; down = 0x28
-                left = 0x25; right = 0x27
-            }
-            1..12 | ForEach-Object { $codes["f$_"] = 0x70 + $_ - 1 }
-            0..9 | ForEach-Object { $codes["$_"] = 0x30 + $_ }
-            0..25 | ForEach-Object { $codes[[char](0x61 + $_)] = 0x41 + $_ }
             $pressed = @()
             try {
                 foreach ($key in $request.keys) {
-                    $code = [uint32]$codes[[string]$key]
+                    $code = Convert-KeyName -Name ([string]$key)
                     Invoke-InputMethod -Device $keyboard -Method 'PressKey' -Arguments @{ KeyCode = $code }
                     $pressed += $code
                 }
@@ -393,6 +484,25 @@ function Invoke-BridgeOperation {
                 }
             }
             $result = @{ vm = $vm.Name; keys_sent = $pressed.Count; completed = $true }
+        }
+        'console_key_state' {
+            $vm = Get-ExactVm -Name $request.vm
+            $keyboard = Get-InputDevice -Vm $vm -ClassName 'Msvm_Keyboard'
+            $arguments = @{ KeyCode = Convert-KeyName -Name ([string]$request.key) }
+            $method = if ([bool]$request.down) { 'PressKey' } else { 'ReleaseKey' }
+            Invoke-InputMethod -Device $keyboard -Method $method -Arguments $arguments
+            $result = @{ vm = $vm.Name; key = [string]$request.key; down = [bool]$request.down }
+        }
+        'console_mouse_buttons' {
+            $vm = Get-ExactVm -Name $request.vm
+            $mouse = Get-InputDevice -Vm $vm -ClassName 'Msvm_SyntheticMouse'
+            $states = @([bool]$request.left, [bool]$request.right, [bool]$request.middle)
+            for ($index = 0; $index -lt $states.Count; $index++) {
+                Invoke-InputMethod -Device $mouse -Method 'SetButtonState' -Arguments @{
+                    ButtonIndex = [uint32]($index + 1); ButtonState = [uint32]$states[$index]
+                }
+            }
+            $result = @{ vm = $vm.Name; left = $states[0]; right = $states[1]; middle = $states[2] }
         }
         'console_ctrl_alt_delete' {
             $vm = Get-ExactVm -Name $request.vm
@@ -429,6 +539,52 @@ function Invoke-BridgeOperation {
             }
             $result = @{ vm = $vm.Name; delta = $request.delta; completed = $true }
         }
+        'media_list' {
+            $vm = Get-ExactVm -Name $request.vm
+            $drives = @(Get-VMDvdDrive -VM $vm | ForEach-Object { Convert-DvdDrive -Drive $_ })
+            $result = @{ vm = $vm.Name; state = $vm.State.ToString(); generation = [int]$vm.Generation; dvd_drives = $drives }
+        }
+        'media_mount' {
+            $vm = Get-ExactVm -Name $request.vm
+            if ($vm.State -ne [Microsoft.HyperV.PowerShell.VMState]::Off) {
+                throw 'The VM must be Off before changing installation media or boot order. The server will not stop it automatically.'
+            }
+            $iso = Get-Item -LiteralPath ([string]$request.path) -ErrorAction Stop
+            if ($iso.PSIsContainer -or $iso.Extension -ine '.iso') { throw 'The media path must be an existing .iso file.' }
+            $number = [int]$request.controller_number
+            $location = [int]$request.controller_location
+            $drive = Get-ExactDvdDrive -Vm $vm -ControllerNumber $number -ControllerLocation $location
+            Set-VMDvdDrive -VM $vm -ControllerNumber $number -ControllerLocation $location -Path $iso.FullName -Confirm:$false -ErrorAction Stop
+            $bootChanged = $false
+            if ([bool]$request.boot_first) {
+                if ([int]$vm.Generation -eq 2) {
+                    Set-VMFirmware -VM $vm -FirstBootDevice $drive -Confirm:$false -ErrorAction Stop
+                } else {
+                    $bios = Get-VMBios -VM $vm
+                    $order = @('CD') + @($bios.StartupOrder | Where-Object { $_ -ne 'CD' })
+                    Set-VMBios -VM $vm -StartupOrder $order -Confirm:$false -ErrorAction Stop
+                }
+                $bootChanged = $true
+            }
+            $result = @{
+                vm = $vm.Name; drive = Convert-DvdDrive -Drive (Get-ExactDvdDrive -Vm $vm -ControllerNumber $number -ControllerLocation $location)
+                boot_first = $bootChanged; completed = $true
+            }
+        }
+        'media_eject' {
+            $vm = Get-ExactVm -Name $request.vm
+            if ($vm.State -ne [Microsoft.HyperV.PowerShell.VMState]::Off) {
+                throw 'The VM must be Off before ejecting installation media. The server will not stop it automatically.'
+            }
+            $number = [int]$request.controller_number
+            $location = [int]$request.controller_location
+            $null = Get-ExactDvdDrive -Vm $vm -ControllerNumber $number -ControllerLocation $location
+            Set-VMDvdDrive -VM $vm -ControllerNumber $number -ControllerLocation $location -Path $null -Confirm:$false -ErrorAction Stop
+            $result = @{
+                vm = $vm.Name; drive = Convert-DvdDrive -Drive (Get-ExactDvdDrive -Vm $vm -ControllerNumber $number -ControllerLocation $location)
+                completed = $true
+            }
+        }
         'debug_serial_status' {
             $vm = Get-ExactVm -Name $request.vm
             $ports = @(
@@ -454,35 +610,69 @@ function Invoke-BridgeOperation {
             }
             $pipePath = '\\.\pipe\' + $pipeName
             $port = Set-VMComPort -VM $vm -Number 1 -Path $pipePath -DebuggerMode On -Passthru -Confirm:$false
-            $guestConfigured = $false
-            if ([bool]$request.configure_guest) {
-                $credential = New-GuestCredential -Request $request
-                Invoke-Command -VMName $vm.Name -Credential $credential -ScriptBlock {
-                    $dbg = (& bcdedit.exe /dbgsettings SERIAL DEBUGPORT:1 BAUDRATE:115200 2>&1 | Out-String)
-                    if ($LASTEXITCODE -ne 0) { throw "bcdedit /dbgsettings failed: $dbg" }
-                    $debug = (& bcdedit.exe /debug '{current}' on 2>&1 | Out-String)
-                    if ($LASTEXITCODE -ne 0) { throw "bcdedit /debug failed: $debug" }
-                }
-                $guestConfigured = $true
-            }
             $result = @{
                 vm = $vm.Name
                 port_number = 1
                 pipe_path = $port.Path
                 debugger_mode = $port.DebuggerMode.ToString()
-                guest_debug_enabled = $guestConfigured
                 baud_rate = 115200
-                reboot_required = $guestConfigured
                 windbg_arguments = "-k com:pipe,port=$pipePath,baud=115200,reconnect,resets=0"
                 next_steps = @(
+                    'Configure guest BCD debugging separately while the VM is Running, if it is not already enabled.'
                     'Start WinDbg with the returned arguments before starting the VM to catch early boot.'
                     'Do not enable Enhanced Session mode while stopped at a kernel breakpoint.'
                     'Checkpoint before driver testing; kernel debugging does not prevent a bugcheck.'
                 )
             }
         }
+        'debug_guest_prepare' {
+            $vm = Get-ExactVm -Name $request.vm
+            if ($vm.State -ne [Microsoft.HyperV.PowerShell.VMState]::Running) {
+                throw 'The VM must be Running for PowerShell Direct guest configuration. The server will not start it automatically.'
+            }
+            $credential = New-GuestCredential -Request $request
+            $guestResult = Invoke-Command -VMName $vm.Name -Credential $credential -ScriptBlock {
+                $ErrorActionPreference = 'Stop'
+                $dbg = (& bcdedit.exe /dbgsettings SERIAL DEBUGPORT:1 BAUDRATE:115200 2>&1 | Out-String)
+                if ($LASTEXITCODE -ne 0) { throw "bcdedit /dbgsettings failed: $dbg" }
+                $debug = (& bcdedit.exe /debug '{current}' on 2>&1 | Out-String)
+                if ($LASTEXITCODE -ne 0) { throw "bcdedit /debug failed: $debug" }
+                [pscustomobject]@{ debug_settings = $dbg; enable_result = $debug }
+            }
+            $result = @{
+                vm = $vm.Name; guest = $guestResult; guest_debug_enabled = $true
+                reboot_required = $true; automatic_reboot = $false
+            }
+        }
     }
     return $result
+}
+
+function Get-ExactDvdDrive {
+    param(
+        [Parameter(Mandatory)]$Vm,
+        [Parameter(Mandatory)][int]$ControllerNumber,
+        [Parameter(Mandatory)][int]$ControllerLocation
+    )
+    $drives = @(
+        Get-VMDvdDrive -VM $Vm | Where-Object {
+            $_.ControllerNumber -eq $ControllerNumber -and $_.ControllerLocation -eq $ControllerLocation
+        }
+    )
+    if ($drives.Count -ne 1) {
+        throw "Expected one DVD drive at controller $ControllerNumber location $ControllerLocation; found $($drives.Count). The server does not create drives implicitly."
+    }
+    return $drives[0]
+}
+
+function Convert-DvdDrive {
+    param([Parameter(Mandatory)]$Drive)
+    return [ordered]@{
+        controller_number = [int]$Drive.ControllerNumber
+        controller_location = [int]$Drive.ControllerLocation
+        path = $Drive.Path
+        mounted = -not [string]::IsNullOrWhiteSpace([string]$Drive.Path)
+    }
 }
 
 function Invoke-BridgeRequest {

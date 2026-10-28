@@ -10,6 +10,7 @@ $env:HYPERV_MCP_ALLOW_GUEST = 'false'
 $env:HYPERV_MCP_ALLOW_CONSOLE = 'false'
 $env:HYPERV_MCP_ALLOW_SCREENSHOTS = 'false'
 $env:HYPERV_MCP_ALLOW_DEBUGGER = 'false'
+$env:HYPERV_MCP_ALLOW_MEDIA = 'false'
 ```
 
 For PowerShell Direct only, additionally set `HYPERV_MCP_GUEST_USERNAME` and `HYPERV_MCP_GUEST_PASSWORD` in the protected host environment. They are not command-line arguments or tool parameters.
@@ -32,7 +33,8 @@ Example host configuration using Python directly:
         "HYPERV_MCP_ALLOW_GUEST": "false",
         "HYPERV_MCP_ALLOW_CONSOLE": "false",
         "HYPERV_MCP_ALLOW_SCREENSHOTS": "false",
-        "HYPERV_MCP_ALLOW_DEBUGGER": "false"
+        "HYPERV_MCP_ALLOW_DEBUGGER": "false",
+        "HYPERV_MCP_ALLOW_MEDIA": "false"
       }
     }
   }

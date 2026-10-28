@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import binascii
 import re
+import time
 import uuid
 from typing import Any, Callable, TypeVar
 
@@ -12,6 +13,7 @@ from .audit import AuditLogger
 from .backend import HyperVBackend
 from .config import Settings
 from .errors import HyperVError, PolicyError, ValidationError
+from .serial import SerialManager
 
 MAX_GUEST_FILE_BYTES = 8 * 1024 * 1024
 KEY_NAMES = frozenset(
@@ -47,10 +49,12 @@ class HyperVService:
         backend: HyperVBackend,
         settings: Settings | None = None,
         audit: AuditLogger | None = None,
+        serial: SerialManager | None = None,
     ) -> None:
         self.backend = backend
         self.settings = settings or Settings()
         self.audit = audit or AuditLogger(self.settings.audit_log)
+        self.serial = serial if serial is not None else SerialManager()
 
     def _vm(self, name: str) -> str:
         name = _text(name, "vm_name", 256)
@@ -92,6 +96,50 @@ class HyperVService:
         self.audit.record(operation, vm_name, "success")
         return result
 
+    def _serial_action(
+        self, operation: str, vm_name: str, action: Callable[[], dict[str, Any]]
+    ) -> dict[str, Any]:
+        try:
+            result = action()
+        except HyperVError as exc:
+            self.audit.record(operation, vm_name, "error", exc.code)
+            raise
+        except Exception:
+            self.audit.record(operation, vm_name, "error", "unexpected_error")
+            raise
+        self.audit.record(operation, vm_name, "success")
+        return {"vm": vm_name, **result}
+
+    def vm_wait(
+        self,
+        vm_name: str,
+        states: list[str],
+        timeout_seconds: int = 60,
+        poll_interval_ms: int = 500,
+    ) -> dict[str, Any]:
+        name = self._vm(vm_name)
+        if not isinstance(states, list) or not states or len(states) > 12:
+            raise ValidationError("states must contain between one and twelve VM state names.")
+        if any(not isinstance(state, str) or not state.strip() for state in states):
+            raise ValidationError("states must contain non-empty strings.")
+        timeout = _integer(timeout_seconds, "timeout_seconds", 1, 900)
+        interval = _integer(poll_interval_ms, "poll_interval_ms", 100, 10_000)
+        deadline = time.monotonic() + timeout
+        polls = 0
+        while True:
+            result = self.get_vm(name)
+            polls += 1
+            current = str(result["vm"]["state"])
+            if current.casefold() in {state.strip().casefold() for state in states}:
+                return {"matched": True, "polls": polls, "vm": result["vm"]}
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {
+                    "matched": False, "polls": polls, "vm": result["vm"],
+                    "message": "Timed out waiting for the requested state. No power action was taken.",
+                }
+            time.sleep(min(interval / 1000, remaining))
+
     def host_status(self) -> dict[str, Any]:
         return self._run("host_status", "host_status")
 
@@ -111,8 +159,10 @@ class HyperVService:
 
     def power(self, vm_name: str, action: str, confirm_vm: str | None = None) -> dict[str, Any]:
         name = self._write(vm_name, self.settings.allow_power, "HYPERV_MCP_ALLOW_POWER")
-        if action not in {"start", "shutdown", "save", "turn_off", "reset"}:
-            raise ValidationError("action must be start, shutdown, save, turn_off, or reset.")
+        if action not in {"start", "shutdown", "save", "pause", "resume", "turn_off", "reset"}:
+            raise ValidationError(
+                "action must be start, shutdown, save, pause, resume, turn_off, or reset."
+            )
         if action in {"turn_off", "reset"}:
             self._confirm(confirm_vm or "", name, "confirm_vm")
         return self._run(
@@ -191,6 +241,53 @@ class HyperVService:
         payload["max_output_chars"] = self.settings.max_output_chars
         return self._run("guest_exec", "guest_exec", payload, vm_name=vm_name)
 
+    def guest_status(self, vm_name: str) -> dict[str, Any]:
+        return self._run(
+            "guest_status", "guest_status", self._guest(vm_name), vm_name=vm_name
+        )
+
+    def guest_processes(self, vm_name: str, name_contains: str = "") -> dict[str, Any]:
+        payload = self._guest(vm_name)
+        payload["name_contains"] = _text(
+            name_contains, "name_contains", 256, allow_empty=True
+        )
+        return self._run("guest_processes", "guest_processes", payload, vm_name=vm_name)
+
+    def guest_services(
+        self, vm_name: str, name_contains: str = "", include_stopped: bool = False
+    ) -> dict[str, Any]:
+        payload = self._guest(vm_name)
+        payload["name_contains"] = _text(
+            name_contains, "name_contains", 256, allow_empty=True
+        )
+        if not isinstance(include_stopped, bool):
+            raise ValidationError("include_stopped must be a boolean value.")
+        payload["include_stopped"] = include_stopped
+        return self._run("guest_services", "guest_services", payload, vm_name=vm_name)
+
+    def guest_events(
+        self,
+        vm_name: str,
+        log_name: str = "System",
+        max_events: int = 30,
+        event_id: int | None = None,
+        level: int | None = None,
+        hours: int = 72,
+    ) -> dict[str, Any]:
+        payload = self._guest(vm_name)
+        if log_name not in {"System", "Application", "Security", "Setup"}:
+            raise ValidationError("log_name must be System, Application, Security, or Setup.")
+        payload.update(
+            log_name=log_name,
+            max_events=_integer(max_events, "max_events", 1, 200),
+            hours=_integer(hours, "hours", 1, 24 * 365),
+        )
+        if event_id is not None:
+            payload["event_id"] = _integer(event_id, "event_id", 0, 65_535)
+        if level is not None:
+            payload["level"] = _integer(level, "level", 1, 5)
+        return self._run("guest_events", "guest_events", payload, vm_name=vm_name)
+
     def guest_read_file(
         self, vm_name: str, guest_path: str, max_bytes: int = 1_048_576
     ) -> dict[str, Any]:
@@ -258,6 +355,86 @@ class HyperVService:
             "console_press_keys", "console_press_keys", {"vm": vm, "keys": normalized}, vm_name=vm
         )
 
+    def console_key_state(self, vm_name: str, key: str, down: bool) -> dict[str, Any]:
+        vm = self._write(
+            vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
+        )
+        normalized = str(key).casefold()
+        if normalized not in KEY_NAMES:
+            raise ValidationError("key is not a supported key name.")
+        if not isinstance(down, bool):
+            raise ValidationError("down must be a boolean value.")
+        return self._run(
+            "console_key_state", "console_key_state",
+            {"vm": vm, "key": normalized, "down": down}, vm_name=vm,
+        )
+
+    def console_mouse_buttons(
+        self,
+        vm_name: str,
+        left: bool = False,
+        right: bool = False,
+        middle: bool = False,
+    ) -> dict[str, Any]:
+        vm = self._write(
+            vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
+        )
+        if not all(isinstance(value, bool) for value in (left, right, middle)):
+            raise ValidationError("Mouse button states must be boolean values.")
+        return self._run(
+            "console_mouse_buttons", "console_mouse_buttons",
+            {"vm": vm, "left": left, "right": right, "middle": middle}, vm_name=vm,
+        )
+
+    def console_wait(self, milliseconds: int) -> dict[str, Any]:
+        duration = _integer(milliseconds, "milliseconds", 1, 30_000)
+        time.sleep(duration / 1000)
+        return {"waited_ms": duration}
+
+    def console_batch(self, vm_name: str, actions: list[dict[str, Any]]) -> dict[str, Any]:
+        self._vm(vm_name)
+        if not isinstance(actions, list) or not 1 <= len(actions) <= 32:
+            raise ValidationError("actions must contain between one and 32 console actions.")
+        results = []
+        allowed_fields = {
+            "text": {"text"}, "keys": {"keys"}, "click": {"button", "x", "y"},
+            "move": {"x", "y"}, "scroll": {"delta"}, "wait": {"milliseconds"},
+            "ctrl_alt_delete": set(),
+        }
+        for index, action in enumerate(actions):
+            if not isinstance(action, dict) or not isinstance(action.get("type"), str):
+                raise ValidationError(f"actions[{index}] must have a string type.")
+            kind = action["type"]
+            if kind not in allowed_fields:
+                raise ValidationError(f"Unsupported console action type: {kind!r}.")
+            unexpected = set(action) - {"type"} - allowed_fields[kind]
+            if unexpected:
+                raise ValidationError(f"actions[{index}] contains unsupported fields.")
+        for index, action in enumerate(actions):
+            kind = action["type"]
+            arguments = {key: value for key, value in action.items() if key != "type"}
+            if kind == "text":
+                result = self.console_type_text(vm_name, arguments.get("text", ""))
+            elif kind == "keys":
+                result = self.console_press_keys(vm_name, arguments.get("keys", []))
+            elif kind == "click":
+                result = self.console_click(
+                    vm_name, arguments.get("button", "left"),
+                    arguments.get("x"), arguments.get("y"),
+                )
+            elif kind == "move":
+                result = self.console_mouse_move(
+                    vm_name, arguments.get("x"), arguments.get("y")
+                )
+            elif kind == "scroll":
+                result = self.console_scroll(vm_name, arguments.get("delta"))
+            elif kind == "wait":
+                result = self.console_wait(arguments.get("milliseconds"))
+            elif kind == "ctrl_alt_delete":
+                result = self.console_ctrl_alt_delete(vm_name)
+            results.append({"index": index, "type": kind, "result": result})
+        return {"vm": vm_name, "actions_completed": len(results), "results": results}
+
     def console_ctrl_alt_delete(self, vm_name: str) -> dict[str, Any]:
         vm = self._write(
             vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
@@ -317,7 +494,6 @@ class HyperVService:
         vm_name: str,
         pipe_name: str,
         confirm_vm: str,
-        configure_guest: bool = False,
     ) -> dict[str, Any]:
         vm = self._write(
             vm_name, self.settings.allow_debugger, "HYPERV_MCP_ALLOW_DEBUGGER"
@@ -329,20 +505,139 @@ class HyperVService:
                 "pipe_name must contain only letters, digits, dot, underscore, or hyphen."
             )
         self._confirm(confirm_vm, vm, "confirm_vm")
-        if not isinstance(configure_guest, bool):
-            raise ValidationError("configure_guest must be a boolean value.")
-        payload: dict[str, Any] = {
-            "vm": vm,
-            "pipe_name": pipe_name,
-            "configure_guest": configure_guest,
-        }
-        if configure_guest:
-            if not self.settings.guest_username or not self.settings.guest_password:
-                raise PolicyError(
-                    "configure_guest requires guest credentials in the server environment."
-                )
-            payload.update(
-                username=self.settings.guest_username,
-                password=self.settings.guest_password,
+        return self._run(
+            "debug_serial_prepare", "debug_serial_prepare",
+            {"vm": vm, "pipe_name": pipe_name}, vm_name=vm,
+        )
+
+    def debug_guest_prepare(self, vm_name: str, confirm_vm: str) -> dict[str, Any]:
+        vm = self._write(
+            vm_name, self.settings.allow_debugger, "HYPERV_MCP_ALLOW_DEBUGGER"
+        )
+        self._confirm(confirm_vm, vm, "confirm_vm")
+        if not self.settings.guest_username or not self.settings.guest_password:
+            raise PolicyError(
+                "Guest debug preparation requires guest credentials in the server environment."
             )
-        return self._run("debug_serial_prepare", "debug_serial_prepare", payload, vm_name=vm)
+        return self._run(
+            "debug_guest_prepare", "debug_guest_prepare",
+            {
+                "vm": vm,
+                "username": self.settings.guest_username,
+                "password": self.settings.guest_password,
+            },
+            vm_name=vm,
+        )
+
+    def serial_status(self, vm_name: str) -> dict[str, Any]:
+        name = self._vm(vm_name)
+        result = self._run("serial_status", "debug_serial_status", {"vm": name}, vm_name=name)
+        result["console"] = self.serial.status(name)
+        return result
+
+    def serial_connect(
+        self, vm_name: str, pipe_name: str, log_path: str, confirm_vm: str
+    ) -> dict[str, Any]:
+        vm = self._write(
+            vm_name, self.settings.allow_debugger, "HYPERV_MCP_ALLOW_DEBUGGER"
+        )
+        self._confirm(confirm_vm, vm, "confirm_vm")
+        name = _text(pipe_name, "pipe_name", 64)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name):
+            raise ValidationError("pipe_name contains unsupported characters.")
+        log = self._serial_log(log_path)
+        status = self.serial_status(vm)
+        expected = rf"\\.\pipe\{name}"
+        matching = [
+            port for port in status.get("com_ports", [])
+            if port.get("number") == 1 and str(port.get("path", "")).casefold() == expected.casefold()
+        ]
+        if len(matching) != 1:
+            raise ValidationError("pipe_name must exactly match the path configured on the VM's COM1 port.")
+        if str(status.get("state", "")).casefold() != "running":
+            raise ValidationError("The VM must be Running before attaching to its serial pipe.")
+        return self._serial_action(
+            "serial_connect", vm, lambda: self.serial.connect(vm, name, log)
+        )
+
+    def serial_read(self, vm_name: str, tail_chars: int = 32_768) -> dict[str, Any]:
+        vm = self._write(
+            vm_name, self.settings.allow_debugger, "HYPERV_MCP_ALLOW_DEBUGGER"
+        )
+        tail = _integer(tail_chars, "tail_chars", 1, 262_144)
+        return self._serial_action("serial_read", vm, lambda: self.serial.read(vm, tail))
+
+    def serial_send(
+        self, vm_name: str, text: str, append_newline: bool = True
+    ) -> dict[str, Any]:
+        vm = self._write(
+            vm_name, self.settings.allow_debugger, "HYPERV_MCP_ALLOW_DEBUGGER"
+        )
+        value = _text(text, "text", 32_768, allow_empty=True)
+        if not isinstance(append_newline, bool):
+            raise ValidationError("append_newline must be a boolean value.")
+        data = value + ("\r\n" if append_newline else "")
+        return self._serial_action("serial_send", vm, lambda: self.serial.send(vm, data))
+
+    def serial_disconnect(self, vm_name: str) -> dict[str, Any]:
+        vm = self._write(
+            vm_name, self.settings.allow_debugger, "HYPERV_MCP_ALLOW_DEBUGGER"
+        )
+        return self._serial_action(
+            "serial_disconnect", vm, lambda: self.serial.disconnect(vm)
+        )
+
+    @staticmethod
+    def _serial_log(path: str) -> str:
+        value = _text(path, "log_path", 32_768)
+        if not value.lower().endswith(".log"):
+            raise ValidationError("log_path must end with .log.")
+        import os
+        from pathlib import Path
+
+        full = Path(os.path.abspath(os.path.expandvars(os.path.expanduser(value))))
+        return str(full)
+
+    def media_list(self, vm_name: str) -> dict[str, Any]:
+        name = self._vm(vm_name)
+        return self._run("media_list", "media_list", {"vm": name}, vm_name=name)
+
+    def media_mount(
+        self,
+        vm_name: str,
+        iso_path: str,
+        controller_location: int,
+        confirm_vm: str,
+        boot_first: bool = False,
+        controller_number: int = 0,
+    ) -> dict[str, Any]:
+        vm = self._write(vm_name, self.settings.allow_media, "HYPERV_MCP_ALLOW_MEDIA")
+        self._confirm(confirm_vm, vm, "confirm_vm")
+        path = _text(iso_path, "iso_path", 32_768)
+        if not path.lower().endswith(".iso"):
+            raise ValidationError("iso_path must name an .iso file.")
+        if not isinstance(boot_first, bool):
+            raise ValidationError("boot_first must be a boolean value.")
+        return self._run(
+            "media_mount", "media_mount",
+            {"vm": vm, "path": path, "controller_number": _integer(
+                controller_number, "controller_number", 0, 1
+            ), "controller_location": _integer(
+                controller_location, "controller_location", 0, 63
+            ), "boot_first": boot_first},
+            vm_name=vm,
+        )
+
+    def media_eject(
+        self, vm_name: str, controller_location: int, confirm_vm: str, controller_number: int = 0
+    ) -> dict[str, Any]:
+        vm = self._write(vm_name, self.settings.allow_media, "HYPERV_MCP_ALLOW_MEDIA")
+        self._confirm(confirm_vm, vm, "confirm_vm")
+        return self._run(
+            "media_eject", "media_eject",
+            {"vm": vm, "controller_number": _integer(
+                controller_number, "controller_number", 0, 1
+            ), "controller_location": _integer(
+                controller_location, "controller_location", 0, 63
+            )}, vm_name=vm,
+        )

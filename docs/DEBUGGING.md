@@ -11,26 +11,26 @@ The host already has `WinDbgX.exe` and the WDK `kdnet.exe`/`VerifiedNICList.xml`
 ## Serial/named-pipe workflow
 
 1. Create and verify a checkpoint before changing debug settings.
-2. Shut down the guest cleanly. The MCP does not stop it for you.
-3. Authorize the operation explicitly. With `HYPERV_MCP_ALLOW_DEBUGGER=true` and the VM allowlisted, call:
-
-```json
-{
-  "vm_name": "NORTH-Test",
-  "pipe_name": "north-test-kd",
-  "confirm_vm": "NORTH-Test",
-  "configure_guest": true
-}
-```
-
-`configure_guest=true` uses the environment guest credentials and executes only fixed elevated guest commands equivalent to:
+2. If serial debugging is not already enabled, leave the VM Running and call `debug_guest_prepare` with `vm_name`, `confirm_vm`, and `HYPERV_MCP_ALLOW_DEBUGGER=true`. This uses PowerShell Direct and the environment guest credentials. Its fixed elevated guest commands are equivalent to:
 
 ```bat
 bcdedit /dbgsettings SERIAL DEBUGPORT:1 BAUDRATE:115200
 bcdedit /debug {current} on
 ```
 
-It changes the guest boot configuration. Reboot remains manual. The tool returns WinDbg arguments equivalent to:
+The tool does not reboot the guest. A deliberate later reboot is required.
+3. Shut down the guest cleanly. The MCP does not stop it for you.
+4. Call `debug_serial_prepare` with an explicit pipe name and confirmation:
+
+```json
+{
+  "vm_name": "NORTH-Test",
+  "pipe_name": "north-test-kd",
+  "confirm_vm": "NORTH-Test"
+}
+```
+
+This host-side operation requires the VM to be Off. Guest configuration is intentionally separate because PowerShell Direct cannot connect to a stopped guest. The tool returns WinDbg arguments equivalent to:
 
 ```bat
 WinDbgX.exe -k com:pipe,port=\\.\pipe\north-test-kd,baud=115200,reconnect,resets=0

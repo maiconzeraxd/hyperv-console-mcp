@@ -16,9 +16,15 @@ Set `HYPERV_MCP_GUEST_USERNAME` and `HYPERV_MCP_GUEST_PASSWORD` only in a protec
 
 File paths must be absolute inside the guest. Reads default to 1 MiB and writes/reads are capped at 8 MiB. Writes use a temporary file followed by replacement. Existing files are never overwritten unless the caller confirms the exact path. A host timeout does not prove that the guest command stopped.
 
-## Kernel debugging
+## Kernel debugging and serial consoles
 
-Serial debug preparation modifies the VM COM port and, optionally, guest boot configuration. It is gated independently and never automatically stops or restarts the VM. KDNET configuration, network attachment, firewall modification, and guest key generation are not automatic. Keep debugger keys private and isolate driver-test VMs from untrusted networks.
+Serial debug preparation modifies the VM COM port while the VM is Off. Guest BCD configuration is a separate operation requiring a Running VM and PowerShell Direct. Both are gated independently and never automatically stop or restart the VM. KDNET configuration, network attachment, firewall modification, and guest key generation are not automatic. Keep debugger keys private and isolate driver-test VMs from untrusted networks.
+
+Serial-console attachment uses a dedicated local named-pipe reader, not PowerShell Direct. It can retain and persist guest serial output, which may contain sensitive information; choose a protected `.log` path and apply normal host access controls. A serial console and WinDbg cannot share the same pipe attachment. Detach the reader before launching the debugger. `serial_send` is real guest input, not a sandboxed diagnostic command.
+
+## Media and boot
+
+ISO mount/eject requires `HYPERV_MCP_ALLOW_MEDIA`, an allowlisted VM, exact VM confirmation, an existing DVD drive, and the VM to be Off. Boot-first selection changes VM firmware/BIOS configuration. The server never stops or starts the VM to complete these operations.
 
 ## Capture
 

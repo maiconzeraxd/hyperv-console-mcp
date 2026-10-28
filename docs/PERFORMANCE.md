@@ -18,6 +18,8 @@ The Python backend holds one local Windows PowerShell worker open. Requests are 
 
 PowerShell Direct still constructs a remoting session per guest command. It is the safe initial transport for isolated guests, but it is not claimed to be faster than a persistent SSH session. Do not enable SSH solely for OOBE or kernel debugging: neither use case can depend on a running guest userland.
 
+Serial-console reads do not occupy the PowerShell worker. Each attachment owns a cancellable Windows named-pipe handle and a dedicated reader thread. It retains at most 1,048,576 characters in memory and appends output to the caller-selected local `.log` file. This prevents a quiet or disconnected COM pipe from stalling unrelated VM operations.
+
 ## Benchmarks
 
 The test suite includes a real persistent-worker test using a local fake PowerShell bridge, so the measurement does not touch Hyper-V. Run it with `pytest -s tests/test_persistent_backend.py`. The cold request includes PowerShell startup; the following nine requests reuse that process. On the development host, one measured run took 0.153 seconds cold and 0.002 seconds for nine warm calls. These are fake-worker figures, not a claim about Hyper-V or guest latency. A future SSH adapter must be compared on the same hardware and workload before being made the default.

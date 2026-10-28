@@ -8,13 +8,12 @@ version = "0.1.0"
 description = "A local, policy-gated MCP server for Hyper-V management, guest automation, and console input."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "hyperv-console-mcp contributors" }]
 keywords = ["hyper-v", "mcp", "windows", "virtualization", "automation"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Win32 (MS Windows)",
-  "License :: OSI Approved :: MIT License",
   "Operating System :: Microsoft :: Windows",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",

@@ -40,6 +40,7 @@ class Settings:
     allow_console: bool = False
     allow_screenshots: bool = False
     allow_debugger: bool = False
+    allow_media: bool = False
     guest_username: str | None = None
     guest_password: str | None = field(default=None, repr=False)
     timeout_seconds: float = 90.0
@@ -64,6 +65,7 @@ class Settings:
             allow_console=_boolean(env, "HYPERV_MCP_ALLOW_CONSOLE"),
             allow_screenshots=_boolean(env, "HYPERV_MCP_ALLOW_SCREENSHOTS"),
             allow_debugger=_boolean(env, "HYPERV_MCP_ALLOW_DEBUGGER"),
+            allow_media=_boolean(env, "HYPERV_MCP_ALLOW_MEDIA"),
             guest_username=env.get("HYPERV_MCP_GUEST_USERNAME") or None,
             guest_password=env.get("HYPERV_MCP_GUEST_PASSWORD") or None,
             timeout_seconds=float(

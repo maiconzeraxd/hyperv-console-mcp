@@ -23,6 +23,7 @@ async def main() -> None:
         HYPERV_MCP_ALLOW_CONSOLE="false",
         HYPERV_MCP_ALLOW_SCREENSHOTS="false",
         HYPERV_MCP_ALLOW_DEBUGGER="false",
+        HYPERV_MCP_ALLOW_MEDIA="false",
     )
     parameters = StdioServerParameters(
         command=sys.executable,
@@ -34,7 +35,7 @@ async def main() -> None:
         async with ClientSession(reader, writer) as session:
             await session.initialize()
             tools = await session.list_tools()
-            assert len(tools.tools) == 21, len(tools.tools)
+            assert len(tools.tools) == 38, len(tools.tools)
             denied = await session.call_tool(
                 "vm_power", {"vm_name": "NORTH-Test", "action": "start"}
             )

@@ -73,8 +73,17 @@ def create_server(
         return await _invoke(service.get_vm, vm_name)
 
     @tool(
+        "vm_wait", annotations=READ_ONLY,
+        description="Poll until a VM reaches one of the requested states. Returns matched=false on timeout and never changes power state.",
+    )
+    async def vm_wait(
+        vm_name: str, states: list[str], timeout_seconds: int = 60, poll_interval_ms: int = 500
+    ) -> dict[str, Any]:
+        return await _invoke(service.vm_wait, vm_name, states, timeout_seconds, poll_interval_ms)
+
+    @tool(
         "vm_power", annotations=MUTATION,
-        description="Start, gracefully shut down, save, forcibly turn off, or reset a VM. "
+        description="Start, gracefully shut down, save, pause, resume, forcibly turn off, or reset a VM. "
         "turn_off/reset require confirm_vm equal to vm_name. Requires ALLOW_POWER and an allowlist.",
     )
     async def vm_power(vm_name: str, action: str, confirm_vm: str | None = None) -> dict[str, Any]:
@@ -111,6 +120,45 @@ def create_server(
     ) -> dict[str, Any]:
         return await _invoke(
             service.delete_checkpoint, vm_name, snapshot_id, confirm_vm, confirm_snapshot_id
+        )
+
+    @tool(
+        "guest_status", annotations=READ_ONLY,
+        description="Read guest OS, boot time, memory, system-drive free space, and kernel debug settings through PowerShell Direct.",
+    )
+    async def guest_status(vm_name: str) -> dict[str, Any]:
+        return await _invoke(service.guest_status, vm_name)
+
+    @tool(
+        "guest_processes", annotations=READ_ONLY,
+        description="List up to 200 guest processes, optionally filtered by process name. Requires ALLOW_GUEST and guest credentials.",
+    )
+    async def guest_processes(vm_name: str, name_contains: str = "") -> dict[str, Any]:
+        return await _invoke(service.guest_processes, vm_name, name_contains)
+
+    @tool(
+        "guest_services", annotations=READ_ONLY,
+        description="List up to 200 guest services filtered by name; stopped services are excluded by default.",
+    )
+    async def guest_services(
+        vm_name: str, name_contains: str = "", include_stopped: bool = False
+    ) -> dict[str, Any]:
+        return await _invoke(service.guest_services, vm_name, name_contains, include_stopped)
+
+    @tool(
+        "guest_events", annotations=READ_ONLY,
+        description="Read recent System, Application, Security, or Setup event records with optional event ID and level filters.",
+    )
+    async def guest_events(
+        vm_name: str,
+        log_name: str = "System",
+        max_events: int = 30,
+        event_id: int | None = None,
+        level: int | None = None,
+        hours: int = 72,
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.guest_events, vm_name, log_name, max_events, event_id, level, hours
         )
 
     @tool(
@@ -169,6 +217,29 @@ def create_server(
         return await _invoke(service.console_press_keys, vm_name, keys)
 
     @tool(
+        "console_key_state", annotations=MUTATION,
+        description="Explicitly press or release one supported key. Release held keys when finished; prefer console_press_keys for ordinary chords.",
+    )
+    async def console_key_state(vm_name: str, key: str, down: bool) -> dict[str, Any]:
+        return await _invoke(service.console_key_state, vm_name, key, down)
+
+    @tool(
+        "console_mouse_buttons", annotations=MUTATION,
+        description="Set explicit left, right, and middle synthetic-mouse button states for drag operations.",
+    )
+    async def console_mouse_buttons(
+        vm_name: str, left: bool = False, right: bool = False, middle: bool = False
+    ) -> dict[str, Any]:
+        return await _invoke(service.console_mouse_buttons, vm_name, left, right, middle)
+
+    @tool(
+        "console_batch", annotations=MUTATION,
+        description="Run up to 32 ordered text, key-chord, click, move, scroll, wait, or Ctrl+Alt+Delete actions. Stops at the first failure.",
+    )
+    async def console_batch(vm_name: str, actions: list[dict[str, Any]]) -> dict[str, Any]:
+        return await _invoke(service.console_batch, vm_name, actions)
+
+    @tool(
         "console_ctrl_alt_delete", annotations=MUTATION,
         description="Send the Hyper-V secure-attention sequence to the guest.",
     )
@@ -199,6 +270,82 @@ def create_server(
         return await _invoke(service.console_scroll, vm_name, delta)
 
     @tool(
+        "media_list", annotations=READ_ONLY,
+        description="List VM DVD drives, mounted ISO paths, controller locations, generation, and power state.",
+    )
+    async def media_list(vm_name: str) -> dict[str, Any]:
+        return await _invoke(service.media_list, vm_name)
+
+    @tool(
+        "media_mount", annotations=MUTATION,
+        description="Mount an existing host ISO in an existing VM DVD drive while the VM is Off, optionally making it first boot device. "
+        "Never stops the VM automatically. Requires ALLOW_MEDIA and confirm_vm equal to vm_name.",
+    )
+    async def media_mount(
+        vm_name: str,
+        iso_path: str,
+        controller_location: int,
+        confirm_vm: str,
+        boot_first: bool = False,
+        controller_number: int = 0,
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.media_mount, vm_name, iso_path, controller_location,
+            confirm_vm, boot_first, controller_number,
+        )
+
+    @tool(
+        "media_eject", annotations=MUTATION,
+        description="Eject an existing VM DVD drive while the VM is Off. Requires ALLOW_MEDIA and confirm_vm equal to vm_name.",
+    )
+    async def media_eject(
+        vm_name: str, controller_location: int, confirm_vm: str, controller_number: int = 0
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.media_eject, vm_name, controller_location, confirm_vm, controller_number
+        )
+
+    @tool(
+        "serial_status", annotations=READ_ONLY,
+        description="Read COM1 configuration and whether this server has an attached serial-console reader.",
+    )
+    async def serial_status(vm_name: str) -> dict[str, Any]:
+        return await _invoke(service.serial_status, vm_name)
+
+    @tool(
+        "serial_connect", annotations=MUTATION,
+        description="Attach a dedicated reader to the existing COM1 named pipe of a Running VM and append output to a local .log file. "
+        "Requires ALLOW_DEBUGGER and confirm_vm; does not configure the port or guest.",
+    )
+    async def serial_connect(
+        vm_name: str, pipe_name: str, log_path: str, confirm_vm: str
+    ) -> dict[str, Any]:
+        return await _invoke(service.serial_connect, vm_name, pipe_name, log_path, confirm_vm)
+
+    @tool(
+        "serial_read", annotations=READ_ONLY,
+        description="Read the retained tail of an attached serial console. Requires ALLOW_DEBUGGER.",
+    )
+    async def serial_read(vm_name: str, tail_chars: int = 32_768) -> dict[str, Any]:
+        return await _invoke(service.serial_read, vm_name, tail_chars)
+
+    @tool(
+        "serial_send", annotations=MUTATION,
+        description="Write UTF-8 text to an attached COM1 serial console, with CRLF appended by default.",
+    )
+    async def serial_send(
+        vm_name: str, text: str, append_newline: bool = True
+    ) -> dict[str, Any]:
+        return await _invoke(service.serial_send, vm_name, text, append_newline)
+
+    @tool(
+        "serial_disconnect", annotations=MUTATION,
+        description="Detach this server's serial reader and close its pipe handle without changing the VM COM port.",
+    )
+    async def serial_disconnect(vm_name: str) -> dict[str, Any]:
+        return await _invoke(service.serial_disconnect, vm_name)
+
+    @tool(
         "debug_serial_status", annotations=READ_ONLY,
         description="Read Hyper-V COM port debug configuration and local WinDbg/KDNET availability.",
     )
@@ -207,18 +354,23 @@ def create_server(
 
     @tool(
         "debug_serial_prepare", annotations=MUTATION,
-        description="Prepare COM1 kernel debugging over a local named pipe. VM must already be Off; it is never stopped automatically. "
-        "Optionally enable guest serial debugging with fixed bcdedit commands; reboot remains manual. Requires ALLOW_DEBUGGER and confirm_vm.",
+        description="Configure COM1 kernel debugging over a local named pipe while the VM is Off. "
+        "Guest BCD settings are a separate Running-VM operation. Never stops or reboots automatically. Requires ALLOW_DEBUGGER and confirm_vm.",
     )
     async def debug_serial_prepare(
         vm_name: str,
         pipe_name: str,
         confirm_vm: str,
-        configure_guest: bool = False,
     ) -> dict[str, Any]:
-        return await _invoke(
-            service.debug_serial_prepare, vm_name, pipe_name, confirm_vm, configure_guest
-        )
+        return await _invoke(service.debug_serial_prepare, vm_name, pipe_name, confirm_vm)
+
+    @tool(
+        "debug_guest_prepare", annotations=MUTATION,
+        description="Enable fixed COM1/115200 guest BCD debugging through PowerShell Direct while the VM is Running. "
+        "Requires ALLOW_DEBUGGER, guest credentials, and confirm_vm. A deliberate later reboot is required.",
+    )
+    async def debug_guest_prepare(vm_name: str, confirm_vm: str) -> dict[str, Any]:
+        return await _invoke(service.debug_guest_prepare, vm_name, confirm_vm)
 
     @mcp.tool(
         name="console_screenshot",
