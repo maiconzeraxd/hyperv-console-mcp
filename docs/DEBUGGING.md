@@ -18,7 +18,7 @@ bcdedit /dbgsettings SERIAL DEBUGPORT:1 BAUDRATE:115200
 bcdedit /debug {current} on
 ```
 
-The tool does not reboot the guest. A deliberate later reboot is required.
+The tool does not reboot the guest. A deliberate later reboot is required. Before running either BCD command, it checks Secure Boot: if enabled, it fails without changing BCD. If the platform does not support Secure Boot, preparation can continue. Any other preflight error is fail-closed. Disable Secure Boot deliberately, while the VM is Off, if that is the intended lab configuration.
 3. Shut down the guest cleanly. The MCP does not stop it for you.
 4. Call `debug_serial_prepare` with an explicit pipe name and confirmation:
 

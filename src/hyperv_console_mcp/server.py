@@ -6,13 +6,14 @@ import json
 import logging
 import sys
 from functools import partial
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Literal, TypeVar
 
 import anyio
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
+from . import __version__
 from .backend import PowerShellBackend
 from .capture import VMConnectCapture
 from .config import Settings
@@ -43,7 +44,7 @@ def create_server(
     capture = capture or VMConnectCapture()
     mcp = MCPServer(
         name="hyperv-console-mcp",
-        version="0.1.0",
+        version=__version__,
         instructions=(
             "Manage only explicitly allowed Hyper-V VMs. Read state before acting. "
             "Forced power, checkpoint restore/deletion, and file overwrite need exact "
@@ -86,7 +87,11 @@ def create_server(
         description="Start, gracefully shut down, save, pause, resume, forcibly turn off, or reset a VM. "
         "turn_off/reset require confirm_vm equal to vm_name. Requires ALLOW_POWER and an allowlist.",
     )
-    async def vm_power(vm_name: str, action: str, confirm_vm: str | None = None) -> dict[str, Any]:
+    async def vm_power(
+        vm_name: str,
+        action: Literal["start", "shutdown", "save", "pause", "resume", "turn_off", "reset"],
+        confirm_vm: str | None = None,
+    ) -> dict[str, Any]:
         return await _invoke(service.power, vm_name, action, confirm_vm)
 
     @tool("checkpoint_list", annotations=READ_ONLY, description="List checkpoint IDs, names, parents, and creation times.")
@@ -151,7 +156,7 @@ def create_server(
     )
     async def guest_events(
         vm_name: str,
-        log_name: str = "System",
+        log_name: Literal["System", "Application", "Security", "Setup"] = "System",
         max_events: int = 30,
         event_id: int | None = None,
         level: int | None = None,
@@ -171,10 +176,10 @@ def create_server(
 
     @tool(
         "guest_read_file", annotations=READ_ONLY,
-        description="Read an absolute guest file path as base64, with SHA-256. Default limit 1 MiB; maximum 8 MiB.",
+        description="Read an absolute guest file path as base64, with SHA-256. Default limit 64 KiB; maximum 8 MiB. For large files, request bounded chunks through the lab APIs rather than inflating model context.",
     )
     async def guest_read_file(
-        vm_name: str, guest_path: str, max_bytes: int = 1_048_576
+        vm_name: str, guest_path: str, max_bytes: int = 65_536
     ) -> dict[str, Any]:
         return await _invoke(service.guest_read_file, vm_name, guest_path, max_bytes)
 
@@ -196,6 +201,45 @@ def create_server(
         )
 
     @tool(
+        "lab_init", annotations=MUTATION,
+        description="Install or verify fixed lab tools in C:\\DriverLab and create package/run/evidence directories. Never executes a payload. Requires confirm_vm.",
+    )
+    async def lab_init(vm_name: str, confirm_vm: str) -> dict[str, Any]:
+        return await _invoke(service.lab_init, vm_name, confirm_vm)
+
+    @tool("lab_diagnostics", annotations=READ_ONLY, description="Read guest boot, Secure Boot, VBS/HVCI, test-signing, debugger, disk, and crash-dump configuration.")
+    async def lab_diagnostics(vm_name: str) -> dict[str, Any]:
+        return await _invoke(service.lab_diagnostics, vm_name)
+
+    @tool(
+        "lab_stage", annotations=MUTATION,
+        description="Stage a hash-verified package from a subdirectory of HYPERV_MCP_LAB_ROOT. Supports chunked large files and never executes staged content.",
+    )
+    async def lab_stage(vm_name: str, source_directory: str, package_id: str | None = None) -> dict[str, Any]:
+        return await _invoke(service.lab_stage, vm_name, source_directory, package_id)
+
+    @tool("lab_verify", annotations=READ_ONLY, description="Re-verify all package files and the exact manifest SHA-256 in the guest without executing the package.")
+    async def lab_verify(vm_name: str, package_id: str, expected_manifest_sha256: str) -> dict[str, Any]:
+        return await _invoke(service.lab_verify, vm_name, package_id, expected_manifest_sha256)
+
+    @tool(
+        "lab_collect", annotations=MUTATION,
+        description="Collect a new run's logs, events, diagnostics and dumps into HYPERV_MCP_EVIDENCE_ROOT. A kernel dump is opt-in; no new test is started.",
+    )
+    async def lab_collect(
+        vm_name: str, package_id: str, run_id: str, include_kernel_dump: bool = False
+    ) -> dict[str, Any]:
+        return await _invoke(service.lab_collect, vm_name, package_id, run_id, include_kernel_dump)
+
+    @tool("events_snapshot", annotations=READ_ONLY, description="Read recent operation lifecycle events from this MCP instance, without commands, passwords, typed text, or file contents.")
+    async def events_snapshot(after_sequence: int = 0) -> dict[str, Any]:
+        from .events import EVENTS
+        if not isinstance(after_sequence, int) or isinstance(after_sequence, bool) or after_sequence < 0:
+            from .errors import ValidationError
+            raise ValidationError("after_sequence must be a non-negative integer.")
+        return EVENTS.snapshot(after_sequence)
+
+    @tool(
         "console_info", annotations=READ_ONLY,
         description="Read guest video-head resolutions for mouse coordinate planning.",
     )
@@ -204,7 +248,7 @@ def create_server(
 
     @tool(
         "console_type_text", annotations=MUTATION,
-        description="Type text through Msvm_Keyboard, including newlines. No VMConnect focus is required. Requires ALLOW_CONSOLE.",
+        description="Type printable ASCII, tab, CR, or LF through Msvm_Keyboard. Unicode/ABNT2 text is rejected; use guest_exec for Unicode and match the guest keyboard layout. No VMConnect focus is required.",
     )
     async def console_type_text(vm_name: str, text: str) -> dict[str, Any]:
         return await _invoke(service.console_type_text, vm_name, text)
@@ -258,7 +302,7 @@ def create_server(
         description="Click left, right, or middle. Optionally move to guest-display x/y first.",
     )
     async def console_click(
-        vm_name: str, button: str = "left", x: int | None = None, y: int | None = None
+        vm_name: str, button: Literal["left", "right", "middle"] = "left", x: int | None = None, y: int | None = None
     ) -> dict[str, Any]:
         return await _invoke(service.console_click, vm_name, button, x, y)
 
@@ -380,11 +424,10 @@ def create_server(
         structured_output=False,
     )
     async def console_screenshot(
-        vm_name: str, region: str = "window", max_width: int = 1600
+        vm_name: str, region: Literal["window", "client"] = "window", max_width: int = 1600
     ) -> CallToolResult:
         def perform() -> Any:
-            allowed_name = service.authorize_screenshot(vm_name)
-            return capture.capture(allowed_name, region=region, max_width=max_width)
+            return service.capture_screenshot(capture, vm_name, region, max_width)
 
         screenshot = await _invoke(perform)
         metadata_text = json.dumps(screenshot.metadata, ensure_ascii=False)
@@ -401,7 +444,9 @@ def create_server(
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(message)s")
-    create_server().run(transport="stdio")
+    from .events import EVENTS, EventSink
+    backend = EventSink(PowerShellBackend(), EVENTS)
+    create_server(HyperVService(backend, Settings.from_env())).run(transport="stdio")
 
 
 if __name__ == "__main__":

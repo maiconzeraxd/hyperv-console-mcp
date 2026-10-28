@@ -23,7 +23,40 @@ jobs:
           cache: pip
       - name: Install package
         run: python -m pip install -e '.[dev]'
+      - name: Lint
+        run: python -m ruff check src tests scripts
+      - name: Check PowerShell syntax
+        shell: pwsh
+        run: |
+          $allErrors = @()
+          Get-ChildItem src, tests -Recurse -Include *.ps1, *.psm1 | ForEach-Object {
+            $tokens = $null
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName, [ref]$tokens, [ref]$parseErrors
+            ) | Out-Null
+            $allErrors += $parseErrors
+          }
+          if ($allErrors.Count) {
+            $allErrors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
       - name: Run tests
         run: python -m pytest
+      - name: Check MCP stdio and disabled mutations
+        run: python -I tests/mcp_smoke.py
       - name: Build package
         run: python -m build
+
+  import-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install package
+        run: python -m pip install .
+      - name: Import Windows-specific modules safely
+        run: python -I -c "import hyperv_console_mcp.capture, hyperv_console_mcp.ipc, hyperv_console_mcp.serial"

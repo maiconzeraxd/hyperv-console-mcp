@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperv-console-mcp"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A local, policy-gated MCP server for Hyper-V management, guest automation, and console input."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -22,16 +22,24 @@ classifiers = [
 dependencies = ["mcp>=2.3,<3", "Pillow>=10,<13"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10", "build>=1.2,<2"]
+dev = ["pytest>=8,<10", "build>=1.2,<2", "ruff>=0.8,<1"]
 
 [project.scripts]
 hyperv-console-mcp = "hyperv_console_mcp.server:main"
+hyperv-lab = "hyperv_console_mcp.lab.cli:main"
+hyperv-dashboard = "hyperv_console_mcp.dashboard:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "hyperv_console_mcp.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-hyperv_console_mcp = ["bridge/*.ps1"]
+hyperv_console_mcp = ["bridge/*.ps1", "lab/guest/*.ps1", "lab/guest/*.psm1"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -5,15 +5,16 @@ from __future__ import annotations
 import atexit
 import codecs
 import ctypes
-from ctypes import wintypes
 import os
-from pathlib import Path
 import threading
+from ctypes import wintypes
+from pathlib import Path
 from typing import Any
 
 from .errors import BackendError
 
 _BUFFER_CHARACTERS = 1_048_576
+SERIAL_WRITE_TIMEOUT_MS = 10_000
 
 
 class _SerialSession:
@@ -24,7 +25,8 @@ class _SerialSession:
         self._error: str | None = None
         self._closing = False
         self._buffer_lock = threading.Lock()
-        self._io_lock = threading.Lock()
+        self._write_lock = threading.Lock()
+        self._state_lock = threading.Lock()
         self._handle = self._open_pipe()
         try:
             self._log = open(self.log_path, "a", encoding="utf-8", newline="")
@@ -42,7 +44,7 @@ class _SerialSession:
                 "Hyper-V serial consoles are available only on Windows.", code="serial_unavailable"
             )
         handle = kernel32.CreateFileW(
-            self.pipe_path, GENERIC_READ | GENERIC_WRITE, 0, None, OPEN_EXISTING, 0, None
+            self.pipe_path, GENERIC_READ | GENERIC_WRITE, 0, None, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, None
         )
         if handle == INVALID_HANDLE_VALUE:
             error = ctypes.get_last_error()
@@ -50,7 +52,7 @@ class _SerialSession:
                 kernel32.WaitNamedPipeW(self.pipe_path, 5_000)
                 handle = kernel32.CreateFileW(
                     self.pipe_path, GENERIC_READ | GENERIC_WRITE, 0, None,
-                    OPEN_EXISTING, 0, None,
+                    OPEN_EXISTING, FILE_FLAG_OVERLAPPED, None,
                 )
                 error = ctypes.get_last_error()
         if handle == INVALID_HANDLE_VALUE:
@@ -64,15 +66,28 @@ class _SerialSession:
     def _read_loop(self) -> None:
         decoder = codecs.getincrementaldecoder("utf-8")("replace")
         chunk = ctypes.create_string_buffer(4096)
+        event = kernel32.CreateEventW(None, True, False, None)
+        if not event:
+            self._error = "Could not create the serial read event."
+            return
         try:
             while True:
+                overlapped = Overlapped(event=event)
                 read = wintypes.DWORD()
-                success = kernel32.ReadFile(self._handle, chunk, len(chunk), ctypes.byref(read), None)
+                success = kernel32.ReadFile(
+                    self._handle, chunk, len(chunk), ctypes.byref(read), ctypes.byref(overlapped)
+                )
                 if not success:
                     error = ctypes.get_last_error()
-                    if not self._closing and error not in {ERROR_BROKEN_PIPE, ERROR_OPERATION_ABORTED}:
-                        self._error = f"Serial ReadFile failed with Windows error {error}."
-                    break
+                    if error == ERROR_IO_PENDING:
+                        success = kernel32.GetOverlappedResult(
+                            self._handle, ctypes.byref(overlapped), ctypes.byref(read), True
+                        )
+                        error = ctypes.get_last_error()
+                    if not success:
+                        if not self._closing and error not in {ERROR_BROKEN_PIPE, ERROR_OPERATION_ABORTED}:
+                            self._error = f"Serial ReadFile failed with Windows error {error}."
+                        break
                 if not read.value:
                     continue
                 text = decoder.decode(chunk.raw[: read.value])
@@ -83,6 +98,7 @@ class _SerialSession:
         except Exception as exc:
             self._error = f"Serial reader failed ({type(exc).__name__})."
         finally:
+            kernel32.CloseHandle(event)
             try:
                 self._log.close()
             except Exception:
@@ -102,25 +118,47 @@ class _SerialSession:
 
     def send(self, text: str) -> int:
         data = text.encode("utf-8")
-        with self._io_lock:
-            if self._closing:
-                raise BackendError("The serial session is disconnecting.", code="serial_not_connected")
-            if self._error or not self._reader.is_alive():
-                raise BackendError(
-                    self._error or "The serial pipe is no longer connected.", code="serial_disconnected"
-                )
-            offset = 0
-            while offset < len(data):
-                written = wintypes.DWORD()
-                success = kernel32.WriteFile(
-                    self._handle, data[offset:], len(data) - offset, ctypes.byref(written), None
-                )
-                if not success or not written.value:
-                    error = ctypes.get_last_error()
+        with self._write_lock:
+            with self._state_lock:
+                if self._closing:
+                    raise BackendError("The serial session is disconnecting.", code="serial_not_connected")
+                if self._error or not self._reader.is_alive():
                     raise BackendError(
-                        f"Serial WriteFile failed with Windows error {error}.", code="serial_write_failed"
+                        self._error or "The serial pipe is no longer connected.", code="serial_disconnected"
                     )
-                offset += written.value
+            event = kernel32.CreateEventW(None, True, False, None)
+            if not event:
+                raise BackendError("Could not create the serial write event.", code="serial_write_failed")
+            try:
+                offset = 0
+                while offset < len(data):
+                    with self._state_lock:
+                        if self._closing:
+                            raise BackendError("The serial session is disconnecting.", code="serial_not_connected")
+                    overlapped = Overlapped(event=event)
+                    written = wintypes.DWORD()
+                    success = kernel32.WriteFile(
+                        self._handle, data[offset:], len(data) - offset,
+                        ctypes.byref(written), ctypes.byref(overlapped),
+                    )
+                    if not success and ctypes.get_last_error() == ERROR_IO_PENDING:
+                        if kernel32.WaitForSingleObject(event, SERIAL_WRITE_TIMEOUT_MS) != WAIT_OBJECT_0:
+                            kernel32.CancelIoEx(self._handle, ctypes.byref(overlapped))
+                            kernel32.GetOverlappedResult(
+                                self._handle, ctypes.byref(overlapped), ctypes.byref(written), True
+                            )
+                            raise BackendError("The serial write timed out after 10 seconds.", code="serial_write_timeout")
+                        success = kernel32.GetOverlappedResult(
+                            self._handle, ctypes.byref(overlapped), ctypes.byref(written), True
+                        )
+                    if not success or not written.value:
+                        error = ctypes.get_last_error()
+                        raise BackendError(
+                            f"Serial WriteFile failed with Windows error {error}.", code="serial_write_failed"
+                        )
+                    offset += written.value
+            finally:
+                kernel32.CloseHandle(event)
         return len(data)
 
     def status(self) -> dict[str, Any]:
@@ -135,13 +173,14 @@ class _SerialSession:
         }
 
     def close(self) -> None:
-        with self._io_lock:
+        with self._state_lock:
             if self._closing:
                 return
             self._closing = True
-            kernel32.CancelIoEx(self._handle, None)
+        kernel32.CancelIoEx(self._handle, None)
         self._reader.join(timeout=3)
-        kernel32.CloseHandle(self._handle)
+        with self._write_lock:
+            kernel32.CloseHandle(self._handle)
 
 
 class SerialManager:
@@ -218,6 +257,17 @@ class SerialManager:
 
 
 if os.name == "nt":
+    class Overlapped(ctypes.Structure):
+        _fields_ = [
+            ("Internal", ctypes.c_size_t), ("InternalHigh", ctypes.c_size_t),
+            ("Offset", wintypes.DWORD), ("OffsetHigh", wintypes.DWORD),
+            ("hEvent", wintypes.HANDLE),
+        ]
+
+        def __init__(self, *, event: wintypes.HANDLE) -> None:
+            super().__init__()
+            self.hEvent = event
+
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.CreateFileW.argtypes = [
         wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
@@ -233,15 +283,26 @@ if os.name == "nt":
     kernel32.ReadFile.restype = wintypes.BOOL
     kernel32.WriteFile.argtypes = kernel32.ReadFile.argtypes
     kernel32.WriteFile.restype = wintypes.BOOL
-    kernel32.CancelIoEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    kernel32.CancelIoEx.argtypes = [wintypes.HANDLE, ctypes.POINTER(Overlapped)]
     kernel32.CancelIoEx.restype = wintypes.BOOL
+    kernel32.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel32.CreateEventW.restype = wintypes.HANDLE
+    kernel32.GetOverlappedResult.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(Overlapped), ctypes.POINTER(wintypes.DWORD), wintypes.BOOL,
+    ]
+    kernel32.GetOverlappedResult.restype = wintypes.BOOL
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel32.CloseHandle.restype = wintypes.BOOL
 
 GENERIC_READ = 0x80000000
 GENERIC_WRITE = 0x40000000
 OPEN_EXISTING = 3
+FILE_FLAG_OVERLAPPED = 0x40000000
+WAIT_OBJECT_0 = 0
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 ERROR_PIPE_BUSY = 231
 ERROR_BROKEN_PIPE = 109
 ERROR_OPERATION_ABORTED = 995
+ERROR_IO_PENDING = 997

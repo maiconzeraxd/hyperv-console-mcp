@@ -7,6 +7,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
     $request = $line | ConvertFrom-Json
     if ($request.operation -eq 'crash') { exit 17 }
     if ($request.operation -eq 'slow') { Start-Sleep -Seconds 10 }
+    if ($request.operation -eq 'warning') { Write-Warning 'Synthetic non-protocol output' }
     $count++
     $result = @{
         ok = $true

@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import ctypes
-from ctypes import wintypes
 import os
 import queue
 import threading
 import time
 import uuid
+from ctypes import wintypes
 
 import pytest
-
 from hyperv_console_mcp.serial import SerialManager
 
 
@@ -78,6 +77,67 @@ def test_serial_manager_reads_writes_logs_and_disconnects(tmp_path) -> None:
         assert "guest boot" in (tmp_path / "console.log").read_text(encoding="utf-8")
         assert manager.disconnect("NORTH-Test")["connected"] is False
     finally:
+        manager.close()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows named pipes are required")
+def test_serial_send_does_not_wait_for_guest_output_and_close_cancels(tmp_path, monkeypatch) -> None:
+    from hyperv_console_mcp import serial
+    from hyperv_console_mcp.errors import BackendError
+
+    monkeypatch.setattr(serial, "SERIAL_WRITE_TIMEOUT_MS", 100)
+
+    kernel32 = serial.kernel32
+    pipe_path = rf"\\.\pipe\hvmcp-silent-{uuid.uuid4().hex}"
+    ready = threading.Event()
+    stop = threading.Event()
+
+    def server() -> None:
+        handle = kernel32.CreateNamedPipeW(pipe_path, 0x00000003, 0, 1, 4096, 4096, 0, None)
+        if handle == serial.INVALID_HANDLE_VALUE:
+            ready.set()
+            return
+        try:
+            ready.set()
+            if not kernel32.ConnectNamedPipe(handle, None) and ctypes.get_last_error() != 535:
+                return
+            stop.wait(15)
+        finally:
+            kernel32.CloseHandle(handle)
+
+    thread = threading.Thread(target=server, daemon=True)
+    thread.start()
+    assert ready.wait(5)
+    manager = SerialManager()
+    try:
+        manager.connect("NORTH-Test", pipe_path.rsplit("\\", 1)[-1], str(tmp_path / "silent.log"))
+        started = time.monotonic()
+        assert manager.send("NORTH-Test", "command\r\n")["bytes_sent"] == 9
+        assert time.monotonic() - started < 5
+        with pytest.raises(BackendError) as error:
+            manager.send("NORTH-Test", "x" * (512 * 1024))
+        assert error.value.code == "serial_write_timeout"
+        pending: queue.Queue[BaseException] = queue.Queue()
+
+        def send_during_close() -> None:
+            try:
+                manager.send("NORTH-Test", "y" * (512 * 1024))
+            except BackendError as exc:
+                pending.put(exc)
+
+        sender = threading.Thread(target=send_during_close, daemon=True)
+        sender.start()
+        time.sleep(0.1)
+        started = time.monotonic()
+        manager.disconnect("NORTH-Test")
+        sender.join(timeout=5)
+        assert not sender.is_alive()
+        assert isinstance(pending.get_nowait(), BackendError)
+        assert time.monotonic() - started < 5
+    finally:
+        stop.set()
         manager.close()
         thread.join(timeout=5)
     assert not thread.is_alive()

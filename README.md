@@ -2,11 +2,11 @@
 
 A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/) server for **Hyper-V on Windows**. It combines VM management, checkpoints, PowerShell Direct diagnostics, synthetic keyboard/mouse input, experimental VMConnect capture, installation media, serial consoles, and serial WinDbg preparation in one stdio server.
 
-**Alpha status:** 37 unit/transport tests and a real MCP stdio client smoke test pass, including a local Windows named-pipe transport test. The package builds as a wheel. Live Hyper-V reads currently return a clear access-denied error from the unelevated development shell; successful live management still needs an elevated/authorized host validation. No driver, mapper, or guest payload is bundled or executed by this project.
+**Alpha status:** 71 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. An earlier elevated read-only MCP diagnostic succeeded against `NORTH-Test` for host, VM, console, serial status, media, and checkpoint queries. Live mutations and PowerShell Direct guest operations were not exercised in this delivery. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled or executed by this project.
 
 ## Highlights
 
-- **38 MCP tools** with read-only/destructive annotations and structured results.
+- **44 MCP tools** with read-only/destructive annotations and structured results.
 - Inventory, pause/resume, bounded state waiting, power, checkpoints, and bounded guest file transfer.
 - Guest OS health, processes, services, and recent event logs through PowerShell Direct.
 - Hyper-V `Msvm_Keyboard` and `Msvm_SyntheticMouse`, explicit key/button states, and ordered console batches: works without guest networking.
@@ -16,6 +16,7 @@ A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/)
 - Existing DVD-drive ISO mount/eject and optional boot-first selection while the VM is Off.
 - Exact confirmation gates for forced power, restore/delete, debug preparation, media changes, and overwrite.
 - No guest password in tool arguments, command lines, or audit records.
+- A native dashboard and a non-executing, hash-verified driver-lab transfer workflow.
 - A replaceable backend and tests that never mutate live VMs.
 
 ## Requirements
@@ -65,9 +66,18 @@ See [client configuration](docs/SETUP.md) for a stdio JSON example. All mutation
 | Serial console | `serial_status`, `serial_connect`, `serial_read`, `serial_send`, `serial_disconnect` |
 | Kernel debugging | `debug_serial_status`, `debug_serial_prepare`, `debug_guest_prepare` |
 
+| Driver lab (non-executing) | `lab_init`, `lab_diagnostics`, `lab_stage`, `lab_verify`, `lab_collect` |
+| Activity | `events_snapshot` |
+
 Power actions are `start`, `shutdown`, `save`, `pause`, `resume`, `turn_off`, and `reset`. Forced power needs `confirm_vm` equal to `vm_name`. Restore/delete need the VM name and exact checkpoint GUID confirmed. Overwriting an existing guest file needs `overwrite=true` and an exact `confirm_path`.
 
 Media operations use an existing DVD drive and require the VM to be Off. `media_mount(..., boot_first=true)` changes firmware/BIOS boot priority; it does not start the VM. Serial attachment requires an already configured COM1 named pipe and a Running VM. It is not a WinDbg replacement and cannot be combined with a debugger that already owns that pipe.
+
+## Dashboard and reproducible lab
+
+Start the native dashboard with `python -I scripts\run_dashboard.py --vm NORTH-Test` or, after installation, `hyperv-dashboard --vm NORTH-Test`. It uses the same service and policies as MCP and exposes activity, console, recovery, media, serial/debugging and lab pages. Optional per-request approval of AI mutations is documented in [the dashboard guide](docs/DASHBOARD.md).
+
+The lab workflow initializes fixed guest directories, stages hash-verified packages and collects evidence without executing a payload. Package sources and evidence downloads are confined to `HYPERV_MCP_LAB_ROOT` and `HYPERV_MCP_EVIDENCE_ROOT`. Running a package is a separate manual guest action requiring an exact run-specific approval phrase. See [the lab guide](docs/LAB.md); no driver or mapper is bundled or run by this repository.
 
 ## Performance and debugging
 
@@ -99,6 +109,14 @@ python -m build
 ```
 
 The PowerShell bridge accepts fixed operations and JSON over stdin, not generated PowerShell source. The fake bridge allows transport tests without Hyper-V. Live testing must be separately authorized and restricted to a disposable VM.
+
+For an elevated, read-only end-to-end diagnostic through a real MCP stdio client:
+
+```powershell
+python -I tests\live_mcp_readonly.py --vm NORTH-Test
+```
+
+This queries host, VM, console, COM/debugger status, media, and checkpoints. It does not change VM or guest state.
 
 ## License
 

@@ -31,6 +31,15 @@ def _integer(
     return result
 
 
+def _local_root(child: str) -> Path:
+    return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "HyperVConsoleMCP" / child
+
+
+def _path(values: Mapping[str, str], name: str, default: Path) -> Path:
+    value = values.get(name, "").strip()
+    return Path(value).expanduser() if value else default
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     allowed_vms: frozenset[str] = frozenset()
@@ -46,6 +55,8 @@ class Settings:
     timeout_seconds: float = 90.0
     max_output_chars: int = 65_536
     audit_log: Path | None = None
+    serial_log_root: Path = field(default_factory=lambda: _local_root("serial"))
+    iso_root: Path = field(default_factory=lambda: _local_root("media"))
 
     @classmethod
     def from_env(cls, values: Mapping[str, str] | None = None) -> "Settings":
@@ -75,6 +86,10 @@ class Settings:
                 env, "HYPERV_MCP_MAX_OUTPUT_CHARS", 65_536, 1_024, 1_048_576
             ),
             audit_log=Path(audit_path).expanduser() if audit_path else None,
+            serial_log_root=_path(
+                env, "HYPERV_MCP_SERIAL_LOG_ROOT", _local_root("serial")
+            ),
+            iso_root=_path(env, "HYPERV_MCP_ISO_ROOT", _local_root("media")),
         )
 
     def is_allowed(self, vm_name: str) -> bool:

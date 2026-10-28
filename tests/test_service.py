@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
-
 from hyperv_console_mcp.audit import AuditLogger
 from hyperv_console_mcp.config import Settings
 from hyperv_console_mcp.errors import BackendError, PolicyError, ValidationError
@@ -48,6 +49,7 @@ def enabled(backend: FakeBackend) -> HyperVService:
             allow_media=True,
             guest_username="Administrator",
             guest_password="secret",
+            iso_root=Path("C:/Lab"),
         ),
     )
 
@@ -345,7 +347,9 @@ def test_serial_requires_matching_com1_and_never_sends_text_to_bridge(
     enabled: HyperVService, backend: FakeBackend
 ) -> None:
     serial = FakeSerial()
-    service = HyperVService(backend, enabled.settings, serial=serial)
+    service = HyperVService(
+        backend, replace(enabled.settings, serial_log_root=Path.cwd()), serial=serial
+    )
     backend.responses["debug_serial_status"] = {
         "state": "Running",
         "com_ports": [{"number": 1, "path": r"\\.\pipe\north-console"}],
@@ -361,3 +365,81 @@ def test_serial_requires_matching_com1_and_never_sends_text_to_bridge(
     assert serial.calls[1] == ("send", "NORTH-Test", "secret serial text\r\n")
     assert all("secret serial text" not in repr(call) for call in backend.calls)
     assert {call[0] for call in backend.calls} == {"debug_serial_status"}
+
+
+def test_batch_validates_all_values_before_the_first_input(
+    enabled: HyperVService, backend: FakeBackend
+) -> None:
+    with pytest.raises(ValidationError):
+        enabled.console_batch(
+            "NORTH-Test",
+            [{"type": "text", "text": "must not run"}, {"type": "move", "x": -1, "y": 20}],
+        )
+    with pytest.raises(ValidationError):
+        enabled.console_batch(
+            "NORTH-Test",
+            [{"type": "wait", "milliseconds": 30_000}, {"type": "wait", "milliseconds": 1}],
+        )
+    assert backend.calls == []
+
+
+def test_keyboard_rejects_non_ascii_before_typing(
+    enabled: HyperVService, backend: FakeBackend
+) -> None:
+    with pytest.raises(ValidationError, match="ASCII"):
+        enabled.console_type_text("NORTH-Test", "ação")
+    with pytest.raises(ValidationError):
+        enabled.console_press_keys("NORTH-Test", [1])
+    assert backend.calls == []
+
+
+def test_host_paths_are_confined_to_their_configured_roots(
+    enabled: HyperVService, backend: FakeBackend, tmp_path: Path
+) -> None:
+    with pytest.raises(PolicyError, match="configured root"):
+        enabled.media_mount("NORTH-Test", r"C:\Elsewhere\boot.iso", 1, "NORTH-Test")
+    serial = FakeSerial()
+    service = HyperVService(
+        backend, replace(enabled.settings, serial_log_root=tmp_path), serial=serial
+    )
+    with pytest.raises(PolicyError, match="configured root"):
+        service.serial_connect("NORTH-Test", "north-console", "../escape.log", "NORTH-Test")
+    assert backend.calls == []
+    assert serial.calls == []
+
+
+def test_vm_wait_has_one_audit_record_and_one_event_lifecycle(
+    enabled: HyperVService, backend: FakeBackend, tmp_path: Path, monkeypatch
+) -> None:
+    import hyperv_console_mcp.events as events
+    from hyperv_console_mcp.events import EventBus
+
+    log = tmp_path / "audit.jsonl"
+    enabled.audit = AuditLogger(log)
+    backend.responses["vm_get"] = {"vm": {"state": "Running"}}
+    bus = EventBus()
+    monkeypatch.setattr(events, "EVENTS", bus)
+    monkeypatch.setenv("HYPERV_MCP_EVENT_DIRECTORY", str(tmp_path / "events"))
+    assert enabled.vm_wait("NORTH-Test", ["Running"])["matched"] is True
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+    assert '"vm_wait"' in log.read_text(encoding="utf-8")
+    assert [event["operation"] for event in bus.snapshot()["events"]] == ["vm_wait", "vm_wait"]
+
+
+def test_local_serial_mutation_uses_the_dashboard_approval_gate(
+    enabled: HyperVService, backend: FakeBackend, tmp_path: Path, monkeypatch
+) -> None:
+    serial = FakeSerial()
+    service = HyperVService(
+        backend, replace(enabled.settings, serial_log_root=tmp_path), serial=serial
+    )
+    monkeypatch.setenv("HYPERV_MCP_REQUIRE_DASHBOARD_APPROVAL", "true")
+    monkeypatch.setenv("HYPERV_MCP_EVENT_DIRECTORY", str(tmp_path / "events"))
+    monkeypatch.setattr(
+        "hyperv_console_mcp.ipc.request_approval",
+        lambda operation, vm_name: (_ for _ in ()).throw(PolicyError("denied by test")),
+    )
+    with pytest.raises(PolicyError, match="denied by test"):
+        service.serial_send("NORTH-Test", "must not run")
+    assert serial.calls == []
+    assert backend.calls == []

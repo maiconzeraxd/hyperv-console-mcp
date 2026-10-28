@@ -59,3 +59,22 @@ An independent, local Model Context Protocol server for Hyper-V on Windows. It c
 - Pushed `main` to `https://github.com/maiconzeraxd/hyperv-console-mcp`, including initial commit `704dcf1` and expansion commit `3e24373`.
 - GitHub Actions created run `40689509446`, but all three Windows/Python jobs were rejected before starting because the account was locked for a billing issue. No CI test or build step executed; this is not a code test failure.
 - Local validation remains 37 passing tests, a successful MCP stdio smoke test, valid PowerShell syntax, and successful sdist/wheel builds.
+
+### 2026-10-28 — Elevated live read-only MCP validation
+
+- A real elevated MCP stdio client successfully queried `hyperv_host_status`, `vm_get`, `console_info`, `debug_serial_status`, `media_list`, and `checkpoint_list` for the running `NORTH-Test` VM. All six calls succeeded; no VM or guest mutation was performed.
+- Fixed `debug_serial_status` compatibility with the host's Hyper-V version: COM numbers are parsed from the `COM 1`/`COM 2` port names because `Get-VMComPort` does not expose a `Number` property there.
+- Confirmed COM1 debugger mode is On but its pipe path is empty. No COM, BCD, media, checkpoint, network, or power configuration was changed.
+- Added a mocked real-bridge regression test and `tests/live_mcp_readonly.py`, which supports an optional JSON report. PowerShell syntax remains valid.
+- These changes were subsequently incorporated into the dashboard/lab and hardening delivery below.
+
+### 2026-10-28 — Dashboard, reproducible lab and bridge hardening
+
+- Added a native tkinter dashboard with seven pages, shared policy enforcement, cross-process activity and optional current-user-only approval of AI mutations. Local serial and screenshot actions are covered by the approval gate as well as bridge mutations.
+- Added five non-executing lab tools for initialization, diagnostics, package staging/verification and evidence collection, plus an activity-snapshot tool. Packages use bounded manifests and SHA-256 verification; payload execution remains a separate manual guest action.
+- Hardened the real PowerShell bridge: warning-safe protocol output, exact VM matching, checkpoint return values, consistent remoting DTOs, native stderr/exit-code preservation, empty event-log handling, Secure Boot preflight before BCD, and structured error classification.
+- Serial now uses one overlapped handle for reads and writes, bounded write waits and cancellation before handle closure. Console batches validate every action and their cumulative wait budget before sending input. Keyboard text is explicitly limited to the synthetic keyboard's supported ASCII input.
+- Confined ISO and serial-log paths to configurable roots, increased the safe default guest-read limit to 64 KiB, added schema enums, and made the package/MCP version single-sourced.
+- Added nested-operation event regression coverage, real-bridge mocked tests, policy tests, dashboard/lab tests, Ruff, PowerShell syntax CI, MCP stdio smoke CI and a non-Windows import job. GitHub execution is not claimed until Actions actually runs.
+- Local validation: 71 passing tests, clean Ruff checks, valid PowerShell syntax, successful 44-tool stdio/policy-denial smoke, and successful sdist/wheel builds. The unelevated smoke shell cannot read the live host; the earlier elevated read-only validation remains separate.
+- No live mutation, guest BCD change, package execution, driver or mapper run was performed during this delivery.

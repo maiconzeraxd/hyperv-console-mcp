@@ -35,7 +35,7 @@ async def main() -> None:
         async with ClientSession(reader, writer) as session:
             await session.initialize()
             tools = await session.list_tools()
-            assert len(tools.tools) == 38, len(tools.tools)
+            assert len(tools.tools) == 44, len(tools.tools)
             denied = await session.call_tool(
                 "vm_power", {"vm_name": "NORTH-Test", "action": "start"}
             )

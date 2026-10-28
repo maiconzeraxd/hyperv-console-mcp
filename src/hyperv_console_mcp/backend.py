@@ -8,6 +8,7 @@ import json
 import queue
 import subprocess
 import threading
+import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Mapping
@@ -126,7 +127,13 @@ class PowerShellBackend:
         try:
             process.stdin.write(request + "\n")
             process.stdin.flush()
-            line = self._responses.get(timeout=timeout)
+            deadline = time.monotonic() + timeout
+            while True:
+                line = self._responses.get(timeout=max(0, deadline - time.monotonic()))
+                if isinstance(line, str) and not line.startswith(_MARKER):
+                    self._errors.append("Non-protocol PowerShell output: " + line.strip()[:2000])
+                    continue
+                break
         except queue.Empty as exc:
             raise BackendError(
                 "The local bridge timed out. A guest command may still be running; "

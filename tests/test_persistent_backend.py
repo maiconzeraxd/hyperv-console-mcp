@@ -1,12 +1,27 @@
 from __future__ import annotations
 
+import shutil
+import sys
 import time
 from pathlib import Path
 
 import pytest
-
 from hyperv_console_mcp.backend import PowerShellBackend
 from hyperv_console_mcp.errors import BackendError
+
+pytestmark = pytest.mark.skipif(
+    sys.platform != "win32" or shutil.which("powershell.exe") is None,
+    reason="Windows PowerShell is required.",
+)
+
+
+def test_warning_output_does_not_break_the_response_protocol() -> None:
+    backend = PowerShellBackend(Path(__file__).with_name("FakeBridge.ps1"))
+    try:
+        assert backend.invoke("warning", {})["call"] == 1
+        assert backend.invoke("vm_list", {})["call"] == 2
+    finally:
+        backend.close()
 
 
 def test_persistent_bridge_reuses_one_process() -> None:

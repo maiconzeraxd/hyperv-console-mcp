@@ -7,6 +7,8 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+$WarningPreference = 'SilentlyContinue'
+$InformationPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
 function Write-Response {
@@ -18,11 +20,12 @@ function Write-Response {
 
 function Get-ExactVm {
     param([Parameter(Mandatory)][string]$Name)
-    $matches = @(Get-VM -Name $Name | Where-Object { $_.Name -eq $Name })
-    if ($matches.Count -ne 1) {
-        throw "Expected exactly one VM named '$Name'; found $($matches.Count)."
+    $escapedName = [WildcardPattern]::Escape($Name)
+    $resolved = @(Get-VM -Name $escapedName | Where-Object { $_.Name -eq $Name })
+    if ($resolved.Count -ne 1) {
+        throw "Expected exactly one VM named '$Name'; found $($resolved.Count)."
     }
-    return $matches[0]
+    return $resolved[0]
 }
 
 function Convert-Date {
@@ -181,7 +184,8 @@ function Invoke-GuestQuery {
         [object[]]$Arguments = @()
     )
     $credential = New-GuestCredential -Request $Request
-    return Invoke-Command -VMName $Vm.Name -Credential $credential -ArgumentList $Arguments -ScriptBlock $Query
+    return Invoke-Command -VMName $Vm.Name -Credential $credential -ArgumentList $Arguments -ScriptBlock $Query |
+        Select-Object -Property * -ExcludeProperty PSComputerName, RunspaceId, PSShowComputerName
 }
 
 function Invoke-BridgeOperation {
@@ -235,20 +239,20 @@ function Invoke-BridgeOperation {
         }
         'checkpoint_create' {
             $vm = Get-ExactVm -Name $request.vm
-            $snapshot = Checkpoint-VM -VM $vm -SnapshotName ([string]$request.name) -Confirm:$false
+            $snapshot = Checkpoint-VM -VM $vm -SnapshotName ([string]$request.name) -Passthru -Confirm:$false
             $result = @{ checkpoint = (Convert-Checkpoint -Snapshot $snapshot) }
         }
         'checkpoint_restore' {
             $vm = Get-ExactVm -Name $request.vm
             $snapshot = Get-ExactCheckpoint -Vm $vm -SnapshotId $request.snapshot_id
-            Restore-VMSnapshot -VMSnapshot $snapshot -Confirm:$false
+            Restore-VMSnapshot -VMSnapshot $snapshot -Confirm:$false | Out-Null
             $result = @{ restored = $true; checkpoint = (Convert-Checkpoint -Snapshot $snapshot) }
         }
         'checkpoint_delete' {
             $vm = Get-ExactVm -Name $request.vm
             $snapshot = Get-ExactCheckpoint -Vm $vm -SnapshotId $request.snapshot_id
             $converted = Convert-Checkpoint -Snapshot $snapshot
-            Remove-VMSnapshot -VMSnapshot $snapshot -Confirm:$false
+            Remove-VMSnapshot -VMSnapshot $snapshot -Confirm:$false | Out-Null
             $result = @{ deleted = $true; checkpoint = $converted }
         }
         'guest_status' {
@@ -305,40 +309,49 @@ function Invoke-BridgeOperation {
         }
         'guest_events' {
             $vm = Get-ExactVm -Name $request.vm
+            $eventId = if ($request.PSObject.Properties.Name -contains 'event_id') { [int]$request.event_id } else { $null }
+            $eventLevel = if ($request.PSObject.Properties.Name -contains 'level') { [int]$request.level } else { $null }
             $events = Invoke-GuestQuery -Vm $vm -Request $request -Arguments @(
-                [string]$request.log_name, [int]$request.max_events, $request.event_id, $request.level, [int]$request.hours
+                [string]$request.log_name, [int]$request.max_events, $eventId, $eventLevel, [int]$request.hours
             ) -Query {
                 param($LogName, $MaximumEvents, $EventId, $Level, $Hours)
                 $filter = @{ LogName = $LogName; StartTime = (Get-Date).AddHours(-$Hours) }
                 if ($null -ne $EventId) { $filter['Id'] = [int]$EventId }
                 if ($null -ne $Level) { $filter['Level'] = [int]$Level }
-                Get-WinEvent -FilterHashtable $filter -MaxEvents $MaximumEvents -ErrorAction Stop |
-                    ForEach-Object {
-                        [pscustomobject]@{
-                            record_id = $_.RecordId; time = $_.TimeCreated.ToString('o')
-                            id = $_.Id; level = [int]$_.Level; provider = $_.ProviderName
-                            message = $_.Message
+                try {
+                    Get-WinEvent -FilterHashtable $filter -MaxEvents $MaximumEvents -ErrorAction Stop |
+                        ForEach-Object {
+                            [pscustomobject]@{
+                                record_id = $_.RecordId; time = $_.TimeCreated.ToString('o')
+                                id = $_.Id; level = [int]$_.Level; provider = $_.ProviderName
+                                message = $_.Message
+                            }
                         }
-                    }
+                } catch {
+                    if ($_.FullyQualifiedErrorId -notmatch 'NoMatchingEventsFound') { throw }
+                }
             }
             $result = @{ vm = $vm.Name; events = @($events) }
         }
         'guest_exec' {
             $vm = Get-ExactVm -Name $request.vm
-            $credential = New-GuestCredential -Request $request
             $encodedCommand = Convert-ToBase64Text -Text ([string]$request.command)
-            $guestResult = Invoke-Command -VMName $vm.Name -Credential $credential `
-                -ArgumentList $encodedCommand, ([int]$request.max_output_chars) -ScriptBlock {
+            $guestResult = Invoke-GuestQuery -Vm $vm -Request $request `
+                -Arguments $encodedCommand, ([int]$request.max_output_chars) -Query {
                     param($Encoded, $MaximumCharacters)
                     $command = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Encoded))
                     $output = ''
                     $errorMessage = ''
                     $success = $true
                     $exitCode = 0
+                    $previousPreference = $ErrorActionPreference
                     try {
-                        $ErrorActionPreference = 'Stop'
+                        # Native stderr must not become a terminating NativeCommandError on PS 5.1.
+                        $ErrorActionPreference = 'Continue'
                         $global:LASTEXITCODE = $null
-                        $output = (& ([ScriptBlock]::Create($command)) 2>&1 | Out-String -Width 4096)
+                        $output = (& ([ScriptBlock]::Create($command)) 2>&1 | ForEach-Object {
+                            if ($_ -is [Management.Automation.ErrorRecord]) { $_.ToString() } else { $_ }
+                        } | Out-String -Width 4096)
                         if ($null -ne $LASTEXITCODE) {
                             $exitCode = [int]$LASTEXITCODE
                             if ($exitCode -ne 0) { $success = $false }
@@ -347,6 +360,8 @@ function Invoke-BridgeOperation {
                         $success = $false
                         $exitCode = 1
                         $errorMessage = $_.Exception.Message
+                    } finally {
+                        $ErrorActionPreference = $previousPreference
                     }
                     $truncated = $output.Length -gt $MaximumCharacters
                     if ($truncated) { $output = $output.Substring(0, $MaximumCharacters) }
@@ -362,10 +377,9 @@ function Invoke-BridgeOperation {
         }
         'guest_read_file' {
             $vm = Get-ExactVm -Name $request.vm
-            $credential = New-GuestCredential -Request $request
             $encodedPath = Convert-ToBase64Text -Text ([string]$request.path)
-            $guestResult = Invoke-Command -VMName $vm.Name -Credential $credential `
-                -ArgumentList $encodedPath, ([int]$request.max_bytes) -ScriptBlock {
+            $guestResult = Invoke-GuestQuery -Vm $vm -Request $request `
+                -ArgumentList $encodedPath, ([int]$request.max_bytes) -Query {
                     param($EncodedPath, $MaximumBytes)
                     $path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedPath))
                     if (-not [IO.Path]::IsPathRooted($path)) { throw 'The guest path must be absolute.' }
@@ -387,11 +401,10 @@ function Invoke-BridgeOperation {
         }
         'guest_write_file' {
             $vm = Get-ExactVm -Name $request.vm
-            $credential = New-GuestCredential -Request $request
             $encodedPath = Convert-ToBase64Text -Text ([string]$request.path)
-            $guestResult = Invoke-Command -VMName $vm.Name -Credential $credential `
+            $guestResult = Invoke-GuestQuery -Vm $vm -Request $request `
                 -ArgumentList $encodedPath, ([string]$request.content_base64),
-                    ([bool]$request.overwrite), ([bool]$request.create_parent) -ScriptBlock {
+                    ([bool]$request.overwrite), ([bool]$request.create_parent) -Query {
                     param($EncodedPath, $Content, $Overwrite, $CreateParent)
                     $path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedPath))
                     if (-not [IO.Path]::IsPathRooted($path)) { throw 'The guest path must be absolute.' }
@@ -420,6 +433,91 @@ function Invoke-BridgeOperation {
                     try { $hash = [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant() }
                     finally { $sha.Dispose() }
                     [pscustomobject]@{ path = $fullPath; bytes_written = $bytes.Length; sha256 = $hash }
+                }
+            $result = @{ vm = $vm.Name; file = $guestResult }
+        }
+        'guest_read_chunk' {
+            $vm = Get-ExactVm -Name $request.vm
+            $encodedPath = Convert-ToBase64Text -Text ([string]$request.path)
+            $guestResult = Invoke-GuestQuery -Vm $vm -Request $request `
+                -ArgumentList $encodedPath, ([Int64]$request.offset), ([int]$request.count) -Query {
+                    param($EncodedPath, $Offset, $Count)
+                    $path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedPath))
+                    if (-not [IO.Path]::IsPathRooted($path)) { throw 'The guest path must be absolute.' }
+                    $stream = [IO.File]::OpenRead($path)
+                    try {
+                        if ($Offset -lt 0 -or $Offset + $Count -gt $stream.Length) {
+                            throw 'The requested evidence chunk is outside the file.'
+                        }
+                        $null = $stream.Seek($Offset, [IO.SeekOrigin]::Begin)
+                        $bytes = [byte[]]::new($Count)
+                        $read = 0
+                        while ($read -lt $Count) {
+                            $current = $stream.Read($bytes, $read, $Count - $read)
+                            if ($current -eq 0) { throw 'The guest file was truncated during reading.' }
+                            $read += $current
+                        }
+                    } finally { $stream.Dispose() }
+                    $sha = [Security.Cryptography.SHA256]::Create()
+                    try { $hash = [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant() }
+                    finally { $sha.Dispose() }
+                    [pscustomobject]@{
+                        offset = $Offset; size = $read
+                        content_base64 = [Convert]::ToBase64String($bytes); sha256 = $hash
+                    }
+                }
+            $result = @{ vm = $vm.Name; chunk = $guestResult }
+        }
+        'guest_assemble_file' {
+            $vm = Get-ExactVm -Name $request.vm
+            $encodedPath = Convert-ToBase64Text -Text ([string]$request.path)
+            $encodedParts = Convert-ToBase64Text -Text ([string]$request.parts_directory)
+            $guestResult = Invoke-GuestQuery -Vm $vm -Request $request `
+                -ArgumentList $encodedPath, $encodedParts, ([int]$request.part_count),
+                    ([Int64]$request.expected_size), ([string]$request.expected_sha256) -Query {
+                    param($EncodedPath, $EncodedParts, $PartCount, $ExpectedSize, $ExpectedHash)
+                    $path = [IO.Path]::GetFullPath([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedPath)))
+                    $parts = [IO.Path]::GetFullPath([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedParts)))
+                    $packageRoot = [IO.Path]::GetFullPath('C:\DriverLab\Packages\')
+                    $transferRoot = [IO.Path]::GetFullPath('C:\DriverLab\Transfers\')
+                    if (-not $path.StartsWith($packageRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                        throw 'Assembly destination must remain under C:\DriverLab\Packages.'
+                    }
+                    if (-not $parts.StartsWith($transferRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                        throw 'Assembly chunks must remain under C:\DriverLab\Transfers.'
+                    }
+                    if ([IO.File]::Exists($path)) { throw 'The staged package file already exists; it is immutable.' }
+                    $directory = [IO.Path]::GetDirectoryName($path)
+                    [IO.Directory]::CreateDirectory($directory) | Out-Null
+                    $temporary = Join-Path $directory ('.hvmcp-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+                    $hash = [Security.Cryptography.SHA256]::Create()
+                    $length = [Int64]0
+                    try {
+                        $target = [IO.FileStream]::new($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                        try {
+                            for ($index = 0; $index -lt $PartCount; $index++) {
+                                $part = Join-Path $parts ('part-{0:D6}' -f $index)
+                                $source = [IO.FileStream]::new($part, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                                try {
+                                    $length += $source.Length
+                                    if ($length -gt $ExpectedSize) { throw 'The staged chunks exceed the expected file size.' }
+                                    $source.CopyTo($target)
+                                } finally { $source.Dispose() }
+                            }
+                        } finally { $target.Dispose() }
+                        $source = [IO.File]::OpenRead($temporary)
+                        try { $actual = [BitConverter]::ToString($hash.ComputeHash($source)).Replace('-', '').ToLowerInvariant() }
+                        finally { $source.Dispose() }
+                        if ($length -ne $ExpectedSize -or $actual -ne $ExpectedHash) {
+                            throw 'The assembled guest file failed its size or SHA-256 check.'
+                        }
+                        [IO.File]::Move($temporary, $path)
+                    } finally {
+                        $hash.Dispose()
+                        if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+                        if ([IO.Directory]::Exists($parts)) { [IO.Directory]::Delete($parts, $true) }
+                    }
+                    [pscustomobject]@{ path = $path; bytes_written = $length; sha256 = $actual }
                 }
             $result = @{ vm = $vm.Name; file = $guestResult }
         }
@@ -554,15 +652,15 @@ function Invoke-BridgeOperation {
             $number = [int]$request.controller_number
             $location = [int]$request.controller_location
             $drive = Get-ExactDvdDrive -Vm $vm -ControllerNumber $number -ControllerLocation $location
-            Set-VMDvdDrive -VM $vm -ControllerNumber $number -ControllerLocation $location -Path $iso.FullName -Confirm:$false -ErrorAction Stop
+            Set-VMDvdDrive -VM $vm -ControllerNumber $number -ControllerLocation $location -Path $iso.FullName -Confirm:$false -ErrorAction Stop | Out-Null
             $bootChanged = $false
             if ([bool]$request.boot_first) {
                 if ([int]$vm.Generation -eq 2) {
-                    Set-VMFirmware -VM $vm -FirstBootDevice $drive -Confirm:$false -ErrorAction Stop
+                    Set-VMFirmware -VM $vm -FirstBootDevice $drive -Confirm:$false -ErrorAction Stop | Out-Null
                 } else {
                     $bios = Get-VMBios -VM $vm
                     $order = @('CD') + @($bios.StartupOrder | Where-Object { $_ -ne 'CD' })
-                    Set-VMBios -VM $vm -StartupOrder $order -Confirm:$false -ErrorAction Stop
+                    Set-VMBios -VM $vm -StartupOrder $order -Confirm:$false -ErrorAction Stop | Out-Null
                 }
                 $bootChanged = $true
             }
@@ -579,7 +677,7 @@ function Invoke-BridgeOperation {
             $number = [int]$request.controller_number
             $location = [int]$request.controller_location
             $null = Get-ExactDvdDrive -Vm $vm -ControllerNumber $number -ControllerLocation $location
-            Set-VMDvdDrive -VM $vm -ControllerNumber $number -ControllerLocation $location -Path $null -Confirm:$false -ErrorAction Stop
+            Set-VMDvdDrive -VM $vm -ControllerNumber $number -ControllerLocation $location -Path $null -Confirm:$false -ErrorAction Stop | Out-Null
             $result = @{
                 vm = $vm.Name; drive = Convert-DvdDrive -Drive (Get-ExactDvdDrive -Vm $vm -ControllerNumber $number -ControllerLocation $location)
                 completed = $true
@@ -588,9 +686,7 @@ function Invoke-BridgeOperation {
         'debug_serial_status' {
             $vm = Get-ExactVm -Name $request.vm
             $ports = @(
-                Get-VMComPort -VM $vm | ForEach-Object {
-                    [ordered]@{ number = [int]$_.Number; path = $_.Path; debugger_mode = $_.DebuggerMode.ToString() }
-                }
+                Get-VMComPort -VM $vm | ForEach-Object { Convert-ComPort -Port $_ }
             )
             $tools = [ordered]@{
                 windbgx = [bool](Get-Command 'WinDbgX.exe' -ErrorAction SilentlyContinue)
@@ -630,22 +726,58 @@ function Invoke-BridgeOperation {
             if ($vm.State -ne [Microsoft.HyperV.PowerShell.VMState]::Running) {
                 throw 'The VM must be Running for PowerShell Direct guest configuration. The server will not start it automatically.'
             }
-            $credential = New-GuestCredential -Request $request
-            $guestResult = Invoke-Command -VMName $vm.Name -Credential $credential -ScriptBlock {
+            $guestResult = Invoke-GuestQuery -Vm $vm -Request $request -Query {
                 $ErrorActionPreference = 'Stop'
+                $secureBootSupported = $true
+                try {
+                    $secureBootEnabled = [bool](Confirm-SecureBootUEFI -ErrorAction Stop)
+                } catch {
+                    if ($_.FullyQualifiedErrorId -match 'NotSupported|SecureBootUEFINotSupported') {
+                        $secureBootSupported = $false
+                        $secureBootEnabled = $false
+                    } else {
+                        throw "Secure Boot preflight failed; BCD was not changed: $($_.Exception.Message)"
+                    }
+                }
+                if ($secureBootEnabled) {
+                    throw 'Secure Boot is enabled. BCD was not changed; disable Secure Boot deliberately while the VM is Off, then retry.'
+                }
                 $dbg = (& bcdedit.exe /dbgsettings SERIAL DEBUGPORT:1 BAUDRATE:115200 2>&1 | Out-String)
                 if ($LASTEXITCODE -ne 0) { throw "bcdedit /dbgsettings failed: $dbg" }
                 $debug = (& bcdedit.exe /debug '{current}' on 2>&1 | Out-String)
                 if ($LASTEXITCODE -ne 0) { throw "bcdedit /debug failed: $debug" }
-                [pscustomobject]@{ debug_settings = $dbg; enable_result = $debug }
+                [pscustomobject]@{
+                    secure_boot_supported = $secureBootSupported
+                    secure_boot_enabled = $secureBootEnabled
+                    debug_settings = $dbg; enable_result = $debug
+                }
             }
             $result = @{
                 vm = $vm.Name; guest = $guestResult; guest_debug_enabled = $true
                 reboot_required = $true; automatic_reboot = $false
             }
         }
+        default {
+            throw ([System.ArgumentException]::new("Unsupported bridge operation '$Operation'."))
+        }
+    }
+    if ($result -isnot [System.Collections.IDictionary]) {
+        throw "Bridge operation '$Operation' returned an invalid result."
     }
     return $result
+}
+
+function Convert-ComPort {
+    param([Parameter(Mandatory)]$Port)
+    $name = [string]$Port.Name
+    if ($name -notmatch '^COM\s+([12])$') {
+        throw "Could not determine the COM port number from '$name'."
+    }
+    return [ordered]@{
+        number = [int]$Matches[1]
+        path = $Port.Path
+        debugger_mode = $Port.DebuggerMode.ToString()
+    }
 }
 
 function Get-ExactDvdDrive {
@@ -682,10 +814,21 @@ function Invoke-BridgeRequest {
         $result = Invoke-BridgeOperation -Operation $Operation -Request $Request
         return @{ ok = $true; result = $result }
     } catch {
-        $message = $_.Exception.Message
+        $errorRecord = $_
+        $message = $errorRecord.Exception.Message
+        $category = [string]$errorRecord.CategoryInfo.Category
         $code = 'bridge_error'
-        if ($message -match 'permission|permiss|access denied|acesso negado') {
+        if ($category -eq 'PermissionDenied' -or $errorRecord.Exception.HResult -eq -2147024891) {
             $code = 'access_denied'
+        } elseif ($errorRecord.Exception -is [System.ArgumentException] -or $category -eq 'InvalidArgument') {
+            $code = 'invalid_argument'
+        } elseif ($category -eq 'ObjectNotFound') {
+            $code = 'not_found'
+        } elseif ($message -match 'permission|permiss|access denied|acesso negado') {
+            # Some Hyper-V cmdlets wrap access failures in a generic RuntimeException.
+            $code = 'access_denied'
+        }
+        if ($code -eq 'access_denied') {
             $message = "Hyper-V access denied. Run the MCP host elevated or grant Hyper-V Administrators access. Original error: $message"
         }
         return @{ ok = $false; error = @{ code = $code; message = $message } }
