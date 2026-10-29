@@ -209,14 +209,16 @@ Anotações corretas: `kd_command` é `destructiveHint=true` (comandos podem esc
 
 ## 8. Definição de pronto
 
-- [ ] Todos os itens da Fase 1 corrigidos, cada um com teste de regressão.
+- [x] Todos os itens da Fase 1 corrigidos, cada um com teste de regressão.
 - [ ] `pytest`, `ruff`, PSScriptAnalyzer e smoke MCP verdes localmente no Windows; testes Windows-only pulados limpo no Linux.
 - [ ] `HYPERV_MCP_GUEST_TRANSPORT=psdirect` e `=ssh` produzem resultados equivalentes no mesmo conjunto de testes de transporte.
 - [ ] Na VM de teste: após `guest_autologon_configure` + reinício, `console_screenshot` (thumbnail) mostra a área de trabalho sem interação humana.
 - [ ] `lab_cycle` com o pacote inofensivo roda de ponta a ponta sem cliques, com checkpoint, evidências e revert.
 - [ ] `kd_attach` (serial e KDNET) → `kd_break` → `kd_stack` → `kd_go` funcionando live; `kd_dump_open` + `kd_analyze` funcionando num dump real.
-- [ ] Nenhum segredo (senha, chave SSH privada, chave KDNET) aparece em resultado, evento, auditoria ou log — teste automatizado que procura os valores de teste em toda a saída.
-- [ ] `docs/PROJECT.md` diz com honestidade o que foi validado live e o que não foi.
+- [x] Nenhum segredo (senha, chave SSH privada, chave KDNET) aparece em resultado, evento, auditoria ou log — teste automatizado que procura os valores de teste em toda a saída.
+- [x] `docs/PROJECT.md` diz com honestidade o que foi validado live e o que não foi.
+
+Estado em 2026-10-29: código e testes de todas as seis fases estão no branch `v0.2-autonomous-lab`, com 332 testes verdes, Ruff limpo, todos os `.ps1`/`.psm1` parseando e PSScriptAnalyzer sem erros nem avisos. As caixas que continuam abertas exigem uma VM descartável e uma sessão elevada, que não existiam nesta entrega — são exatamente os itens que os scripts `tests/live_*.py` cobrem.
 
 ## 9. Como reportar
 
