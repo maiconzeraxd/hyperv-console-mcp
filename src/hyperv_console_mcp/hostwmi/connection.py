@@ -100,10 +100,20 @@ class ComConnection:
         service = self._service(HYPERV_NAMESPACE)
         try:
             target = service.Get(path)
-            in_parameters = target.Methods_(method).InParameters.SpawnInstance_()
+            in_parameters = target.Methods_(method).InParameters
+            if in_parameters is None:
+                # A method with no in-parameters — InjectNonMaskableInterrupt is
+                # one — answers None here, and ExecMethod takes None for it.
+                if parameters:
+                    raise WmiFailure(
+                        f"{method} takes no parameters, but {sorted(parameters)} were given.",
+                        code="invalid_argument",
+                    )
+                return _as_dict(service.ExecMethod(path, method, None))
+            instance = in_parameters.SpawnInstance_()
             for name, value in parameters.items():
-                _set_property(in_parameters, name, value)
-            return _as_dict(service.ExecMethod(path, method, in_parameters))
+                _set_property(instance, name, value)
+            return _as_dict(service.ExecMethod(path, method, instance))
         except WmiFailure:
             raise
         except Exception as exc:

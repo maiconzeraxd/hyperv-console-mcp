@@ -17,6 +17,7 @@ import re
 from typing import Any
 
 from .connection import Connection, WmiFailure, wql_literal
+from .jobs import await_job
 
 # A VM instance is the one whose Name is its own id; the host instance is
 # named after the computer, which is why this and not the localized Caption.
@@ -38,6 +39,10 @@ STOP_ACTIONS = {2: "TurnOff", 3: "Save", 4: "ShutDown"}
 
 _MIB = 2**20
 _DVD_DRIVE = 16
+_RUNNING = 2
+_NMI_NOTE = (
+    "An NMI may bugcheck the guest. Collect the dump or attach the debugger before retrying."
+)
 _VHD_SUBTYPE = "Microsoft:Hyper-V:Virtual Hard Disk"
 _ISO_SUBTYPE = "Microsoft:Hyper-V:Virtual CD/DVD Disk"
 _REALIZED = "Microsoft:Hyper-V:System:Realized"
@@ -59,6 +64,32 @@ def vm_list(connection: Connection, payload: dict[str, Any]) -> dict[str, Any]:
 
 def vm_get(connection: Connection, payload: dict[str, Any]) -> dict[str, Any]:
     return {"vm": describe(connection, find_vm(connection, str(payload.get("vm") or "")))}
+
+
+def vm_inject_nmi(connection: Connection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Force a guest that stopped answering into the debugger.
+
+    ``Debug-VM -InjectNonMaskableInterrupt`` is one method on the computer with
+    no parameters at all, which is why this operation needs no setting data.
+    The state reported is the one the call found: a guest with no debugger
+    attached usually bugchecks a moment later, and answering with the state
+    read after the call would race that.
+    """
+    vm = find_vm(connection, str(payload.get("vm") or ""))
+    enabled = _int(vm.get("EnabledState"))
+    if enabled != _RUNNING:
+        raise WmiFailure(
+            "The VM must be Running before an NMI can be injected. The server will not start it.",
+            code="invalid_state",
+        )
+    response = connection.call(str(vm.get("__PATH") or ""), "InjectNonMaskableInterrupt")
+    await_job(connection, response)
+    return {
+        "vm": vm.get("ElementName"),
+        "injected": True,
+        "state": VM_STATES.get(enabled, "Other"),
+        "note": _NMI_NOTE,
+    }
 
 
 def find_vm(connection: Connection, name: str) -> dict[str, Any]:

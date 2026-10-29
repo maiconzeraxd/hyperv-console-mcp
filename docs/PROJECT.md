@@ -694,3 +694,19 @@ COM1 read back as `\.\pipe\north-test-kd-probe` in debugger mode, and was restor
 `\.\pipe\north-test-kd` before the VM was started. Not validated live: the refusal paths
 (VM running, a bad pipe name) run only in the unit tests, and a host whose COM1 is not
 controller 0.
+
+### 2026-10-29 — v0.3 phase 4: the NMI, and the method that takes no parameters
+
+- **`Debug-VM -InjectNonMaskableInterrupt` is one method on `Msvm_ComputerSystem` with no
+  in-parameters at all**, so the operation needs no setting data and no embedded instance.
+- **A parameterless method broke the COM boundary.** `ComConnection.call` asked for
+  `InParameters.SpawnInstance_()`, and for this method `InParameters` is `None` — the call
+  raised before it reached the provider. It now passes `None` to `ExecMethod`, and refuses
+  a caller that supplies parameters to a method that has none.
+- **The reported state is the one the call found.** A guest with no debugger attached usually
+  bugchecks a moment after the NMI, so reading the state afterwards would race that.
+
+Validated live: the method exists on this host's `Msvm_ComputerSystem` and reports no
+in-parameters (introspection, read-only). **Not validated live:** the injection itself, which
+would bugcheck `NORTH-Test` — that is a deliberate act for the operator, not a side effect
+of a test run. The unit tests cover the refusal for a stopped VM and a provider refusal code.
