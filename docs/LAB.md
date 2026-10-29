@@ -23,7 +23,7 @@ It does not change Secure Boot, VBS/HVCI, test-signing, BCD, networking or crash
 MCP `lab_stage` accepts only a subdirectory of `HYPERV_MCP_LAB_ROOT`, defaulting to:
 
 ```text
-%USERPROFILE%\HyperVLabs\packages
+%LOCALAPPDATA%\HyperVConsoleMCP\lab\packages
 ```
 
 Do not put files directly in that root; create one directory per package. Evidence is downloaded below `HYPERV_MCP_EVIDENCE_ROOT`, defaulting to:
@@ -32,6 +32,8 @@ Do not put files directly in that root; create one directory per package. Eviden
 %LOCALAPPDATA%\HyperVConsoleMCP\evidence
 ```
 
+Both roots, plus `HYPERV_MCP_EVENT_DIRECTORY` (default `%LOCALAPPDATA%\HyperVConsoleMCP\events`), are read into `Settings` when the server starts and must be absolute paths; a relative value fails startup instead of being resolved against the current directory.
+
 ## CLI workflow
 
 Set the protected environment described in [SETUP.md](SETUP.md), including PowerShell Direct credentials, then run:
@@ -39,7 +41,7 @@ Set the protected environment described in [SETUP.md](SETUP.md), including Power
 ```powershell
 hyperv-lab --vm NORTH-Test init
 hyperv-lab --vm NORTH-Test diagnostics
-hyperv-lab --vm NORTH-Test stage C:\Users\you\HyperVLabs\packages\example --package-id example.1 --receipt .\stage-receipt.json
+hyperv-lab --vm NORTH-Test stage C:\Users\you\AppData\Local\HyperVConsoleMCP\lab\packages\example --package-id example.1 --receipt .\stage-receipt.json
 hyperv-lab --vm NORTH-Test verify example.1 <manifest-sha256-from-receipt>
 hyperv-lab --vm NORTH-Test checkpoint before-example-1
 hyperv-lab --vm NORTH-Test collect example.1 run-1 .\evidence

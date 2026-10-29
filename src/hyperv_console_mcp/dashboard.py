@@ -231,7 +231,7 @@ class Dashboard(tk.Tk):
     def _page_driver_lab(self) -> None:
         form = ttk.LabelFrame(self.content, text="Package workflow")
         form.pack(fill="x")
-        self.package_path = tk.StringVar(value=str(Path.home() / "HyperVLabs" / "packages"))
+        self.package_path = tk.StringVar(value=str(self.settings.lab_root.expanduser()))
         self.package_id = tk.StringVar()
         self.manifest_hash = tk.StringVar()
         self.run_id = tk.StringVar(value=time.strftime("run-%Y%m%d-%H%M%S"))
@@ -542,7 +542,7 @@ class Dashboard(tk.Tk):
         self.submit("package.verify", lambda: DriverLabTransfer(self.service).verify(self.vm_name, self.package_id.get(), self.manifest_hash.get()), self._show_lab)
 
     def _collect(self) -> None:
-        output = Path(os.environ.get("HYPERV_MCP_EVIDENCE_ROOT", str(Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "HyperVConsoleMCP" / "evidence")))
+        output = self.settings.evidence_root.expanduser()
         include = self.include_dump.get()
         self.mutate(f"Collect logs, events and crash evidence for {self.run_id.get()}?\n\nFull kernel dump: {include}\nNo new test will be started.", lambda: DriverLabTransfer(self.service).collect(self.vm_name, self.package_id.get(), self.run_id.get(), output, include_kernel_dump=include), self._show_lab)
 
@@ -618,7 +618,7 @@ class Dashboard(tk.Tk):
             return
         def read() -> None:
             records = []
-            files = sorted(Path(os.environ.get("HYPERV_MCP_EVENT_DIRECTORY", str(Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "HyperVConsoleMCP" / "events"))).glob("*.json"))
+            files = sorted(self.settings.event_directory.expanduser().glob("*.json"))
             for path in files[-1000:]:
                 try:
                     records.append(json.loads(path.read_text(encoding="utf-8")))

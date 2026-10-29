@@ -133,12 +133,30 @@ def test_evidence_chunk_corruption_leaves_no_final_file(guest, tmp_path: Path) -
     assert not list((tmp_path / "run-bad").glob("*.tmp"))
 
 
-def test_mcp_lab_source_must_be_under_configured_root(guest, tmp_path: Path, monkeypatch) -> None:
-    service, backend = guest
+def test_mcp_lab_source_must_be_under_configured_root(tmp_path: Path) -> None:
+    backend = FakeGuestBackend()
+    service = HyperVService(backend, Settings(
+        allowed_vms=frozenset({"NORTH-Test"}), allow_guest=True,
+        guest_username="Administrator", guest_password="secret",
+        lab_root=tmp_path / "allowed",
+    ))
     source = tmp_path / "outside"
     source.mkdir()
     (source / "a.txt").write_text("data")
-    monkeypatch.setenv("HYPERV_MCP_LAB_ROOT", str(tmp_path / "allowed"))
     with pytest.raises(PolicyError):
         service.lab_stage("NORTH-Test", str(source))
     assert backend.calls == []
+
+
+def test_mcp_lab_source_is_accepted_under_the_configured_root(tmp_path: Path) -> None:
+    backend = FakeGuestBackend()
+    service = HyperVService(backend, Settings(
+        allowed_vms=frozenset({"NORTH-Test"}), allow_guest=True,
+        guest_username="Administrator", guest_password="secret",
+        lab_root=tmp_path / "allowed",
+    ))
+    source = tmp_path / "allowed" / "package"
+    source.mkdir(parents=True)
+    (source / "a.txt").write_text("data")
+    result = service.lab_stage("NORTH-Test", str(source), "root-test")
+    assert result["guest_path"].endswith(r"\Packages\root-test")

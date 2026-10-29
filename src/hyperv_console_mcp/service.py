@@ -427,19 +427,18 @@ class HyperVService:
         return diagnostics(self, vm_name)
 
     def lab_stage(self, vm_name: str, source_directory: str, package_id: str | None = None) -> dict[str, Any]:
-        import os
         from pathlib import Path
 
         from .lab.transfer import DriverLabTransfer, build_manifest
         self._guest(vm_name)
-        root = Path(os.path.abspath(os.path.expandvars(os.path.expanduser(
-            os.environ.get("HYPERV_MCP_LAB_ROOT", str(Path.home() / "HyperVLabs" / "packages"))
-        )))).resolve()
+        root = self.settings.lab_root.expanduser().resolve()
         source = Path(os.path.abspath(os.path.expandvars(os.path.expanduser(
             _text(source_directory, "source_directory", 32_768)
         )))).resolve()
         if not source.is_relative_to(root) or source == root:
-            raise PolicyError("The lab source must be a subdirectory of HYPERV_MCP_LAB_ROOT.")
+            raise PolicyError(
+                f"The lab source must be a subdirectory of HYPERV_MCP_LAB_ROOT ({root})."
+            )
         manifest = build_manifest(source, package_id)
         return DriverLabTransfer(self).stage(vm_name, source, manifest)
 
@@ -451,14 +450,8 @@ class HyperVService:
         self, vm_name: str, package_id: str, run_id: str,
         include_kernel_dump: bool = False,
     ) -> dict[str, Any]:
-        import os
-        from pathlib import Path
-
         from .lab.transfer import DriverLabTransfer
-        output = Path(os.environ.get(
-            "HYPERV_MCP_EVIDENCE_ROOT",
-            str(Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "HyperVConsoleMCP" / "evidence"),
-        ))
+        output = self.settings.evidence_root.expanduser().resolve()
         return DriverLabTransfer(self).collect(
             vm_name, package_id, run_id, output, include_kernel_dump=include_kernel_dump,
         )

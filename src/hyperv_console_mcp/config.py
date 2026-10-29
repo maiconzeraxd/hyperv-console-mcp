@@ -31,13 +31,24 @@ def _integer(
     return result
 
 
-def _local_root(child: str) -> Path:
-    return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "HyperVConsoleMCP" / child
+def _local_root(child: str, values: Mapping[str, str] | None = None) -> Path:
+    base = (os.environ if values is None else values).get("LOCALAPPDATA", str(Path.home()))
+    return Path(base) / "HyperVConsoleMCP" / child
 
 
 def _path(values: Mapping[str, str], name: str, default: Path) -> Path:
     value = values.get(name, "").strip()
     return Path(value).expanduser() if value else default
+
+
+def _absolute_path(values: Mapping[str, str], name: str, default: Path) -> Path:
+    value = values.get(name, "").strip()
+    if not value:
+        return default
+    path = Path(os.path.expandvars(value)).expanduser()
+    if not path.is_absolute():
+        raise ValidationError(f"{name} must be an absolute path.")
+    return path
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +68,9 @@ class Settings:
     audit_log: Path | None = None
     serial_log_root: Path = field(default_factory=lambda: _local_root("serial"))
     iso_root: Path = field(default_factory=lambda: _local_root("media"))
+    lab_root: Path = field(default_factory=lambda: _local_root("lab") / "packages")
+    evidence_root: Path = field(default_factory=lambda: _local_root("evidence"))
+    event_directory: Path = field(default_factory=lambda: _local_root("events"))
 
     @classmethod
     def from_env(cls, values: Mapping[str, str] | None = None) -> "Settings":
@@ -87,9 +101,18 @@ class Settings:
             ),
             audit_log=Path(audit_path).expanduser() if audit_path else None,
             serial_log_root=_path(
-                env, "HYPERV_MCP_SERIAL_LOG_ROOT", _local_root("serial")
+                env, "HYPERV_MCP_SERIAL_LOG_ROOT", _local_root("serial", env)
             ),
-            iso_root=_path(env, "HYPERV_MCP_ISO_ROOT", _local_root("media")),
+            iso_root=_path(env, "HYPERV_MCP_ISO_ROOT", _local_root("media", env)),
+            lab_root=_absolute_path(
+                env, "HYPERV_MCP_LAB_ROOT", _local_root("lab", env) / "packages"
+            ),
+            evidence_root=_absolute_path(
+                env, "HYPERV_MCP_EVIDENCE_ROOT", _local_root("evidence", env)
+            ),
+            event_directory=_absolute_path(
+                env, "HYPERV_MCP_EVENT_DIRECTORY", _local_root("events", env)
+            ),
         )
 
     def is_allowed(self, vm_name: str) -> bool:

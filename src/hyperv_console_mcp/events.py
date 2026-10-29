@@ -15,6 +15,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .config import Settings
+from .errors import ValidationError
+
 _MAX_EVENTS = 1000
 _MAX_MESSAGE = 512
 _actor: ContextVar[str] = ContextVar("hyperv_event_actor", default="mcp")
@@ -46,10 +49,11 @@ class OperationEvent:
 
 
 class EventBus:
-    def __init__(self) -> None:
+    def __init__(self, directory: Path | None = None) -> None:
         self._condition = threading.Condition()
         self._events: deque[OperationEvent] = deque(maxlen=_MAX_EVENTS)
         self._sequence = 0
+        self._directory = directory
 
     def snapshot(self, after: int = 0) -> dict[str, Any]:
         with self._condition:
@@ -88,15 +92,13 @@ class EventBus:
             self._events.append(event)
             self._condition.notify_all()
         try:
-            directory = Path(os.environ.get(
-                "HYPERV_MCP_EVENT_DIRECTORY",
-                str(Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "HyperVConsoleMCP" / "events"),
-            ))
+            directory = self._directory or Settings.from_env().event_directory
+            directory = directory.expanduser()
             directory.mkdir(parents=True, exist_ok=True)
             record = directory / f"{event.started_utc.replace(':', '-')}-{event.sequence:012d}-{event.event_id}.json"
             import json
             record.write_text(json.dumps(asdict(event), ensure_ascii=False), encoding="utf-8")
-        except OSError:
+        except (OSError, ValidationError):
             pass
         return event
 
