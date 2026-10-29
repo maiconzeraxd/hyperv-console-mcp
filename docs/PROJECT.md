@@ -1252,6 +1252,28 @@ answered `service: reloaded`, and the same host then reported `{'north-test': 'l
 loop, observed. Not exercised live: a click on the window's *Apply level* button (the frame needs a
 display and an operator to confirm it).
 
+### 2026-10-29 — v0.3 phase 5: an approval is a card, not a window that takes the desk
+
+- **The gap.** The approval prompt was a `tk.Toplevel` with `grab_set()` and `wait_window()`: while an
+  AI operation waited, the window could not be touched — exactly when the operator wants to read the
+  VM's state, another page, or the previous run before deciding. Two requests at once were not
+  representable at all.
+- **A side queue.** The window is now a workspace with the page in one grid column and
+  `_ApprovalQueue` in the other. Each request is a card with the operation, the VM, the tool's own
+  secret-free summary and two buttons; the column appears when something is waiting and leaves when
+  the last card is answered. Nothing grabs the window.
+- **The card follows the broker.** A card is keyed by the broker's request id, and `_prune_approvals`
+  drops any card whose id is no longer in `self.pending` — so a request that timed out on the
+  broker's own clock cannot leave a button that looks live but answers nobody.
+
+Tests: `tests/test_dashboard.py` — a request becomes a card while `grab_current()` stays `None`,
+answering one of two queued requests answers only that one, and a stale card leaves the queue on the
+next tick. Suite: 741 passing, 1 skipped.
+
+Not exercised live: a real MCP mutation held open while the operator clicks *Approve once* (it needs
+a running host, the approval environment and a human click). The queue itself was exercised in a real
+window over the fake backend, which is where the widget code runs.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,

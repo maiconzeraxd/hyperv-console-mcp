@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import time
 from pathlib import Path
 
@@ -64,6 +65,84 @@ def test_the_access_note_says_what_a_level_means_and_what_its_absence_does() -> 
     missing = access_note("NORTH-Test", {})
     assert "no level" in missing
     assert "no tool can reach it" in missing
+
+
+@pytest.fixture
+def window(tmp_path, monkeypatch):
+    """A real window over a fake backend, closed however the test ends."""
+    monkeypatch.setenv("HYPERV_MCP_EVENT_DIRECTORY", str(tmp_path / "events"))
+    monkeypatch.setenv("HYPERV_MCP_SHARED_SERVICE", "false")
+    monkeypatch.setattr(
+        "hyperv_console_mcp.dashboard.create_backend", lambda *args, **kwargs: UiBackend()
+    )
+    try:
+        app = Dashboard("NORTH-Test")
+    except Exception as exc:
+        if "display" in str(exc).casefold():
+            pytest.skip("No interactive display is available.")
+        raise
+    try:
+        yield app
+    finally:
+        app.close()
+
+
+def _request(request_id: str = "req-1") -> dict:
+    return {
+        "request_id": request_id,
+        "operation": "guest_exec",
+        "vm_name": "NORTH-Test",
+        "summary": {"command_preview": "hostname", "vm": "NORTH-Test"},
+    }
+
+
+def test_an_approval_is_a_card_and_never_takes_the_window_away(window) -> None:
+    """The operator may need another page to decide; a grab would deny that."""
+    answered: queue.Queue[bool] = queue.Queue(maxsize=1)
+    window.pending["req-1"] = answered
+
+    window._show_approval(_request())
+    window.update()
+
+    assert "req-1" in window.approvals.cards
+    assert window.approvals.winfo_ismapped()
+    assert window.grab_current() is None
+
+    window._resolve_approval("req-1", True)
+    window.update()
+
+    assert answered.get_nowait() is True
+    assert "req-1" not in window.approvals.cards
+    assert not window.approvals.winfo_ismapped()
+
+
+def test_the_queue_holds_several_requests_and_answers_only_the_one_clicked(window) -> None:
+    first: queue.Queue[bool] = queue.Queue(maxsize=1)
+    second: queue.Queue[bool] = queue.Queue(maxsize=1)
+    window.pending.update({"req-1": first, "req-2": second})
+    window._show_approval(_request("req-1"))
+    window._show_approval(_request("req-2"))
+    window.update()
+
+    window._resolve_approval("req-2", False)
+    window.update()
+
+    assert second.get_nowait() is False
+    assert first.empty()
+    assert set(window.approvals.cards) == {"req-1"}
+
+
+def test_a_card_whose_request_timed_out_leaves_the_queue(window) -> None:
+    """The broker stops waiting on its own clock; the card must follow it."""
+    window._show_approval(_request("stale"))
+    window.update()
+    assert "stale" in window.approvals.cards
+
+    window._prune_approvals()
+    window.update()
+
+    assert window.approvals.cards == {}
+    assert not window.approvals.winfo_ismapped()
 
 
 def test_no_shipped_module_names_a_vm_or_a_pipe() -> None:

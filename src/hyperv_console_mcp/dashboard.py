@@ -54,7 +54,7 @@ def _safe_json(value: Any) -> str:
 
 
 def _format_summary(summary: Any) -> str:
-    """Render an approval summary for the dialog, with the command preview first."""
+    """Render an approval summary for a queue card, with the command preview first."""
     if not isinstance(summary, dict) or not summary:
         return "No additional details were provided for this operation."
     preview = summary.get("command_preview")
@@ -179,66 +179,70 @@ class _VmChooser(tk.Toplevel):
             self.destroy()
 
 
-class _ApprovalDialog(tk.Toplevel):
-    """Modal, scrollable approval prompt carrying the request's own summary."""
+class _ApprovalQueue(ttk.Frame):
+    """The side queue: what the AI is waiting for, without freezing the window.
 
-    def __init__(self, master: tk.Misc, request: dict[str, Any]) -> None:
-        super().__init__(master)
-        self.result = False
-        self.title("AI requests approval")
-        self.configure(bg=COLORS["background"])
-        self.transient(master)
-        self.resizable(True, True)
-        self.protocol("WM_DELETE_WINDOW", self._decide_false)
-        self.bind("<Escape>", lambda _event: self._decide_false())
+    A modal prompt took the window away exactly when the operator needed it —
+    to read the VM's state, another page, or the previous run — and the prompt
+    itself was the only thing on screen. A card per request leaves the window
+    usable, keeps several requests readable at once, and puts the decision
+    beside the evidence instead of on top of it.
 
-        frame = ttk.Frame(self, padding=14)
-        frame.pack(fill="both", expand=True)
+    Each card is bound to the broker's request id; the window decides through
+    ``decide`` so the queue holds no policy of its own.
+    """
+
+    def __init__(self, master: tk.Misc, decide: Callable[[str, bool], None]) -> None:
+        super().__init__(master, padding=(16, 20))
+        self.decide = decide
+        self.cards: dict[str, tk.Frame] = {}
         ttk.Label(
-            frame, text=f"Operation: {request.get('operation') or 'unknown'}",
-            font=("Segoe UI Semibold", 12),
+            self, text="Waiting for you", font=("Segoe UI Semibold", 14),
+            foreground=COLORS["warning"],
         ).pack(anchor="w")
-        ttk.Label(frame, text=f"VM: {request.get('vm_name') or 'host'}").pack(anchor="w")
         ttk.Label(
-            frame, wraplength=760,
-            text=(
-                "The MCP server is waiting for this one operation. No payload, command, "
-                "or credential is sent through this broker; the summary below comes from "
-                "the tool that asked."
-            ),
-        ).pack(anchor="w", pady=(8, 6))
+            self, foreground=COLORS["muted"], wraplength=300, justify="left",
+            text="The MCP server holds one operation open for each card. Nothing here is sent to the AI.",
+        ).pack(anchor="w", pady=(6, 12))
+        self.body = ttk.Frame(self)
+        self.body.pack(fill="both", expand=True)
 
-        body_frame = ttk.Frame(frame)
-        body_frame.pack(side="top", fill="both", expand=True)
-        body = tk.Text(
-            body_frame, wrap="word", height=18, width=92, bg=COLORS["panel"],
-            fg=COLORS["text"], relief="flat", padx=10, pady=8,
+    def add(self, request: dict[str, Any]) -> None:
+        """One card, appended below the ones already waiting."""
+        request_id = str(request.get("request_id") or "")
+        if not request_id or request_id in self.cards:
+            return
+        card = tk.Frame(self.body, bg=COLORS["panel"], highlightbackground=COLORS["border"], highlightthickness=1)
+        card.pack(fill="x", pady=(0, 12))
+        inner = ttk.Frame(card, padding=12)
+        inner.pack(fill="both", expand=True)
+        ttk.Label(
+            inner, text=str(request.get("operation") or "unknown operation"),
+            font=("Segoe UI Semibold", 11), foreground=COLORS["accent"],
+        ).pack(anchor="w")
+        ttk.Label(
+            inner, text=f"VM: {request.get('vm_name') or 'host'}", foreground=COLORS["muted"],
+        ).pack(anchor="w", pady=(0, 6))
+        summary = tk.Text(
+            inner, wrap="word", height=8, width=38, bg=COLORS["surface"], fg=COLORS["text"],
+            relief="flat", padx=8, pady=6,
         )
-        scroll = ttk.Scrollbar(body_frame, orient="vertical", command=body.yview)
-        body.configure(yscrollcommand=scroll.set)
-        body.insert("1.0", _format_summary(request.get("summary")))
-        body.configure(state="disabled")
-        scroll.pack(side="right", fill="y")
-        body.pack(side="left", fill="both", expand=True)
+        summary.insert("1.0", _format_summary(request.get("summary")))
+        summary.configure(state="disabled")
+        summary.pack(fill="both", expand=True)
+        buttons = ttk.Frame(inner)
+        buttons.pack(fill="x", pady=(8, 0))
+        ttk.Button(buttons, text="Deny", command=lambda: self.decide(request_id, False)).pack(side="right")
+        ttk.Button(
+            buttons, text="Approve once", style="Accent.TButton",
+            command=lambda: self.decide(request_id, True),
+        ).pack(side="right", padx=(0, 8))
+        self.cards[request_id] = card
 
-        buttons = ttk.Frame(frame)
-        buttons.pack(fill="x", pady=(10, 0))
-        deny = ttk.Button(buttons, text="Deny", command=self._decide_false)
-        deny.pack(side="right")
-        approve = ttk.Button(buttons, text="Approve once", command=self._decide_true)
-        approve.pack(side="right", padx=(0, 8))
-        approve.focus_set()
-
-        self.update_idletasks()
-        self.grab_set()
-
-    def _decide_true(self) -> None:
-        self.result = True
-        self.destroy()
-
-    def _decide_false(self) -> None:
-        self.result = False
-        self.destroy()
+    def remove(self, request_id: str) -> None:
+        card = self.cards.pop(request_id, None)
+        if card is not None:
+            card.destroy()
 
 
 class _CredentialDialog(tk.Toplevel):
@@ -427,8 +431,18 @@ class Dashboard(tk.Tk):
             nav, textvariable=self.profile,
             foreground=COLORS["warning"] if self.settings.profile == "lab" else COLORS["muted"],
         ).pack(anchor="w", pady=(0, 24))
-        self.content = ttk.Frame(self, padding=26)
-        self.content.pack(side="right", fill="both", expand=True)
+        self.workspace = ttk.Frame(self)
+        self.workspace.pack(side="left", fill="both", expand=True)
+        self.workspace.grid_rowconfigure(0, weight=1)
+        self.workspace.grid_columnconfigure(0, weight=1)
+        self.content = ttk.Frame(self.workspace, padding=26)
+        self.content.grid(row=0, column=0, sticky="nsew")
+        # The approval queue takes a column of its own and leaves it when the
+        # last card is answered, so the pages keep the width in the common case.
+        self.approvals = _ApprovalQueue(self.workspace, self._resolve_approval)
+        self.approvals.grid(row=0, column=1, sticky="ns")
+        self.workspace.grid_columnconfigure(1, minsize=340)
+        self.approvals.grid_remove()
         for page in (
             "Overview", "Activity", "Driver lab", "Guest access", "Console", "Recovery",
             "Media", "Debugger",
@@ -1140,6 +1154,39 @@ class Dashboard(tk.Tk):
             with self.pending_lock:
                 self.pending.pop(request["request_id"], None)
 
+    def _show_approval(self, request: dict[str, Any]) -> None:
+        """Put one request in the side queue; nothing is grabbed and nothing blocks."""
+        self.approvals.add(request)
+        self.approvals.grid()
+
+    def _resolve_approval(self, request_id: str, approved: bool) -> None:
+        """Answer the broker, then drop the card — in that order, so a lost
+        answer cannot leave a button that looks live."""
+        with self.pending_lock:
+            pending = self.pending.get(request_id)
+        if pending is not None:
+            pending.put(approved)
+        self._drop_approval(request_id)
+
+    def _drop_approval(self, request_id: str) -> None:
+        self.approvals.remove(request_id)
+        if not self.approvals.cards:
+            self.approvals.grid_remove()
+
+    def _prune_approvals(self) -> None:
+        """A request the broker gave up on must not keep its card.
+
+        ``_approval_requested`` stops waiting after its own timeout and forgets
+        the id; the card it left behind would otherwise sit there inviting an
+        answer nobody is listening for.
+        """
+        if not self.approvals.cards:
+            return
+        with self.pending_lock:
+            live = set(self.pending)
+        for request_id in [card for card in self.approvals.cards if card not in live]:
+            self._drop_approval(request_id)
+
     def _update_approval_label(self) -> None:
         if hasattr(self, "approval_mode"):
             enabled = os.environ.get("HYPERV_MCP_REQUIRE_DASHBOARD_APPROVAL", "false").casefold() in {"1", "true", "yes", "on"}
@@ -1184,14 +1231,7 @@ class Dashboard(tk.Tk):
                     elif callback:
                         callback(result)
                 elif kind == "approval":
-                    request = value
-                    dialog = _ApprovalDialog(self, request)
-                    self.wait_window(dialog)
-                    approved = dialog.result
-                    with self.pending_lock:
-                        pending = self.pending.get(request["request_id"])
-                    if pending:
-                        pending.put(approved)
+                    self._show_approval(value)
                 elif kind == "events":
                     for event in value:
                         if event.get("event_id") not in self.seen_events:
@@ -1204,6 +1244,7 @@ class Dashboard(tk.Tk):
                         self.lab_progress["value"] = progress[-1]["progress"] or 0
         except queue.Empty:
             pass
+        self._prune_approvals()
         if self.running:
             self.after(100, self._process_queue)
 
