@@ -569,3 +569,35 @@ Live validation (elevated, `NORTH-Test` on this host, VM running): `media_list` 
 and through the bridge were compared as whole dictionaries — `vm`, `state`, `generation` and
 both drives with their `path` and `mounted` flags — and **the answers were equal**. Not
 validated live: a VM with a DVD drive that holds no disc, which this VM does not have.
+
+### 2026-10-29 — v0.3 phase 4: changing the disc is a detach and an attach
+
+- **`ModifyResourceSettings` is not the call, and accepting is not doing.** The provider
+  takes a `ModifyResourceSettings` for the disc setting and answers `0` without changing
+  anything; given the new path it fails the job instead. What the host accepts is
+  `RemoveResourceSettings` with the disc's object path followed by `AddResourceSettings` with
+  a new disc setting for the same drive, so `media_mount` is those two calls in that order and
+  `media_eject` is the first one alone.
+- **The new setting travels as an embedded instance.** `AddResourceSettings` takes
+  `ResourceSettings` as DTD 2.0 text, and `HostResource` is an array property: written as a
+  plain `PROPERTY` the provider reads the path as a scalar and the job fails, so it is a
+  `PROPERTY.ARRAY`/`VALUE.ARRAY` element. Only `ResourceType`, `ResourceSubType`, `Parent`
+  and `HostResource` are sent — everything else is filled in by the provider, and the fields
+  it would otherwise expect are localized text on a pt-BR host.
+- **The disc is found by its `Parent`, and the query has to be scoped to the drive's slot.**
+  A checkpoint carries its own copy of the same setting, so matching by slot alone would edit
+  the checkpoint instead. The first version filtered the storage class by the drive's
+  *object-path* prefix (`\HOST\root\virtualization\v2`), which no `InstanceID` starts with:
+  the detach silently found nothing, the attach then failed with "the location is already in
+  use", and the media never changed. The regression test asserts the `LIKE` is on
+  `Microsoft:<vm>\<controller>\<number>\<location>\`.
+- **`boot_first` stays on the worker.** It changes firmware rather than media (gen 2
+  `FirstBootDevice`, gen 1 BIOS startup order), so the handler refuses with `wmi_unsupported`
+  and the bridge serves the whole request — including the media change it would otherwise
+  duplicate.
+
+Live validation (elevated, `NORTH-Test` on this host): the VM was turned off, `media_mount`
+mounted `virtio-win.iso` at 0/2 (read back as the drive's path), `media_eject` emptied it
+(`path: null`), `media_mount` restored `NorthTestPackage.iso`, and the VM was started again
+and confirmed `Running` with 0/1 and 0/2 back on their original media. Not validated live: a
+`boot_first` request, which goes to the bridge, and a generation-1 VM.

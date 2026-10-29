@@ -37,6 +37,8 @@ HANDLERS: dict[str, Handler] = {
     "checkpoint_restore": checkpoint.checkpoint_restore,
     "checkpoint_delete": checkpoint.checkpoint_delete,
     "media_list": media.media_list,
+    "media_mount": media.media_mount,
+    "media_eject": media.media_eject,
 }
 
 
