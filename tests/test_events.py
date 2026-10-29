@@ -231,19 +231,22 @@ def test_every_mutating_mcp_tool_is_gated_and_read_only_lab_tools_are_not() -> N
     assert {"lab_verify", "lab_diagnostics"}.isdisjoint(GATED_TOOLS)
 
     # `_approve` gates directly; `_guest_call` gates when it is given a summary,
-    # which is how the guest file tools reach the transport.
+    # which is how the guest file tools reach the transport. The service is a
+    # package of domain modules, so the audit walks every one of them: a domain
+    # that forgets its gate is exactly the bug this test exists for.
     gated = set()
-    for node in ast.walk(ast.parse((SOURCE / "service.py").read_text(encoding="utf-8"))):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-            continue
-        if not node.args or not isinstance(node.args[0], ast.Constant):
-            continue
-        if node.func.attr == "_approve":
-            gated.add(node.args[0].value)
-        elif node.func.attr == "_guest_call" and any(
-            keyword.arg == "summary" for keyword in node.keywords
-        ):
-            gated.add(node.args[0].value)
+    for module in sorted((SOURCE / "service").glob("*.py")):
+        for node in ast.walk(ast.parse(module.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if not node.args or not isinstance(node.args[0], ast.Constant):
+                continue
+            if node.func.attr == "_approve":
+                gated.add(node.args[0].value)
+            elif node.func.attr == "_guest_call" and any(
+                keyword.arg == "summary" for keyword in node.keywords
+            ):
+                gated.add(node.args[0].value)
     assert set(GATED_TOOLS) <= gated
 
 
