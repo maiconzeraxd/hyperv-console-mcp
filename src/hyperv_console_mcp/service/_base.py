@@ -131,6 +131,21 @@ class ServiceBase:
         from ..events import EVENTS
         return EVENTS.snapshot(after)
 
+    def reload_policy(self) -> dict[str, Any]:
+        """Re-read the environment and the operator's access file.
+
+        A level is chosen while the service is running — from the window, or from
+        ``hyperv-access`` in a terminal — so a policy read once at startup would
+        need a restart to mean anything. Both writers call this after they save.
+        It can only re-read what the operator wrote: nothing here can widen the
+        policy by itself, which is why an AI call may ask for it too.
+        """
+        self.settings = Settings.from_env()
+        return {
+            "levels": dict(self.settings.levels),
+            "allowlist": sorted(self.settings.allowed_vms),
+        }
+
     def _vm(self, name: str) -> str:
         name = _text(name, "vm_name", 256)
         if self.settings.allowed_vms and not self.settings.is_allowed(name):

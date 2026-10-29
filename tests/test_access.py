@@ -16,7 +16,7 @@ from hyperv_console_mcp.access import (
     access_file,
     normalise_level,
 )
-from hyperv_console_mcp.config import Settings
+from hyperv_console_mcp.config import CAPABILITY_VARIABLES, Settings
 from hyperv_console_mcp.errors import PolicyError, ValidationError
 from hyperv_console_mcp.service import HyperVService
 
@@ -148,6 +148,44 @@ def test_an_environment_allowlist_narrows_the_file(tmp_path: Path) -> None:
     assert settings.is_allowed("Prod-VM") is False
     # The level is still there, so narrowing the allowlist does not lose it.
     assert settings.level_for("prod-vm") == "lab"
+
+
+def test_a_level_set_while_the_service_runs_takes_effect_on_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The level is chosen from the window, so the host must read the file again."""
+    path = tmp_path / "access.json"
+    monkeypatch.setenv("HYPERV_MCP_ACCESS_FILE", str(path))
+    for name in ("HYPERV_MCP_ALLOWED_VMS", "HYPERV_MCP_PROFILE", "HYPERV_MCP_TOOLSETS"):
+        monkeypatch.delenv(name, raising=False)
+    for name in CAPABILITY_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+
+    service = HyperVService(RecordingBackend(), Settings.from_env())
+    assert service.settings.allowed_vms == frozenset()
+    AccessStore(path).set("Lab-VM", "control")
+
+    policy = service.reload_policy()
+
+    assert policy == {"levels": {"lab-vm": "control"}, "allowlist": ["Lab-VM"]}
+    assert service.settings.allows("Lab-VM", "power") is True
+    assert service.settings.allows("Lab-VM", "guest") is False
+
+
+def test_the_cli_tells_a_running_service_and_never_needs_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A level set in a terminal must not wait for a restart, and no host is no error."""
+    from uuid import uuid4
+
+    from hyperv_console_mcp.access_cli import _notify_service
+
+    monkeypatch.setenv(
+        "HYPERV_MCP_SERVICE_PIPE", rf"\\.\pipe\HyperVConsoleMCP-Service-absent-{uuid4().hex}"
+    )
+    result: dict[str, Any] = {}
+    _notify_service(result)
+    assert result == {"service": "not running"}
 
 
 def test_a_broken_file_is_an_error_not_an_empty_policy(tmp_path: Path) -> None:

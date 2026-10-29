@@ -1227,6 +1227,31 @@ defect this slice exists to fix, observed rather than inferred. Not exercised li
 window itself against the shared host (it is still tkinter and needs a display), and the approval
 gate across two processes with a real click.
 
+### 2026-10-29 — v0.3 phase 5: the level is chosen in the window, not only in a terminal
+
+- **The gap.** `hyperv-access` was the only writer of the access file, while the roadmap has the
+  level chosen in the UI — and the shared service made the gap worse: a policy read once at
+  startup would have needed a restart for a level set in a terminal to matter.
+- **`reload_policy`.** The service re-reads the environment and the operator's file on request and
+  returns the levels and the allowlist it now enforces. It cannot widen anything by itself — it
+  only re-reads what the operator wrote — so it is a public service method and an AI call may ask
+  for it too.
+- **Both writers notify.** `hyperv-access set`/`remove` and the window's new *Access level* frame
+  write the file and then call `reload_policy`; a host that is not running is reported as
+  `service: not running`, not as a failure, because the next client starts one and it reads the
+  file then. The frame says what a level means, and says plainly that a VM with none cannot be
+  reached by any tool.
+
+Tests: `tests/test_access.py` — a level written while the service runs is enforced after
+`reload_policy`, and the CLI's notification degrades to `not running` with no host;
+`tests/test_dashboard.py` covers the sentence the window shows with and without a level. Suite:
+723 passing, 1 skipped.
+
+Validated live: a real host on its own pipe reported `levels: {}`, `hyperv-access set NORTH-Test lab`
+answered `service: reloaded`, and the same host then reported `{'north-test': 'lab'}` — the whole
+loop, observed. Not exercised live: a click on the window's *Apply level* button (the frame needs a
+display and an operator to confirm it).
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,

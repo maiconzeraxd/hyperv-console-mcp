@@ -11,10 +11,12 @@ import threading
 import time
 import tkinter as tk
 from collections import deque
+from collections.abc import Mapping
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
+from .access import LEVELS, AccessStore, access_file
 from .config import Settings
 from .errors import HyperVError
 from .events import EVENTS, EventLogReader, EventSink
@@ -99,6 +101,18 @@ def existing_pipe_name(status: dict[str, Any]) -> str:
     first = next((port for port in ports if port.get("number") == 1), None)
     path = str((first or {}).get("path") or "")
     return path.rsplit("\\", 1)[-1] if path else ""
+
+
+def access_note(vm_name: str, levels: Mapping[str, str]) -> str:
+    """What the window says about this VM's level, in one sentence.
+
+    A level is the whole policy in one word, so the sentence says what the
+    absence of one means as well as what a level allows.
+    """
+    level = levels.get(vm_name.strip().casefold())
+    if level:
+        return f"{vm_name} is {level}. The service reloads the file when you change it."
+    return f"{vm_name} has no level, so no tool can reach it. Choose one and apply it."
 
 
 class _VmChooser(tk.Toplevel):
@@ -496,6 +510,14 @@ class Dashboard(tk.Tk):
             ("Read guest diagnostics", self._guest_diagnostics),
         ):
             ttk.Button(actions, text=text, command=command, width=32).pack(pady=5, padx=4)
+        policy = ttk.LabelFrame(row, text="Access level")
+        policy.pack(side="left", fill="y", padx=(8, 0))
+        self.level_note = tk.StringVar(value=access_note(self.vm_name, self.settings.levels))
+        ttk.Label(policy, textvariable=self.level_note, wraplength=230, foreground=COLORS["muted"]).pack(anchor="w", padx=8, pady=(8, 4))
+        self.level_choice = tk.StringVar(value=self.settings.levels.get(self.vm_name.casefold(), "control"))
+        ttk.Combobox(policy, textvariable=self.level_choice, values=list(LEVELS), state="readonly", width=22).pack(padx=8, pady=4)
+        ttk.Button(policy, text="Apply level", command=self._apply_level, width=22).pack(padx=8, pady=4)
+        ttk.Button(policy, text="Remove level", command=self._remove_level, width=22).pack(padx=8, pady=(0, 8))
         self.status_var = tk.StringVar(value="Ready. No background operation is running.")
         ttk.Label(self.content, textvariable=self.status_var, foreground=COLORS["muted"]).pack(anchor="w", pady=14)
 
@@ -954,6 +976,48 @@ class Dashboard(tk.Tk):
         def query() -> dict[str, Any]:
             return {"host": self.service.host_status(), "vm": self.service.get_vm(self.vm_name), "checkpoints": self.service.list_checkpoints(self.vm_name), "debug": self.service.debug_serial_status(self.vm_name), "media": self.service.media_list(self.vm_name)}
         self.submit("inventory.refresh", query, self._show_overview)
+
+    def _access_store(self) -> AccessStore:
+        """The file the operator writes, which no MCP tool can reach."""
+        return AccessStore(self.settings.access_path or access_file())
+
+    def _apply_level(self) -> None:
+        level = self.level_choice.get()
+        if not messagebox.askyesno(
+            "Change this VM's access level",
+            f"Give {self.vm_name} the {level} level?\n\nA level decides what the AI may do with "
+            "this VM. It is written by you, never by a tool, and it applies to the running "
+            "service immediately.",
+            parent=self,
+        ):
+            return
+        self._write_level(lambda store: store.set(self.vm_name, level), "access.set")
+
+    def _remove_level(self) -> None:
+        if not messagebox.askyesno(
+            "Remove this VM's access level",
+            f"Forget {self.vm_name}? It becomes unreachable by any tool until it has a level again.",
+            parent=self,
+        ):
+            return
+        self._write_level(lambda store: store.remove(self.vm_name), "access.remove")
+
+    def _write_level(
+        self, change: Callable[[AccessStore], Any], name: str
+    ) -> None:
+        """Save the file, then have the service read it again."""
+        def work() -> dict[str, Any]:
+            change(self._access_store())
+            return self.service.reload_policy()
+
+        self.submit(name, work, self._show_levels)
+
+    def _show_levels(self, policy: dict[str, Any]) -> None:
+        levels = {str(key): str(value) for key, value in (policy.get("levels") or {}).items()}
+        self.level_note.set(access_note(self.vm_name, levels))
+        current = levels.get(self.vm_name.casefold())
+        if current:
+            self.level_choice.set(current)
 
     def _show_overview(self, data: dict[str, Any]) -> None:
         self.last_vm = data["vm"]["vm"]

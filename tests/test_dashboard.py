@@ -57,6 +57,15 @@ def test_the_debugger_page_shows_the_pipe_com1_is_already_on() -> None:
     assert existing_pipe_name({}) == ""
 
 
+def test_the_access_note_says_what_a_level_means_and_what_its_absence_does() -> None:
+    from hyperv_console_mcp.dashboard import access_note
+
+    assert "is lab" in access_note("NORTH-Test", {"north-test": "lab"})
+    missing = access_note("NORTH-Test", {})
+    assert "no level" in missing
+    assert "no tool can reach it" in missing
+
+
 def test_no_shipped_module_names_a_vm_or_a_pipe() -> None:
     """A default VM name and a default pipe name are guesses about the host."""
     root = Path(__file__).resolve().parents[1] / "src" / "hyperv_console_mcp"

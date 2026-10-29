@@ -29,6 +29,27 @@ def _report(entries: dict[str, tuple[str, str]]) -> dict[str, Any]:
     }
 
 
+def _notify_service(result: dict[str, Any]) -> None:
+    """Tell a running service that the file changed.
+
+    The host reads the policy once at startup, so without this a level set here
+    would wait for a restart. A host that is not running is not a problem: the
+    next client starts one and it reads the file then.
+    """
+    from .service.host import ServiceClient
+    from .service.remote import ServiceProxy
+
+    try:
+        client = ServiceClient()
+        if not client.available():
+            result["service"] = "not running"
+            return
+        ServiceProxy(client).reload_policy()
+        result["service"] = "reloaded"
+    except HyperVError as exc:
+        result["service"] = f"not reloaded: {exc}"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="hyperv-access", description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
@@ -45,8 +66,10 @@ def main() -> None:
             result = _report(store.load())
         elif arguments.action == "set":
             result = _report(store.set(arguments.vm, arguments.level))
+            _notify_service(result)
         else:
             result = _report(store.remove(arguments.vm))
+            _notify_service(result)
     except HyperVError as exc:
         print(json.dumps({"error": exc.code, "message": str(exc)}), file=sys.stderr)
         raise SystemExit(1) from None
