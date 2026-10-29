@@ -2,6 +2,8 @@
 
 The native Windows dashboard observes and controls the same policy-gated service used by the MCP server. It does not open an HTTP listener and does not bypass capability flags, the VM allowlist, or exact confirmation fields.
 
+The window itself is a WebView2 page: one HTML file with its CSS and JavaScript inline, loaded through pywebview with no local HTTP server and no port. It needs the Evergreen WebView2 runtime (present on current Windows 10/11 and with Edge) and `pywebview` (`pip install hyperv-console-mcp[ui]`). Without either, the tkinter window opens instead; `--classic` asks for it on any host. The page is a client of the same service, through the same `dispatch` envelope the pipe uses, so nothing here is a second door past the policy.
+
 ## Start
 
 Run from an elevated PowerShell when Hyper-V management requires elevation:

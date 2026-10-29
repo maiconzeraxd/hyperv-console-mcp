@@ -2,7 +2,7 @@
 
 A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/) server for **Hyper-V on Windows**. It combines VM management, checkpoints, PowerShell Direct diagnostics, synthetic keyboard/mouse input, console screenshots without VMConnect, installation media, serial consoles, and serial WinDbg preparation and a live kd.exe kernel-debugging session in one stdio server.
 
-**Alpha status:** 741 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
+**Alpha status:** 762 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
 
 ## Highlights
 
@@ -39,6 +39,7 @@ From the repository root, using a virtual environment is recommended:
 ```powershell
 py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e '.[dev]'
+.\.venv\Scripts\python.exe -m pip install -e '.[ui]'   # the WebView2 window; tkinter works without it
 .\.venv\Scripts\python.exe -m pytest
 ```
 
@@ -123,6 +124,8 @@ Media operations use an existing DVD drive and require the VM to be Off. `media_
 ## Dashboard and reproducible lab
 
 Start the native dashboard with `python -I scripts\run_dashboard.py` or, after installation, `hyperv-dashboard`. `--vm <name>` picks the VM up front; without it the window opens the only VM Hyper-V reports and asks from a list when there is more than one, so no VM name is built into the program. It uses the same service and policies as MCP and exposes activity, console, recovery, media, serial/debugging, guest access and lab pages. Optional per-request approval of AI mutations is documented in [the dashboard guide](docs/DASHBOARD.md); a pending request is a card in a side queue, never a modal prompt, so the window stays usable while an operation waits.
+
+The window is a WebView2 page (`pip install hyperv-console-mcp[ui]`, or pywebview already present). It is loaded from a single HTML file with every asset inline, so it starts no local HTTP server and opens no port. On a host without the WebView2 runtime or without pywebview, `hyperv-dashboard` opens the tkinter window instead of failing; `--classic` asks for that window on any host.
 
 The MCP server and the dashboard are clients of one background service, so a KD or serial session the AI opens is the session the window shows, and the activity page lists what the other process did. A client that finds no host starts one (`hyperv-service`, or `hyperv-service --pipe NAME`) and joins it; `HYPERV_MCP_SHARED_SERVICE=false` keeps a private copy for a run that must not disturb a live one, and `HYPERV_MCP_SERVICE_PIPE` names a different pipe. The host reads its policy once at startup, so whichever client starts it decides the environment for both — set the level per VM in the access file rather than relying on a client's environment.
 

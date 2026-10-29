@@ -1301,6 +1301,50 @@ left byte-identical, `--client codex` created the TOML section, and `--shortcut`
 `Hyper-V Console MCP.lnk` under the scratch Start Menu. Not exercised: writing into this host's own
 Claude, Cursor or Codex configuration — that is the operator's file and their decision.
 
+### 2026-10-29 — v0.3 phase 5: the window is a page, and it does not need a port
+
+- **What replaced tkinter.** `webui/` holds `api.py` (what the page may ask), `window.py` (opening it)
+  and `assets/index.html` (one self-contained dark page). The page is passed to pywebview as `html=`
+  with every asset inline, so `webview.start(http_server=False)` starts no local server and the
+  window opens no port — the same rule the MCP server keeps. `hyperv-dashboard` opens it and falls
+  back to the tkinter window when pywebview or the WebView2 runtime is missing; `--classic` asks for
+  tkinter on any host.
+- **The bridge is not a second door.** `Api.call` sends `{method, actor, kwargs}` through the same
+  `dispatch` the pipe uses, so only public service methods cross, arguments bind to the signature
+  first, and a refusal arrives as `{error: {code, message, fix}}` for the page to render. The level
+  file is the window's own (`hyperv-access`'s file, which no tool reaches), and approvals are cards
+  in a side column, so the page never takes the desk while an operation waits.
+- **A `const value` broke the whole page.** pywebview answers a JS → Python call by evaluating
+  `var value; …` at global scope. A page that already declares `value` at top level turns that
+  script into a `SyntaxError`, so the call never returns and the window draws with nothing behind
+  it: no error, no traceback. The helper is now `fieldValue`, and a test scans the page's top-level
+  declarations for the names pywebview's own wrapper uses.
+- **Layout fixed against the real window.** The nav buttons were inline-blocks and paired two to a
+  row; the narrow layout kept the column rule and pushed the brand out of place; the screenshot
+  `<img>` drew a broken-image icon before any capture; an empty `<dd>` read as a failed load; and a
+  VM-less window rendered `" · profile safe"` with a leading separator.
+
+Tests: `tests/test_webui.py` (19 tests) — envelope dispatch, private-method and wrong-argument
+refusals, `hello` and its capabilities, choosing a VM, writing and removing a level, the approval
+queue answering once and denying on its own timeout, the screenshot data URL, the page carrying no
+`http://`/`https://`/`<script src`/`<link` and all eight builders, the runtime probe, and the
+name-collision regression. Suite: 762 passing, 1 skipped.
+
+Validated live on this host. The window opened at 1420×900 and at 1000×760 over a fake service and
+over the real one; all eight pages rendered; an approval request became a card with the operation,
+the VM and the command preview, and *Approve once* answered `True` and removed it; the VM chooser
+listed both VMs and switching to one at `control` greyed out guest and debugger in the capability
+list. The real `hyperv-dashboard` opened against the shared service and read the host (VM state
+`unknown` and `hypervisor: unreadable`, which is this shell's missing elevation, not the window).
+Not exercised live: a real MCP mutation held open while the operator clicks, and a screenshot
+rendered from a live VM — the capture path needs an elevated session.
+
+- **A pipe name the shell ate, said plainly.** `HYPERV_MCP_SERVICE_PIPE` without its leading `\\`
+  made `CreateNamedPipeW` fail with WinError 123 inside the *detached* host, so the client reported
+  only "the service did not answer within 20 seconds" and the reason sat in a log file nobody opens.
+  `pipe_name()` now refuses a malformed override where it is read, and `hyperv-dashboard` shows a
+  service failure in a message box instead of exiting silently when launched from the shortcut.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,

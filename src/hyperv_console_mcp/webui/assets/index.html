@@ -1,0 +1,724 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hyper-V Control Center</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b1120;
+    --panel: #111b2e;
+    --surface: #17243a;
+    --border: #273851;
+    --text: #e5edf8;
+    --muted: #8fa5bf;
+    --accent: #6ee7b7;
+    --blue: #60a5fa;
+    --warning: #fbbf24;
+    --error: #fb7185;
+    --radius: 10px;
+    --gap: 14px;
+    font-size: 15px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    line-height: 1.45;
+    overflow: hidden;
+  }
+  .app {
+    display: grid;
+    grid-template-columns: 232px minmax(0, 1fr) auto;
+    height: 100vh;
+  }
+  /* ---------- navigation ---------- */
+  nav {
+    padding: 22px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+  }
+  nav .brand { font-size: 1.4rem; font-weight: 700; letter-spacing: .06em; color: var(--accent); }
+  nav .sub { color: var(--muted); font-size: .8rem; margin-bottom: 10px; }
+  nav .vm { color: var(--blue); font-size: .85rem; word-break: break-all; }
+  nav .meta { color: var(--muted); font-size: .78rem; margin-bottom: 14px; }
+  /* One button per line: without this the buttons are inline-blocks and pair up
+     two to a row as soon as the labels are short enough. */
+  nav #nav-buttons { display: flex; flex-direction: column; gap: 4px; }
+  nav button {
+    width: 100%;
+    text-align: left;
+    padding: 10px 14px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    cursor: pointer;
+  }
+  nav button:hover { background: var(--surface); color: var(--text); }
+  nav button.active { background: var(--surface); color: var(--text); font-weight: 600; }
+  nav .caps { margin-top: auto; color: var(--muted); font-size: .78rem; white-space: pre-line; padding-top: 18px; }
+  /* ---------- content ---------- */
+  main { padding: 24px 26px; overflow-y: auto; min-width: 0; }
+  header.page { margin-bottom: 18px; }
+  header.page h1 { margin: 0 0 4px; font-size: 1.5rem; }
+  header.page p { margin: 0; color: var(--muted); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: var(--gap); }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+  }
+  .card h2 { margin: 0 0 2px; font-size: 1rem; }
+  .card .hint { margin: 0 0 12px; color: var(--muted); font-size: .82rem; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin-bottom: 10px; }
+  label.field { display: flex; flex-direction: column; gap: 4px; font-size: .8rem; color: var(--muted); flex: 1 1 140px; }
+  input, select, textarea {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: .88rem;
+    width: 100%;
+  }
+  textarea { resize: vertical; min-height: 72px; font-family: Consolas, "Cascadia Mono", monospace; }
+  button.act {
+    border: 0;
+    border-radius: 7px;
+    padding: 8px 14px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    font-size: .86rem;
+    cursor: pointer;
+  }
+  button.act:hover { background: #243955; }
+  button.act.primary { background: #175c4b; color: #d9fff1; font-weight: 600; }
+  button.act.primary:hover { background: #207862; }
+  button.act.danger { background: #4a1d28; color: #ffd8de; }
+  button.act.danger:hover { background: #632434; }
+  button.act:disabled { opacity: .5; cursor: not-allowed; }
+  .facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: .86rem; }
+  .facts dt { color: var(--muted); }
+  .facts dd { margin: 0; word-break: break-word; }
+  .state { font-size: 1.5rem; font-weight: 700; color: var(--accent); }
+  .state.off { color: var(--muted); }
+  .state.bad { color: var(--error); }
+  /* Hidden until a capture exists: an <img> with no src draws the browser's
+     broken-image icon and its alt text, which reads as a failure on a page
+     that has simply not taken a screenshot yet. */
+  .shot { width: 100%; border-radius: 8px; border: 1px solid var(--border); background: #000; display: none; }
+  .shot.live { display: block; }
+  table.events { width: 100%; border-collapse: collapse; font-size: .82rem; }
+  table.events th, table.events td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  table.events th { color: var(--muted); font-weight: 600; }
+  table.events td.err { color: var(--error); }
+  /* ---------- output ---------- */
+  #output {
+    position: sticky;
+    bottom: 0;
+    margin-top: 18px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    max-height: 40vh;
+    display: none;
+    flex-direction: column;
+  }
+  #output.open { display: flex; }
+  #output header { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  #output header span { color: var(--muted); font-size: .8rem; }
+  #output pre { margin: 0; padding: 12px; overflow: auto; font-family: Consolas, "Cascadia Mono", monospace; font-size: .8rem; white-space: pre-wrap; word-break: break-word; }
+  #output.failed { border-color: var(--error); }
+  #output.failed header span { color: var(--error); }
+  /* ---------- approvals ---------- */
+  aside.approvals {
+    width: 340px;
+    padding: 22px 16px;
+    border-left: 1px solid var(--border);
+    overflow-y: auto;
+    display: none;
+    background: #0e1626;
+  }
+  aside.approvals.open { display: block; }
+  aside.approvals h2 { margin: 0 0 4px; font-size: 1rem; color: var(--warning); }
+  aside.approvals .hint { margin: 0 0 14px; color: var(--muted); font-size: .8rem; }
+  .approval { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin-bottom: 12px; }
+  .approval .op { color: var(--accent); font-weight: 600; font-size: .9rem; }
+  .approval .vm { color: var(--muted); font-size: .78rem; margin-bottom: 8px; }
+  .approval pre { margin: 0 0 10px; max-height: 200px; overflow: auto; background: var(--surface); border-radius: 7px; padding: 8px; font-size: .76rem; white-space: pre-wrap; word-break: break-word; }
+  .approval .row { margin: 0; justify-content: flex-end; }
+  /* ---------- chooser ---------- */
+  #chooser { position: fixed; inset: 0; background: rgba(4, 8, 16, .82); display: none; align-items: center; justify-content: center; padding: 24px; }
+  #chooser.open { display: flex; }
+  #chooser .card { width: min(560px, 100%); }
+  #chooser ul { list-style: none; margin: 0 0 12px; padding: 0; max-height: 320px; overflow-y: auto; }
+  #chooser li button { width: 100%; text-align: left; }
+  .banner { background: #3a2a10; border: 1px solid #6b4b12; color: #ffe6b0; border-radius: 8px; padding: 10px 12px; font-size: .84rem; margin-bottom: 14px; }
+  /* ---------- narrow window ---------- */
+  @media (max-width: 1100px) {
+    .app { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr) auto; }
+    nav { flex-direction: row; flex-wrap: wrap; align-items: center; border-right: 0; border-bottom: 1px solid var(--border); padding: 10px 12px; gap: 6px; overflow: visible; }
+    nav .sub, nav .meta, nav .caps { display: none; }
+    /* The bar wraps as one block of buttons; the column rule above would keep
+       them stacked one per line and push the brand out of place. */
+    nav #nav-buttons { flex-direction: row; flex-wrap: wrap; flex: 1 1 100%; gap: 4px; }
+    nav button { width: auto; padding: 7px 10px; font-size: .82rem; }
+    main { padding: 16px; }
+    aside.approvals { width: auto; border-left: 0; border-top: 1px solid var(--border); max-height: 45vh; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <nav id="nav">
+    <div class="brand">HYPER-V</div>
+    <div class="sub">Control Center</div>
+    <div class="vm" id="vm-name">no VM</div>
+    <div class="meta" id="vm-meta"></div>
+    <div id="nav-buttons"></div>
+    <div class="caps" id="caps"></div>
+  </nav>
+
+  <main id="main">
+    <div id="banner"></div>
+    <div id="page"></div>
+    <section id="output">
+      <header>
+        <span id="output-title">Result</span>
+        <button class="act" onclick="document.getElementById('output').classList.remove('open')">Hide</button>
+      </header>
+      <pre id="output-body"></pre>
+    </section>
+  </main>
+
+  <aside class="approvals" id="approvals">
+    <h2>Waiting for you</h2>
+    <p class="hint">The MCP server holds one operation open for each card. Nothing here is sent to the AI.</p>
+    <div id="approval-list"></div>
+  </aside>
+</div>
+
+<div id="chooser">
+  <div class="card">
+    <h2>Which virtual machine?</h2>
+    <p class="hint">Hyper-V reported more than one. The choice applies to this window.</p>
+    <ul id="chooser-list"></ul>
+    <div class="row" style="margin:0">
+      <input id="chooser-typed" placeholder="Or type a VM name">
+      <button class="act primary" id="chooser-open">Open</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+const PAGES = [
+  ["Overview", "overview", "The VM's state, its checkpoints and what the AI may do with it."],
+  ["Activity", "activity", "Cross-process operation history, including what the MCP server did."],
+  ["Console", "console", "Keyboard, mouse and a screenshot of the guest display."],
+  ["Recovery", "recovery", "Power, checkpoints and the forced actions that ask for a confirmation."],
+  ["Media", "media", "The DVD drive, an ISO and boot order."],
+  ["Debugger", "debugger", "COM1 serial, the kd session and the symbols it resolves."],
+  ["Guest", "guest", "Credential source, automation toggles and one command."],
+  ["Lab", "lab", "Directories, packages and diagnostics. Running a payload stays manual."],
+];
+
+const state = { vm: "", page: "overview", hello: null, events: [], output: null };
+
+/* ---------- small helpers ---------- */
+const api = () => window.pywebview && window.pywebview.api;
+const el = (tag, attrs = {}, ...children) => {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (key === "class") node.className = value;
+    else if (key === "html") node.innerHTML = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else if (value !== undefined && value !== null) node.setAttribute(key, value);
+  }
+  for (const child of children.flat()) {
+    if (child === null || child === undefined) continue;
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+  }
+  return node;
+};
+
+function panel(title, hint, ...body) {
+  return el("section", { class: "card" }, el("h2", {}, title), hint ? el("p", { class: "hint" }, hint) : null, ...body);
+}
+
+function field(label, input) {
+  return el("label", { class: "field" }, label, input);
+}
+
+function input_(name, value = "", type = "text") {
+  return el("input", { id: name, type, value });
+}
+
+function facts(pairs) {
+  const list = el("dl", { class: "facts" });
+  for (const [term, value] of pairs) {
+    // An empty cell reads as "the page did not load"; a dash says the host
+    // reported nothing, which is a fact about the host.
+    const shown = value === null || value === undefined || value === "" ? "—" : value;
+    list.append(el("dt", {}, term), el("dd", {}, shown));
+  }
+  return list;
+}
+
+function show(method, response) {
+  state.output = { method, response };
+  const box = document.getElementById("output");
+  const body = document.getElementById("output-body");
+  document.getElementById("output-title").textContent = method;
+  body.textContent = JSON.stringify(response, null, 2);
+  box.classList.toggle("failed", Boolean(response && response.error));
+  box.classList.add("open");
+}
+
+async function call(method, kwargs) {
+  try {
+    const response = await api().call(method, kwargs || {});
+    show(method, response);
+    return response;
+  } catch (error) {
+    show(method, { error: { message: String(error) } });
+    return { error: { message: String(error) } };
+  }
+}
+
+function action(label, method, payload, style) {
+  return el("button", {
+    class: "act" + (style ? " " + style : ""),
+    onclick: async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        await call(method, payload());
+      } finally {
+        button.disabled = false;
+      }
+    },
+  }, label);
+}
+
+// Not `value`: pywebview answers a JS -> Python call by evaluating `var value; ...`
+// in the global scope, and a second `const value` makes that script a SyntaxError,
+// which silently breaks every call from the page into Python.
+const fieldValue = (id) => (document.getElementById(id) || {}).value || "";
+const checked = (id) => Boolean((document.getElementById(id) || {}).checked);
+const vmArg = () => ({ vm_name: state.vm });
+const confirmed = () => ({ vm_name: state.vm, confirm_vm: state.vm });
+
+/* ---------- pages ---------- */
+const builders = {
+  async overview() {
+    const [host, vm, checkpoints] = await Promise.all([
+      api().call("host_status", {}), api().call("get_vm", vmArg()), api().call("list_checkpoints", vmArg()),
+    ]);
+    const record = (vm && vm.ok && vm.ok.vm) || {};
+    const levelSelect = el("select", { id: "level" },
+      ...(state.hello.levels || []).map((name) => el("option", { value: name, selected: name === state.hello.level ? "selected" : null }, name)));
+    return el("div", { class: "grid" },
+      panel("State", "Read from the host, not from the guest.",
+        el("div", { class: "state" + (record.state === "Running" ? "" : record.state ? " off" : "") }, record.state || "unknown"),
+        facts([
+          ["Name", record.name || state.vm],
+          ["Processors", record.processor_count ?? "—"],
+          ["Memory", record.memory_startup_bytes ? (record.memory_startup_bytes / 2 ** 30).toFixed(1) + " GiB" : "—"],
+          ["Automatic checkpoints", record.automatic_checkpoints_enabled === undefined ? "—" : String(record.automatic_checkpoints_enabled)],
+        ])),
+      panel("Host", "Whether this process can administer it at all.",
+        facts([
+          ["Hypervisor", host && host.ok ? String(host.ok.hypervisor_present) : "unreadable"],
+          ["Logical processors", host && host.ok ? host.ok.logical_processor_count : "—"],
+          ["Elevated", String(state.hello.elevated)],
+          ["Service", state.hello.shared_service ? "shared host" : "private copy"],
+          ["Approvals", state.hello.approvals],
+        ])),
+      panel("Access level", "The file hyperv-access writes. No tool can change it.",
+        el("p", { class: "hint", id: "level-note" }, state.hello.level
+          ? state.vm + " is " + state.hello.level + "."
+          : state.vm + " has no level, so no tool can reach it."),
+        el("div", { class: "row" }, field("Level", levelSelect)),
+        el("div", { class: "row", style: "margin:0" },
+          el("button", { class: "act primary", onclick: () => writeLevel(fieldValue("level")) }, "Apply level"),
+          el("button", { class: "act", onclick: () => writeLevel("") }, "Remove level"))),
+      panel("Checkpoints", "Restoring one discards everything after it.",
+        facts([["Count", checkpoints && checkpoints.ok ? checkpoints.ok.count : "—"]]),
+        el("ul", { style: "margin:8px 0 0;padding-left:18px;font-size:.85rem" },
+          ...((checkpoints && checkpoints.ok && checkpoints.ok.checkpoints) || []).slice(-8).map(
+            (item) => el("li", {}, item.name + " · " + String(item.creation_time || "").slice(0, 19)))),
+        el("div", { class: "row", style: "margin:10px 0 0" },
+          action("Refresh", "list_checkpoints", vmArg))));
+  },
+
+  async activity() {
+    const snapshot = await api().call("event_snapshot", { after: 0 });
+    state.events = (snapshot && snapshot.ok && snapshot.ok.events) || [];
+    const rows = state.events.slice(-300).reverse().map((event) => el("tr", {},
+      el("td", {}, String(event.started_utc || "").slice(11, 19)),
+      el("td", {}, event.actor || ""),
+      el("td", {}, event.operation || ""),
+      el("td", {}, event.vm_name || "host"),
+      el("td", {}, event.phase + (event.progress !== null && event.progress !== undefined ? " " + event.progress + "%" : "")),
+      el("td", { class: event.error_code ? "err" : "" }, event.error_code || "")));
+    return panel("Operation history", "Timestamps, actor, operation and outcome — never commands or text.",
+      el("table", { class: "events" },
+        el("thead", {}, el("tr", {}, ...["Time", "Actor", "Operation", "VM", "Phase", "Error"].map((h) => el("th", {}, h)))),
+        el("tbody", {}, ...rows)),
+      el("div", { class: "row", style: "margin:12px 0 0" },
+        action("Refresh", "event_snapshot", () => ({ after: 0 }))));
+  },
+
+  async console() {
+    const info = await api().call("console_info", vmArg());
+    return el("div", { class: "grid" },
+      panel("Keyboard", "Real input to the guest: it can change state immediately.",
+        el("div", { class: "row" }, el("textarea", { id: "console-text", placeholder: "Text to type" })),
+        el("div", { class: "row" },
+          el("button", { class: "act primary", onclick: () => call("console_type_text", { ...vmArg(), text: fieldValue("console-text") }) }, "Type text"),
+          el("button", { class: "act", onclick: () => call("console_ctrl_alt_delete", vmArg()) }, "Ctrl+Alt+Del"),
+          el("button", { class: "act", onclick: () => call("console_press_keys", { ...vmArg(), keys: ["enter"] }) }, "Enter"),
+          el("button", { class: "act", onclick: () => call("console_press_keys", { ...vmArg(), keys: ["esc"] }) }, "Esc"),
+          el("button", { class: "act", onclick: () => call("console_press_keys", { ...vmArg(), keys: ["tab"] }) }, "Tab")),
+        el("p", { class: "hint", style: "margin:10px 0 0" }, "Console info: " + JSON.stringify(info.ok || info.error || {}))),
+      panel("Mouse", "Coordinates are guest-display pixels.",
+        el("div", { class: "row" },
+          field("X", input_("mouse-x", "512", "number")),
+          field("Y", input_("mouse-y", "384", "number")),
+          field("Button", el("select", { id: "mouse-button" },
+            ...["left", "right", "middle"].map((b) => el("option", { value: b }, b))))),
+        el("div", { class: "row" },
+          el("button", { class: "act", onclick: () => call("console_click", { ...vmArg(), x: Number(fieldValue("mouse-x")), y: Number(fieldValue("mouse-y")), button: fieldValue("mouse-button") }) }, "Click"))),
+      panel("Screen", "From the Hyper-V thumbnail, so no VMConnect window is needed.",
+        el("img", { class: "shot", id: "shot", alt: "guest display" }),
+        el("div", { class: "row", style: "margin:10px 0 0" },
+          el("button", { class: "act primary", onclick: grabScreenshot }, "Capture"),
+          el("button", { class: "act", onclick: () => call("console_wait_for_change", { ...vmArg(), timeout_ms: 15000 }) }, "Wait for change"))));
+  },
+
+  async recovery() {
+    return el("div", { class: "grid" },
+      panel("Power", "Graceful first. Forced actions need the VM name typed here.",
+        el("div", { class: "row" },
+          ["start", "shutdown", "save", "pause", "resume"].map((name) =>
+            action(name, "power", () => ({ ...vmArg(), action: name })))),
+        el("div", { class: "row" },
+          ["turn_off", "reset"].map((name) =>
+            action(name, "power", () => ({ vm_name: state.vm, action: name, confirm_vm: state.vm }), "danger")))),
+      panel("Create a checkpoint", "Take one before anything that could break the guest.",
+        el("div", { class: "row" }, field("Name", input_("cp-name", "before-lab"))),
+        el("div", { class: "row" },
+          action("Create", "create_checkpoint", () => ({ vm_name: state.vm, name: fieldValue("cp-name") }), "primary"))),
+      panel("Restore or delete", "Both need the VM name and the exact checkpoint id.",
+        el("div", { class: "row" }, field("Checkpoint id", input_("cp-id", "", "text"))),
+        el("div", { class: "row" },
+          action("Restore", "restore_checkpoint", () => ({ vm_name: state.vm, snapshot_id: fieldValue("cp-id"), confirm_vm: state.vm, confirm_snapshot_id: fieldValue("cp-id") }), "danger"),
+          action("Delete", "delete_checkpoint", () => ({ vm_name: state.vm, snapshot_id: fieldValue("cp-id"), confirm_vm: state.vm, confirm_snapshot_id: fieldValue("cp-id") }), "danger"),
+          action("List", "list_checkpoints", vmArg))));
+  },
+
+  async media() {
+    const drives = await api().call("media_list", vmArg());
+    const list = (drives && drives.ok && drives.ok.dvd_drives) || [];
+    return el("div", { class: "grid" },
+      panel("DVD drives", "The VM must be Off to mount or eject.",
+        el("ul", { style: "margin:0 0 10px;padding-left:18px;font-size:.85rem" },
+          ...(list.length ? list.map((drive) => el("li", {},
+            "controller " + drive.controller_number + " · location " + drive.controller_location +
+            (drive.mounted ? " · " + (drive.path || "mounted") : " · empty")))
+            : [el("li", {}, "No DVD drive reported.")])),
+        el("div", { class: "row", style: "margin:0" }, action("Refresh", "media_list", vmArg))),
+      panel("Mount an ISO", "`boot_first` changes firmware boot order; it does not start the VM.",
+        el("div", { class: "row" }, field("ISO path", input_("iso-path", ""))),
+        el("div", { class: "row" },
+          field("Controller", input_("iso-controller", "0", "number")),
+          field("Location", input_("iso-location", "1", "number")),
+          field("Boot first", el("input", { id: "iso-boot", type: "checkbox" }))),
+        el("div", { class: "row", style: "margin:0" },
+          action("Mount", "media_mount", () => ({
+            vm_name: state.vm, iso_path: fieldValue("iso-path"),
+            controller_number: Number(fieldValue("iso-controller")),
+            controller_location: Number(fieldValue("iso-location")),
+            confirm_vm: state.vm, boot_first: checked("iso-boot"),
+          }), "primary"))),
+      panel("Eject", "Leaves the drive empty; nothing is deleted.",
+        el("div", { class: "row" },
+          field("Controller", input_("eject-controller", "0", "number")),
+          field("Location", input_("eject-location", "1", "number"))),
+        el("div", { class: "row", style: "margin:0" },
+          action("Eject", "media_eject", () => ({
+            vm_name: state.vm, controller_number: Number(fieldValue("eject-controller")),
+            controller_location: Number(fieldValue("eject-location")), confirm_vm: state.vm,
+          }), "danger"))));
+  },
+
+  async debugger() {
+    const status = await api().call("debug_serial_status", vmArg());
+    const kd = await api().call("kd_status", vmArg());
+    return el("div", { class: "grid" },
+      panel("COM1", "An existing named pipe. WinDbg must not own it at the same time.",
+        el("pre", { style: "margin:0 0 10px;font-size:.78rem;white-space:pre-wrap" },
+          JSON.stringify((status && status.ok) || (status && status.error) || {}, null, 2)),
+        el("div", { class: "row" }, field("Pipe", input_("pipe-name", "")), field("Log", input_("pipe-log", ""))),
+        el("div", { class: "row" },
+          action("Connect reader", "serial_connect", () => ({
+            vm_name: state.vm, pipe_name: fieldValue("pipe-name"), log_path: fieldValue("pipe-log"), confirm_vm: state.vm,
+          }), "primary"),
+          action("Read", "serial_read", vmArg),
+          action("Disconnect", "serial_disconnect", vmArg, "danger")),
+        el("div", { class: "row" }, el("textarea", { id: "serial-text", placeholder: "Text for the serial console" })),
+        el("div", { class: "row", style: "margin:0" },
+          action("Send", "serial_send", () => ({ vm_name: state.vm, text: fieldValue("serial-text"), append_newline: true })))),
+      panel("kd.exe", "The state the server reports, never a guessed one.",
+        el("pre", { style: "margin:0 0 10px;font-size:.78rem;white-space:pre-wrap" },
+          JSON.stringify((kd && kd.ok) || (kd && kd.error) || {}, null, 2)),
+        el("div", { class: "row" },
+          field("Transport", el("select", { id: "kd-transport" },
+            ...["kdnet", "serial"].map((t) => el("option", { value: t }, t)))),
+          field("Command", input_("kd-command", "!analyze -v"))),
+        el("div", { class: "row" },
+          action("Attach", "kd_attach", () => ({ vm_name: state.vm, transport: fieldValue("kd-transport") }), "primary"),
+          action("Break", "kd_break", vmArg),
+          action("Go", "kd_go", vmArg),
+          action("Stack", "kd_stack", vmArg),
+          action("Detach", "kd_detach", vmArg, "danger")),
+        el("div", { class: "row", style: "margin:0" },
+          action("Run command", "kd_command", () => ({ vm_name: state.vm, command: fieldValue("kd-command") })))),
+      panel("Debug preparation", "Host COM1 and guest BCD are separate, confirmed steps. Nothing reboots on its own.",
+        el("div", { class: "row", style: "margin:0" },
+          action("Prepare COM1", "debug_serial_prepare", () => ({ vm_name: state.vm, pipe_name: fieldValue("pipe-name"), confirm_vm: state.vm })),
+          action("Prepare guest BCD", "debug_guest_prepare", confirmed, "danger"),
+          action("KDNET status", "debug_kdnet_status", vmArg))));
+  },
+
+  async guest() {
+    const [credential, config] = await Promise.all([
+      api().call("guest_credential_status", vmArg()), api().call("guest_config_status", vmArg()),
+    ]);
+    return el("div", { class: "grid" },
+      panel("Credential", "The password lives in the Windows Credential Manager and never reaches this page.",
+        el("pre", { style: "margin:0 0 10px;font-size:.78rem;white-space:pre-wrap" },
+          JSON.stringify((credential && credential.ok) || (credential && credential.error) || {}, null, 2))),
+      panel("Guest configuration", "What the automation toggles replaced, so a revert has something to restore.",
+        el("pre", { style: "margin:0 0 10px;font-size:.78rem;white-space:pre-wrap" },
+          JSON.stringify((config && config.ok) || (config && config.error) || {}, null, 2)),
+        el("div", { class: "row", style: "margin:0" },
+          action("Revert", "guest_config_revert", () => ({ ...confirmed(), restart: false }), "danger"))),
+      panel("Autologon", "Makes the VM boot straight to the desktop. The password is written to LSA private data.",
+        el("div", { class: "row" },
+          field("Enabled", el("input", { id: "auto-enabled", type: "checkbox", checked: "checked" })),
+          field("Restart after", el("input", { id: "auto-restart", type: "checkbox" }))),
+        el("div", { class: "row", style: "margin:0" },
+          action("Configure", "guest_autologon_configure", () => ({
+            vm_name: state.vm, enabled: checked("auto-enabled"), confirm_vm: state.vm,
+            restart: checked("auto-restart"),
+          }), "primary"))),
+      panel("One command", "Through PowerShell Direct or SSH, whichever the transport reports.",
+        el("div", { class: "row" }, el("textarea", { id: "guest-command", placeholder: "hostname" })),
+        el("div", { class: "row", style: "margin:0" },
+          action("Run", "guest_exec", () => ({ vm_name: state.vm, command: fieldValue("guest-command") }), "primary"))));
+  },
+
+  async lab() {
+    const diagnostics = await api().call("lab_diagnostics", vmArg());
+    return el("div", { class: "grid" },
+      panel("Diagnostics", "What the guest and the host report, as tokens rather than verdicts.",
+        el("pre", { style: "margin:0 0 10px;font-size:.78rem;white-space:pre-wrap;max-height:260px;overflow:auto" },
+          JSON.stringify((diagnostics && diagnostics.ok) || (diagnostics && diagnostics.error) || {}, null, 2)),
+        el("div", { class: "row", style: "margin:0" }, action("Refresh", "lab_diagnostics", vmArg))),
+      panel("Directories", "Fixed guest paths, created once, confirmed with the VM name.",
+        el("div", { class: "row", style: "margin:0" },
+          action("Initialize", "lab_init", confirmed, "primary"))),
+      panel("Stage a package", "Hash-verified on both sides before anything else sees it.",
+        el("div", { class: "row" },
+          field("Source directory", input_("lab-source", "")),
+          field("Package id", input_("lab-package", ""))),
+        el("div", { class: "row", style: "margin:0" },
+          action("Stage", "lab_stage", () => ({ vm_name: state.vm, source_directory: fieldValue("lab-source"), package_id: fieldValue("lab-package") || null }), "primary"))),
+      panel("Verify and collect", "Reading evidence, never running it.",
+        el("div", { class: "row" },
+          field("Package id", input_("lab-verify-package", "")),
+          field("Manifest SHA-256", input_("lab-sha", ""))),
+        el("div", { class: "row" },
+          field("Run id", input_("lab-run", "run-1")),
+          field("Kernel dump", el("input", { id: "lab-dump", type: "checkbox", checked: "checked" }))),
+        el("div", { class: "row", style: "margin:0" },
+          action("Verify", "lab_verify", () => ({
+            vm_name: state.vm, package_id: fieldValue("lab-verify-package"), expected_manifest_sha256: fieldValue("lab-sha"),
+          })),
+          action("Collect", "lab_collect", () => ({
+            vm_name: state.vm, package_id: fieldValue("lab-verify-package"),
+            run_id: fieldValue("lab-run"), include_kernel_dump: checked("lab-dump"),
+          }), "primary"))));
+  },
+};
+
+/* ---------- the pieces that are not a form ---------- */
+async function writeLevel(level) {
+  try {
+    const response = level ? await api().set_level(level) : await api().remove_level();
+    show(level ? "set_level" : "remove_level", response);
+  } catch (error) {
+    show("set_level", { error: { message: String(error) } });
+  }
+  await refreshHello();
+  await render();
+}
+
+async function grabScreenshot() {
+  const response = await api().screenshot({ region: "window", max_width: 1600 });
+  const image = document.getElementById("shot");
+  if (response && response.ok && image) {
+    image.src = response.ok.src;
+    image.classList.add("live");
+    show("console_screenshot", { ok: { metadata: response.ok.metadata } });
+  } else {
+    show("console_screenshot", response);
+  }
+}
+
+/* ---------- chrome ---------- */
+function renderNav() {
+  const buttons = document.getElementById("nav-buttons");
+  buttons.replaceChildren(...PAGES.map(([label, key]) =>
+    el("button", { class: key === state.page ? "active" : "", onclick: () => go(key) }, label)));
+  document.getElementById("vm-name").textContent = state.vm || "no VM";
+  const level = state.hello ? state.hello.level : null;
+  document.getElementById("vm-meta").textContent = [
+    state.vm ? state.vm + " · " + (level || "no level") : "",
+    state.hello ? "profile " + state.hello.profile : "",
+  ].filter(Boolean).join(" · ");
+  const caps = state.hello ? state.hello.capabilities : {};
+  document.getElementById("caps").textContent = Object.entries(caps)
+    .map(([name, allowed]) => (allowed ? "● " : "○ ") + name).join("\n");
+  document.getElementById("banner").replaceChildren(
+    state.hello && !state.hello.elevated
+      ? el("div", { class: "banner" }, "This process is not elevated. Hyper-V reads may fail with access_denied; that is the shell, not the service.")
+      : "");
+}
+
+async function render() {
+  renderNav();
+  const entry = PAGES.find(([, key]) => key === state.page) || PAGES[0];
+  const page = document.getElementById("page");
+  page.replaceChildren(el("header", { class: "page" }, el("h1", {}, entry[0]), el("p", {}, entry[2])));
+  if (!state.vm) {
+    page.append(panel("No VM yet", "Choose one from the list Hyper-V reported.",
+      el("div", { class: "row", style: "margin:0" },
+        el("button", { class: "act primary", onclick: openChooser }, "Choose a VM"))));
+    return;
+  }
+  try {
+    page.append(await builders[state.page]());
+  } catch (error) {
+    page.append(panel("This page could not read the host", String(error)));
+  }
+}
+
+function go(key) {
+  state.page = key;
+  render();
+}
+
+async function refreshHello() {
+  try {
+    state.hello = await api().hello();
+    state.vm = state.hello.vm || "";
+  } catch (error) {
+    state.hello = null;
+  }
+}
+
+/* ---------- approvals ---------- */
+let approvalSignature = "";
+async function pollApprovals() {
+  if (!api()) return;
+  try {
+    const requests = await api().approvals();
+    const signature = JSON.stringify(requests.map((request) => request.request_id));
+    if (signature !== approvalSignature) {
+      approvalSignature = signature;
+      const list = document.getElementById("approval-list");
+      list.replaceChildren(...requests.map(approvalCard));
+      document.getElementById("approvals").classList.toggle("open", requests.length > 0);
+    }
+  } catch (error) {
+    /* the window is closing, or the bridge is not up yet */
+  }
+  setTimeout(pollApprovals, 800);
+}
+
+function approvalCard(request) {
+  const summary = request.summary && request.summary.command_preview
+    ? "Command preview (the guest runs exactly this):\n\n" + request.summary.command_preview +
+      "\n\n" + JSON.stringify({ ...request.summary, command_preview: undefined }, null, 2)
+    : JSON.stringify(request.summary || {}, null, 2);
+  return el("div", { class: "approval" },
+    el("div", { class: "op" }, request.operation || "unknown operation"),
+    el("div", { class: "vm" }, "VM: " + (request.vm_name || "host")),
+    el("pre", {}, summary),
+    el("div", { class: "row" },
+      el("button", { class: "act", onclick: () => decide(request.request_id, false) }, "Deny"),
+      el("button", { class: "act primary", onclick: () => decide(request.request_id, true) }, "Approve once")));
+}
+
+async function decide(requestId, approved) {
+  try {
+    await api().decide(requestId, approved);
+  } catch (error) {
+    show("decide", { error: { message: String(error) } });
+  }
+  approvalSignature = "";
+  pollApprovals();
+}
+
+/* ---------- choosing a VM ---------- */
+async function openChooser() {
+  const response = await api().vms();
+  const names = ((response && response.ok && response.ok.vms) || []).map((vm) => vm.name);
+  const list = document.getElementById("chooser-list");
+  list.replaceChildren(...names.map((name) =>
+    el("li", {}, el("button", { class: "act", onclick: () => pick(name) }, name))));
+  document.getElementById("chooser").classList.add("open");
+}
+
+async function pick(name) {
+  const chosen = String(name || "").trim();
+  if (!chosen) return;
+  try {
+    state.hello = await api().choose(chosen);
+    state.vm = state.hello.vm;
+  } catch (error) {
+    show("choose", { error: { message: String(error) } });
+  }
+  document.getElementById("chooser").classList.remove("open");
+  render();
+}
+
+/* ---------- boot ---------- */
+async function boot() {
+  document.getElementById("chooser-open").addEventListener("click", () => pick(fieldValue("chooser-typed")));
+  await refreshHello();
+  await render();
+  pollApprovals();
+  if (!state.vm) openChooser();
+}
+
+window.addEventListener("pywebviewready", boot);
+</script>
+</body>
+</html>

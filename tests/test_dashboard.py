@@ -72,8 +72,10 @@ def window(tmp_path, monkeypatch):
     """A real window over a fake backend, closed however the test ends."""
     monkeypatch.setenv("HYPERV_MCP_EVENT_DIRECTORY", str(tmp_path / "events"))
     monkeypatch.setenv("HYPERV_MCP_SHARED_SERVICE", "false")
+    # `open_service` imports the backend factory at call time, so the patch has
+    # to land on the package the service imports it from.
     monkeypatch.setattr(
-        "hyperv_console_mcp.dashboard.create_backend", lambda *args, **kwargs: UiBackend()
+        "hyperv_console_mcp.hostwmi.create_backend", lambda *args, **kwargs: UiBackend()
     )
     try:
         app = Dashboard("NORTH-Test")
@@ -162,8 +164,10 @@ def test_dashboard_pages_render_with_fake_backend(tmp_path, monkeypatch) -> None
     # A private copy, because this test is about rendering: a shared host would
     # bypass the fake backend and talk to the machine the suite runs on.
     monkeypatch.setenv("HYPERV_MCP_SHARED_SERVICE", "false")
+    # `open_service` imports the backend factory at call time, so the patch has
+    # to land on the package the service imports it from.
     monkeypatch.setattr(
-        "hyperv_console_mcp.dashboard.create_backend", lambda *args, **kwargs: UiBackend()
+        "hyperv_console_mcp.hostwmi.create_backend", lambda *args, **kwargs: UiBackend()
     )
     try:
         app = Dashboard("NORTH-Test")

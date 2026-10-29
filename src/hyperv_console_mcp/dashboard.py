@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import ctypes
 import json
 import os
 import queue
+import sys
 import threading
 import time
 import tkinter as tk
@@ -18,27 +18,20 @@ from typing import Any, Callable
 
 from .access import LEVELS, AccessStore, access_file
 from .config import Settings
+from .elevation import is_elevated as _is_elevated
 from .errors import HyperVError
-from .events import EVENTS, EventLogReader, EventSink
-from .hostwmi import create_backend
+from .events import EVENTS, EventLogReader
 from .hostwmi.serial import suggested_pipe_name
 from .ipc import ApprovalBroker
 from .lab.cli import diagnostics, initialize
 from .lab.transfer import DriverLabTransfer, build_manifest
-from .service import HyperVService
+from .service.host import open_service
 
 COLORS = {
     "background": "#0b1120", "panel": "#111b2e", "surface": "#17243a",
     "border": "#273851", "text": "#e5edf8", "muted": "#8fa5bf",
     "accent": "#6ee7b7", "blue": "#60a5fa", "warning": "#fbbf24", "error": "#fb7185",
 }
-
-
-def _is_elevated() -> bool:
-    try:
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except (AttributeError, OSError):
-        return False
 
 
 def _safe_json(value: Any) -> str:
@@ -354,19 +347,8 @@ class Dashboard(tk.Tk):
         self.after(2000, self._refresh_events)
 
     def _open_service(self) -> tuple[Any, Any]:
-        """The shared service, or a private copy when the run must not disturb one.
-
-        The window is a client of the same host the MCP server talks to, so a KD
-        or serial session the AI opens is visible here. A private copy owns its
-        own backend, which is what this returns second — and why the caller has
-        to close it and a proxy's caller does not.
-        """
-        if not self.settings.shared_service:
-            backend = EventSink(create_backend(), EVENTS)
-            return HyperVService(backend, self.settings), backend
-        from .service.host import ensure_running
-        from .service.remote import ServiceProxy
-        return ServiceProxy(ensure_running(), self.settings, actor="dashboard"), None
+        """The shared service, or a private copy when the run must not disturb one."""
+        return open_service(self.settings, actor="dashboard")
 
     def _choose_vm(self, requested: str | None) -> str:
         """The VM this window is for: asked for, discovered, or chosen here."""
@@ -1264,11 +1246,39 @@ def main() -> None:
         "--vm",
         help="Virtual machine to control. Omit it to open the only VM Hyper-V reports, or to choose from a list.",
     )
+    parser.add_argument(
+        "--classic", action="store_true",
+        help="Use the tkinter window instead of the WebView2 one.",
+    )
     arguments = parser.parse_args()
-    dashboard = Dashboard(arguments.vm)
+    try:
+        if not arguments.classic:
+            from .webui.window import run
+
+            # The WebView2 window is the default; a host without the runtime keeps
+            # the tkinter one rather than losing the only way to administer it.
+            if run(arguments.vm):
+                return
+        dashboard = Dashboard(arguments.vm)
+    except HyperVError as exc:
+        # Launched from the shortcut there is no console to read, so a service
+        # that will not start has to say so on screen instead of vanishing.
+        _report_failure(str(exc))
+        raise SystemExit(1) from None
     if dashboard.cancelled:
         return
     dashboard.mainloop()
+
+
+def _report_failure(message: str) -> None:
+    """Say why the window cannot open, where the operator will see it."""
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("Hyper-V Control Center", message)
+        root.destroy()
+    except Exception:  # noqa: BLE001 — no display: the message still has to go somewhere
+        print(message, file=sys.stderr)
 
 
 if __name__ == "__main__":

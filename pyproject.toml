@@ -26,6 +26,9 @@ dev = ["pytest>=8,<10", "build>=1.2,<2", "ruff==0.17.3"]
 # Optional guest transport. paramiko is imported lazily, so `auto`/`psdirect`
 # users never need it installed.
 ssh = ["paramiko>=3.4,<4"]
+# Optional WebView2 window. Imported lazily too: without it `hyperv-dashboard`
+# opens the tkinter window, which needs nothing extra.
+ui = ["pywebview>=5.4,<7"]
 
 [project.scripts]
 hyperv-console-mcp = "hyperv_console_mcp.server:main"
@@ -42,7 +45,7 @@ version = { attr = "hyperv_console_mcp.__version__" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-hyperv_console_mcp = ["bridge/*.ps1", "lab/guest/*.ps1", "lab/guest/*.psm1", "transport/*.ps1"]
+hyperv_console_mcp = ["bridge/*.ps1", "lab/guest/*.ps1", "lab/guest/*.psm1", "transport/*.ps1", "webui/assets/*.html"]
 
 [tool.ruff]
 src = ["src"]
