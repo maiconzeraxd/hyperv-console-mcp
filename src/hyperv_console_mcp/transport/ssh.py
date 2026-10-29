@@ -223,12 +223,17 @@ class SshTransport:
     def _connect(self, paramiko: Any, vm: str, host: str, port: int,
                  username: str, key_path: Path) -> Any:
         known_hosts = self._known_hosts(vm)
+        provision = {"tool": "guest_ssh_provision", "args": {"vm_name": vm, "confirm_vm": vm}}
         if not known_hosts.is_file():
             raise PolicyError(
-                f"No pinned host key for {vm} at {known_hosts}. Run guest_ssh_provision again."
+                f"No pinned host key for {vm} at {known_hosts}. Run guest_ssh_provision again.",
+                fix=provision,
             )
         if not key_path.is_file():
-            raise PolicyError(f"No SSH key for {vm} at {key_path}. Run guest_ssh_provision again.")
+            raise PolicyError(
+                f"No SSH key for {vm} at {key_path}. Run guest_ssh_provision again.",
+                fix=provision,
+            )
         client = paramiko.SSHClient()
         client.load_host_keys(str(known_hosts))
         # Strict verification: an unknown or changed host key is a hard failure,
@@ -252,6 +257,9 @@ class SshTransport:
             raise BackendError(
                 f"SSH connection to {vm} at {host}:{port} failed: {exc}",
                 code="ssh_unavailable",
+                # The usual cause is that nothing is listening: the guest has
+                # not been provisioned, or it rebooted into a state without sshd.
+                fix={"tool": "guest_ssh_provision", "args": {"vm_name": vm, "confirm_vm": vm}},
             ) from exc
         transport = client.get_transport()
         if transport is not None:

@@ -69,6 +69,14 @@ def normalise_level(value: Any) -> str:
     return level
 
 
+def minimum_level(capability: str) -> str:
+    """The lowest level that includes a capability — what a refusal should name."""
+    for level in LEVELS:
+        if capability in LEVEL_CAPABILITIES[level]:
+            return level
+    raise ValidationError(f"Unknown capability {capability!r}.")
+
+
 def _key(vm_name: str) -> str:
     name = str(vm_name or "").strip()
     if not name or len(name) > 256 or any(ord(character) < 32 for character in name):

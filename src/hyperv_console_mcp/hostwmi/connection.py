@@ -21,9 +21,12 @@ _IMPERSONATE = 3
 class WmiFailure(RuntimeError):
     """A WMI call failed. ``code`` keeps the MCP error taxonomy."""
 
-    def __init__(self, message: str, *, code: str = "backend_error") -> None:
+    def __init__(
+        self, message: str, *, code: str = "backend_error", fix: dict[str, Any] | None = None
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.fix = fix
 
 
 class Connection(Protocol):

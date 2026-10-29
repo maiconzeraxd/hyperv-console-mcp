@@ -8,6 +8,7 @@ from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from ..access import minimum_level
 from ..audit import AuditLogger
 from ..backend import HyperVBackend
 from ..config import Settings
@@ -120,7 +121,8 @@ class ServiceBase:
         if self.settings.allowed_vms and not self.settings.is_allowed(name):
             raise PolicyError(
                 f"VM {name!r} is not allowed. Name it in HYPERV_MCP_ALLOWED_VMS or give it "
-                f"an access level with: hyperv-access set \"{name}\" read-only|control|lab"
+                f"an access level with: hyperv-access set \"{name}\" read-only|control|lab",
+                fix={"operator": f'hyperv-access set "{name}" read-only|control|lab'},
             )
         return name
 
@@ -130,11 +132,30 @@ class ServiceBase:
         if not self.settings.allowed_vms:
             raise PolicyError(
                 "Mutations require a VM allowlist: name the VMs in HYPERV_MCP_ALLOWED_VMS, "
-                "or give them access levels with hyperv-access set."
+                "or give them access levels with hyperv-access set.",
+                fix={"operator": f'hyperv-access set "{name}" read-only|control|lab'},
             )
         if not self.settings.allows(name, capability):
-            raise PolicyError(self.settings.refusal(name, capability))
+            raise PolicyError(
+                self.settings.refusal(name, capability),
+                fix={"operator": self._raise_to(name, capability)},
+            )
         return name
+
+    def _raise_to(self, name: str, capability: str) -> str:
+        """The one command that would let this VM do this, and nothing wider.
+
+        A level is the narrow answer; the per-capability variable is the older
+        one, offered only where no level exists, because it grants the
+        capability to every VM at once.
+        """
+        level = minimum_level(capability)
+        if self.settings.level_for(name) is None:
+            return (
+                f'hyperv-access set "{name}" {level} '
+                f"(or set HYPERV_MCP_ALLOW_{capability.upper()}=true)"
+            )
+        return f'hyperv-access set "{name}" {level}'
 
     @staticmethod
     def _confirm(actual: str, expected: str, label: str) -> None:

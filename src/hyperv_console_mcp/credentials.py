@@ -206,7 +206,14 @@ def resolve(settings: Any, vm_name: str) -> tuple[str, str]:
     if not username or not password:
         raise PolicyError(
             f"No guest credential for {vm_name}. Set one with guest_credential_set "
-            "or provide HYPERV_MCP_GUEST_USERNAME and HYPERV_MCP_GUEST_PASSWORD."
+            "or provide HYPERV_MCP_GUEST_USERNAME and HYPERV_MCP_GUEST_PASSWORD.",
+            fix={
+                "operator": (
+                    f"Store the guest credential for {vm_name!r} in the dashboard's "
+                    "Guest access page, or set HYPERV_MCP_GUEST_USERNAME and "
+                    "HYPERV_MCP_GUEST_PASSWORD. A secret is never a tool argument."
+                )
+            },
         )
     return username, password
 

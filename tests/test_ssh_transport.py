@@ -383,6 +383,19 @@ def test_a_rejected_host_key_is_reported_not_trusted(tmp_path: Path) -> None:
     with pytest.raises(BackendError, match="host key") as caught:
         SshTransport(settings(tmp_path)).health(VM)
     assert caught.value.code == "ssh_unavailable"
+    # A refused connection is nearly always "the guest was never provisioned",
+    # so the error carries the call that would fix it.
+    assert caught.value.fix == {
+        "tool": "guest_ssh_provision", "args": {"vm_name": VM, "confirm_vm": VM}
+    }
+
+
+def test_a_guest_with_no_pinned_key_is_offered_provisioning(tmp_path: Path) -> None:
+    provision(tmp_path)
+    (tmp_path / "ssh" / vm_key(VM) / "known_hosts").unlink()
+    with pytest.raises(PolicyError, match="guest_ssh_provision") as caught:
+        SshTransport(settings(tmp_path)).health(VM)
+    assert (caught.value.fix or {}).get("tool") == "guest_ssh_provision"
 
 
 def test_one_client_is_reused_for_the_same_vm(tmp_path: Path) -> None:

@@ -228,6 +228,9 @@ class LabService(ServiceBase):
         }
         if restart:
             if not self.settings.allows(name, "power"):
-                raise PolicyError(self.settings.refusal(name, "power"))
+                raise PolicyError(
+                    self.settings.refusal(name, "power"),
+                    fix={"operator": self._raise_to(name, "power")},
+                )
             result["restart"] = self._restart_and_verify(name)
         return result

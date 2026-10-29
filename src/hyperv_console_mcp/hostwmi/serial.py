@@ -112,10 +112,12 @@ def debug_serial_prepare(connection: Connection, payload: dict[str, Any]) -> dic
     """
     vm = find_vm(connection, str(payload.get("vm") or ""))
     if _int(vm.get("EnabledState")) != _OFF:
+        name = str(vm.get("ElementName") or payload.get("vm") or "")
         raise WmiFailure(
             "The VM must be Off before configuring COM1. "
             "The server will not stop it automatically.",
             code="invalid_state",
+            fix={"tool": "vm_power", "args": {"vm_name": name, "action": "shutdown"}},
         )
     pipe_name = str(payload.get("pipe_name") or "")
     if _PIPE_NAME.fullmatch(pipe_name) is None:

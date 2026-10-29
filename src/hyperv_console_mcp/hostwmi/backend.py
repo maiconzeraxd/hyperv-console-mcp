@@ -100,7 +100,7 @@ class WmiBackend(HyperVBackend):
         try:
             return handler(self._connection(), dict(payload))
         except WmiFailure as exc:
-            raise BackendError(str(exc), code=exc.code) from exc
+            raise BackendError(str(exc), code=exc.code, fix=exc.fix) from exc
 
     def close(self) -> None:
         """COM objects die with their apartment; nothing is held open."""

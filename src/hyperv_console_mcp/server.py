@@ -130,11 +130,23 @@ ConsoleAction = Annotated[
 
 
 
+def _failure(exc: HyperVError) -> str:
+    """``code: message``, and the fix as one JSON line when the error carries one.
+
+    The fix is what turns a refusal into a next step: either a tool call the
+    caller can make now, or a note that only the operator can close the gap.
+    It is rendered as JSON so a client can parse it instead of reading prose.
+    """
+    if not exc.fix:
+        return f"{exc.code}: {exc}"
+    return f"{exc.code}: {exc}\nfix: {json.dumps(exc.fix, ensure_ascii=False, sort_keys=True)}"
+
+
 async def _invoke(function: Callable[..., T], *args: Any, **kwargs: Any) -> T:
     try:
         return await anyio.to_thread.run_sync(partial(function, *args, **kwargs))
     except HyperVError as exc:
-        raise ToolError(f"{exc.code}: {exc}") from None
+        raise ToolError(_failure(exc)) from None
     except Exception as exc:
         LOGGER.error("Unexpected tool failure (%s).", type(exc).__name__)
         raise ToolError("internal_error: unexpected server failure") from None

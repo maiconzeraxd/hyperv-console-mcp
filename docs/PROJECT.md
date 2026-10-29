@@ -1124,6 +1124,33 @@ The `hyperv-access` CLI was exercised end to end against a temporary file; the r
 this host was read (empty) and deliberately not written — granting `lab` to a VM is the operator's
 decision, not this loop's. Suite: 674 passing, 1 skipped.
 
+### 2026-10-29 — v0.3 phase 5: a refusal carries the call that would fix it
+
+- **The contract.** `HyperVError` now carries an optional `fix`, and only two shapes are allowed:
+  `{"tool": <registered name>, "args": {...}}` when the caller can close the gap itself, and
+  `{"operator": <what a human must do>}` when it cannot. `server._failure` renders it as one extra
+  line of JSON (`code: message\nfix: {...}`) so a client parses it instead of reading prose. The
+  same `fix` travels through `WmiFailure` → `BackendError` → `ToolError`, which is the path that
+  would otherwise drop it silently.
+- **Three producers so far.** A missing guest credential asks the operator to store one (and never
+  mentions a secret); an SSH connection that refuses, or a guest with no pinned key, offers
+  `guest_ssh_provision`; `debug_serial_prepare` on a running VM offers `vm_power` with `shutdown`,
+  because the provider will not change a port on a live VM and the server will not stop it.
+- **Refusals from the policy layer name the narrowest level that would work.** `_raise_to` reads
+  `minimum_level(capability)`, so a `control` VM refused the guest is told `lab`, not `lab|control`;
+  a VM with no level at all is offered the level *and* the older `HYPERV_MCP_ALLOW_*` variable,
+  because both answers exist for it. An unlisted VM is offered the command that lists it.
+
+Tests: `tests/test_fix_contract.py` — the two renderings, `_invoke` turning a fix into a `ToolError`
+line, a source sweep that every fix naming a tool names a registered one, a second sweep that the
+arguments match the tool's schema (required keys present, no unknown keys, literals inside their
+enum), the missing credential carrying an `operator` fix and no secret, and the level refusals
+naming `lab`/`control` as appropriate. `tests/test_hostwmi_serial.py` and
+`tests/test_ssh_transport.py` gained the producer-side assertions, including the WMI layer keeping
+the fix it was handed. Suite: 689 passing, 1 skipped. Not exercised live: every producer above is
+reached through a unit path, because each one needs a specific host or guest state (no credential,
+no sshd, a running VM) that the live host was not put into for this change.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,

@@ -7,6 +7,7 @@ from xml.etree import ElementTree
 
 import pytest
 
+from hyperv_console_mcp.errors import BackendError
 from hyperv_console_mcp.hostwmi.backend import WmiBackend
 from hyperv_console_mcp.hostwmi.connection import WmiFailure
 from hyperv_console_mcp.hostwmi.serial import (
@@ -193,6 +194,10 @@ def test_prepare_refuses_a_running_vm() -> None:
     with pytest.raises(WmiFailure) as caught:
         debug_serial_prepare(connection, {"vm": "NORTH-Test", "pipe_name": "north-test-kd"})
     assert caught.value.code == "invalid_state"
+    # The refusal names the one call that would unblock it, with the VM in it.
+    assert caught.value.fix == {
+        "tool": "vm_power", "args": {"vm_name": "NORTH-Test", "action": "shutdown"}
+    }
     assert connection.calls == []
 
 
@@ -222,6 +227,15 @@ def test_the_backend_serves_debug_serial_prepare() -> None:
     backend = WmiBackend(connect=PrepareConnection)
     result = backend.invoke("debug_serial_prepare", {"vm": "NORTH-Test", "pipe_name": "north-test-kd"})
     assert result["pipe_path"] == PIPE
+
+
+def test_the_backend_keeps_the_fix_it_was_given() -> None:
+    """The WMI layer translates its own failure; the fix must survive that."""
+    backend = WmiBackend(connect=lambda: PrepareConnection(state=2))
+    with pytest.raises(BackendError) as caught:
+        backend.invoke("debug_serial_prepare", {"vm": "NORTH-Test", "pipe_name": "north-test-kd"})
+    assert caught.value.code == "invalid_state"
+    assert (caught.value.fix or {}).get("tool") == "vm_power"
 
 
 def test_the_pipe_name_is_derived_from_the_vm() -> None:
