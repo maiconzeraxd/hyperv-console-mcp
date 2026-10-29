@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 from collections.abc import Mapping
 from dataclasses import replace
@@ -10,7 +11,12 @@ import pytest
 
 from hyperv_console_mcp.audit import AuditLogger
 from hyperv_console_mcp.config import Settings
-from hyperv_console_mcp.errors import BackendError, PolicyError, ValidationError
+from hyperv_console_mcp.errors import (
+    BackendError,
+    CaptureError,
+    PolicyError,
+    ValidationError,
+)
 from hyperv_console_mcp.service import HyperVService
 
 # These fixtures use drive-letter roots, which only resolve on Windows.
@@ -295,11 +301,21 @@ def test_console_key_mouse_and_batch_validation(
 ) -> None:
     enabled.console_key_state("NORTH-Test", "shift", True)
     enabled.console_mouse_buttons("NORTH-Test", left=True)
+    backend.responses["console_batch"] = {"vm": "NORTH-Test", "actions_completed": 2, "results": []}
     result = enabled.console_batch(
         "NORTH-Test",
         [{"type": "move", "x": 10, "y": 20}, {"type": "wait", "milliseconds": 1}],
     )
     assert result["actions_completed"] == 2
+    # One bridge request carries the ordered actions, and a click carries the
+    # numeric button index the WMI method expects rather than the tool's name.
+    assert backend.calls[-1] == (
+        "console_batch",
+        {"vm": "NORTH-Test", "actions": [
+            {"type": "move", "x": 10, "y": 20},
+            {"type": "wait", "milliseconds": 1},
+        ]},
+    )
     before = len(backend.calls)
     with pytest.raises(ValidationError):
         enabled.console_batch(
@@ -392,6 +408,147 @@ def test_batch_validates_all_values_before_the_first_input(
             "NORTH-Test",
             [{"type": "wait", "milliseconds": 30_000}, {"type": "wait", "milliseconds": 1}],
         )
+    assert backend.calls == []
+
+
+def rgb565_pixels(colours: list[tuple[int, int, int]]) -> bytes:
+    return b"".join(
+        (((red >> 3) << 11) | ((green >> 2) << 5) | (blue >> 3)).to_bytes(2, "little")
+        for red, green, blue in colours
+    )
+
+
+def thumbnail_response(vm: str, width: int, height: int, payload: bytes) -> dict[str, Any]:
+    return {
+        "vm": vm, "width": width, "height": height, "format": "rgb565",
+        "byte_length": len(payload), "stride_bytes": width * 2,
+        "data": base64.b64encode(payload).decode("ascii"),
+    }
+
+
+def test_a_batch_click_sends_the_numeric_button_index(
+    enabled: HyperVService, backend: FakeBackend
+) -> None:
+    enabled.console_batch("NORTH-Test", [{"type": "click", "button": "right", "x": 5, "y": 6}])
+
+    assert backend.calls[-1][1]["actions"] == [
+        {"type": "click", "button_index": 2, "x": 5, "y": 6}
+    ]
+
+
+def test_the_thumbnail_screenshot_needs_no_vmconnect_window(
+    enabled: HyperVService, backend: FakeBackend
+) -> None:
+    backend.responses["console_info"] = {
+        "vm": "NORTH-Test", "video_heads": [{"horizontal": 2, "vertical": 2}]
+    }
+    backend.responses["vm_thumbnail"] = thumbnail_response(
+        "NORTH-Test", 2, 2, rgb565_pixels([(255, 0, 0)] * 4)
+    )
+
+    shot = enabled.capture_screenshot(None, "NORTH-Test")
+
+    assert shot.png.startswith(b"\x89PNG")
+    assert shot.metadata["coordinates_match_mouse"] is True
+    assert shot.metadata["source_width"] == 2
+    assert [call[0] for call in backend.calls] == ["console_info", "vm_thumbnail"]
+    assert backend.calls[1][1] == {"vm": "NORTH-Test", "width": 2, "height": 2}
+
+
+def test_a_vm_without_a_video_head_is_reported_not_captured(
+    enabled: HyperVService, backend: FakeBackend
+) -> None:
+    backend.responses["console_info"] = {
+        "vm": "NORTH-Test", "video_heads": [{"horizontal": 0, "vertical": 0}]
+    }
+
+    with pytest.raises(CaptureError, match="no video head"):
+        enabled.capture_screenshot(None, "NORTH-Test")
+
+    assert [call[0] for call in backend.calls] == ["console_info"]
+
+
+def test_an_unknown_screenshot_source_is_rejected_before_any_capture(
+    enabled: HyperVService, backend: FakeBackend
+) -> None:
+    with pytest.raises(ValidationError, match="source"):
+        enabled.capture_screenshot(None, "NORTH-Test", "desktop")
+
+    assert backend.calls == []
+
+
+class FrameBackend(FakeBackend):
+    """Serves a different console thumbnail per request, like a screen that is updating."""
+
+    def __init__(self, frames: list[bytes]) -> None:
+        super().__init__()
+        self.frames = frames
+        self.index = 0
+        self.responses["console_info"] = {
+            "vm": "NORTH-Test", "video_heads": [{"horizontal": 16, "vertical": 9}]
+        }
+
+    def invoke(
+        self, operation: str, payload: Mapping[str, Any], *, timeout: float | None = None
+    ) -> dict[str, Any]:
+        if operation == "vm_thumbnail":
+            frame = self.frames[min(self.index, len(self.frames) - 1)]
+            self.index += 1
+            self.responses["vm_thumbnail"] = thumbnail_response(
+                str(payload["vm"]), int(payload["width"]), int(payload["height"]), frame
+            )
+        return super().invoke(operation, payload, timeout=timeout)
+
+
+def screenshot_service(backend: FakeBackend) -> HyperVService:
+    return HyperVService(
+        backend,
+        Settings(allowed_vms=frozenset({"NORTH-Test"}), allow_screenshots=True),
+    )
+
+
+def test_wait_for_change_returns_as_soon_as_the_screen_moves() -> None:
+    black = rgb565_pixels([(0, 0, 0)] * (16 * 9))
+    white = rgb565_pixels([(255, 255, 255)] * (16 * 9))
+    service = screenshot_service(FrameBackend([black, white]))
+
+    result = service.console_wait_for_change("NORTH-Test", 2_000)
+
+    assert result["changed"] is True
+    assert result["timed_out"] is False
+    assert result["polls"] == 1
+    assert result["change_fraction"] == 1.0
+    assert result["display"] == {"width": 16, "height": 9}
+    assert result["region"] is None
+
+
+def test_wait_for_change_times_out_on_a_still_screen() -> None:
+    still = rgb565_pixels([(0, 0, 0)] * (16 * 9))
+    service = screenshot_service(FrameBackend([still, still, still]))
+
+    result = service.console_wait_for_change("NORTH-Test", 250)
+
+    assert result["changed"] is False
+    assert result["timed_out"] is True
+    assert result["polls"] >= 1
+    assert result["elapsed_ms"] >= 250
+
+
+def test_a_wait_region_outside_the_display_is_rejected(enabled: HyperVService, backend: FakeBackend) -> None:
+    backend.responses["console_info"] = {
+        "vm": "NORTH-Test", "video_heads": [{"horizontal": 100, "vertical": 50}]
+    }
+
+    with pytest.raises(ValidationError, match="region exceeds"):
+        enabled.console_wait_for_change("NORTH-Test", 500, [90, 0, 20, 10])
+
+    assert [call[0] for call in backend.calls] == ["console_info"]
+
+
+def test_a_wait_region_must_be_four_numbers(enabled: HyperVService, backend: FakeBackend) -> None:
+    with pytest.raises(ValidationError, match="region"):
+        enabled.console_wait_for_change("NORTH-Test", 500, [1, 2, 3])
+
     assert backend.calls == []
 
 

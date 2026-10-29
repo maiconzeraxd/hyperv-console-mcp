@@ -464,10 +464,26 @@ def create_server(
 
     @tool(
         "console_batch", annotations=MUTATION,
-        description="Run up to 32 ordered text, key-chord, click, move, scroll, wait, or Ctrl+Alt+Delete actions. Stops at the first failure.",
+        description="Run up to 32 ordered text, key-chord, click, move, scroll, wait, or Ctrl+Alt+Delete actions in one bridge request. Stops at the first failure.",
     )
     async def console_batch(vm_name: str, actions: list[dict[str, Any]]) -> dict[str, Any]:
         return await _invoke(service.console_batch, vm_name, actions)
+
+    @tool(
+        "console_wait_for_change", annotations=READ_ONLY,
+        description="Wait until the guest display changes, polling a downscaled console thumbnail "
+        "instead of screenshotting in a loop. region is [x, y, width, height] in guest pixels. "
+        "Requires ALLOW_SCREENSHOTS; returns no image.",
+    )
+    async def console_wait_for_change(
+        vm_name: str,
+        timeout_ms: int = 30_000,
+        region: list[int] | None = None,
+        min_change: float = 0.01,
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.console_wait_for_change, vm_name, timeout_ms, region, min_change
+        )
 
     @tool(
         "console_ctrl_alt_delete", annotations=MUTATION,
@@ -604,16 +620,21 @@ def create_server(
 
     @mcp.tool(
         name="console_screenshot",
-        description="Experimental PNG capture of an existing visible VMConnect window in the MCP server's interactive session. "
-        "It does not read the guest framebuffer. Requires ALLOW_SCREENSHOTS and an allowlist.",
+        description="PNG screenshot of the guest display from the Hyper-V console thumbnail: no "
+        "VMConnect window or interactive session needed, and at scale 1 its pixels are the same "
+        "coordinates console_mouse_move uses. source='vmconnect' captures an existing visible "
+        "VMConnect window instead. Requires ALLOW_SCREENSHOTS and an allowlist.",
         annotations=READ_ONLY,
         structured_output=False,
     )
     async def console_screenshot(
-        vm_name: str, region: Literal["window", "client"] = "window", max_width: int = 1600
+        vm_name: str,
+        source: Literal["thumbnail", "vmconnect"] = "thumbnail",
+        region: Literal["window", "client"] = "window",
+        max_width: int = 1600,
     ) -> CallToolResult:
         def perform() -> Any:
-            return service.capture_screenshot(capture, vm_name, region, max_width)
+            return service.capture_screenshot(capture, vm_name, source, region, max_width)
 
         screenshot = await _invoke(perform)
         metadata_text = json.dumps(screenshot.metadata, ensure_ascii=False)

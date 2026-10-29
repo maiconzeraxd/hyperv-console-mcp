@@ -15,6 +15,10 @@ $InformationPreference = 'SilentlyContinue'
 $script:PowerOperations = @{}
 # One reused New-PSSession per VM; a broken session or a rebooted guest forces a new one.
 $script:GuestSessions = @{}
+# Msvm_Keyboard / Msvm_SyntheticMouse instances keyed by VM Id and class. The
+# instances live as long as the VM object does, so a restart of the guest keeps
+# them valid and only a re-created VM produces a new key.
+$script:InputDevices = @{}
 
 function Write-Response {
     param([Parameter(Mandatory)][hashtable]$Response)
@@ -111,6 +115,8 @@ function Get-InputDevice {
         [Parameter(Mandatory)]$Vm,
         [Parameter(Mandatory)][ValidateSet('Msvm_Keyboard', 'Msvm_SyntheticMouse')][string]$ClassName
     )
+    $key = '{0}|{1}' -f $Vm.Id.ToString(), $ClassName
+    if ($script:InputDevices.ContainsKey($key)) { return $script:InputDevices[$key] }
     $vmCim = Get-VmCim -Vm $Vm
     $devices = @(
         Get-CimAssociatedInstance -InputObject $vmCim -Association 'Msvm_SystemDevice' `
@@ -119,6 +125,9 @@ function Get-InputDevice {
     if ($devices.Count -ne 1) {
         throw "Expected one $ClassName for '$($Vm.Name)'; found $($devices.Count)."
     }
+    # A long-lived worker sees many VMs; do not let the cache grow without bound.
+    if ($script:InputDevices.Count -ge 64) { $script:InputDevices.Clear() }
+    $script:InputDevices[$key] = $devices[0]
     return $devices[0]
 }
 
@@ -149,6 +158,67 @@ function Invoke-InputMethod {
     if ($returnValue -ne 0) {
         throw "Hyper-V WMI method $Method returned $returnValue."
     }
+}
+
+function Send-KeyboardText {
+    # Newlines become VK_RETURN; everything else is typed in chunks below the
+    # 256-character limit of TypeText, never splitting a surrogate pair.
+    param([Parameter(Mandatory)]$Keyboard, [string]$Text = '')
+    $segments = [regex]::Split($Text, '(\r\n|\r|\n)')
+    $chunks = 0
+    foreach ($segment in $segments) {
+        if ($segment -match '^\r\n$|^\r$|^\n$') {
+            Invoke-InputMethod -Device $Keyboard -Method 'TypeKey' -Arguments @{ KeyCode = [uint32]13 }
+            continue
+        }
+        for ($offset = 0; $offset -lt $segment.Length;) {
+            $length = [Math]::Min(256, $segment.Length - $offset)
+            $lastIndex = $offset + $length - 1
+            if ($length -eq 256 -and [char]::IsHighSurrogate($segment[$lastIndex])) { $length-- }
+            $chunk = $segment.Substring($offset, $length)
+            Invoke-InputMethod -Device $Keyboard -Method 'TypeText' -Arguments @{ AsciiText = $chunk }
+            $chunks++
+            $offset += $length
+            Start-Sleep -Milliseconds 15
+        }
+    }
+    return $chunks
+}
+
+function Send-KeyChord {
+    # Keys are pressed in order and released in reverse order even on failure, so a
+    # stuck modifier cannot leak into the next request.
+    param([Parameter(Mandatory)]$Keyboard, [Parameter(Mandatory)][string[]]$Keys)
+    $pressed = @()
+    try {
+        foreach ($key in $Keys) {
+            $code = Convert-KeyName -Name ([string]$key)
+            Invoke-InputMethod -Device $Keyboard -Method 'PressKey' -Arguments @{ KeyCode = $code }
+            $pressed += $code
+        }
+    } finally {
+        for ($index = $pressed.Count - 1; $index -ge 0; $index--) {
+            Invoke-InputMethod -Device $Keyboard -Method 'ReleaseKey' -Arguments @{ KeyCode = $pressed[$index] }
+        }
+    }
+    return $pressed.Count
+}
+
+function Move-MousePointer {
+    param([Parameter(Mandatory)]$Mouse, [Parameter(Mandatory)][int]$X, [Parameter(Mandatory)][int]$Y)
+    Invoke-InputMethod -Device $Mouse -Method 'SetAbsolutePosition' -Arguments @{
+        HorizontalPosition = $X; VerticalPosition = $Y
+    }
+}
+
+function Invoke-MouseClick {
+    param([Parameter(Mandatory)]$Mouse, [Parameter(Mandatory)][int]$ButtonIndex)
+    Invoke-InputMethod -Device $Mouse -Method 'ClickButton' -Arguments @{ ButtonIndex = [uint32]$ButtonIndex }
+}
+
+function Invoke-MouseScroll {
+    param([Parameter(Mandatory)]$Mouse, [Parameter(Mandatory)][int]$Delta)
+    Invoke-InputMethod -Device $Mouse -Method 'SetScrollPosition' -Arguments @{ ScrollPositionDelta = $Delta }
 }
 
 function Convert-Checkpoint {
@@ -1062,43 +1132,14 @@ function Invoke-BridgeOperation {
         'console_type_text' {
             $vm = Get-ExactVm -Name $request.vm
             $keyboard = Get-InputDevice -Vm $vm -ClassName 'Msvm_Keyboard'
-            $text = [string]$request.text
-            $segments = [regex]::Split($text, '(\r\n|\r|\n)')
-            $chunks = 0
-            foreach ($segment in $segments) {
-                if ($segment -match '^\r\n$|^\r$|^\n$') {
-                    Invoke-InputMethod -Device $keyboard -Method 'TypeKey' -Arguments @{ KeyCode = [uint32]13 }
-                    continue
-                }
-                for ($offset = 0; $offset -lt $segment.Length;) {
-                    $length = [Math]::Min(256, $segment.Length - $offset)
-                    $lastIndex = $offset + $length - 1
-                    if ($length -eq 256 -and [char]::IsHighSurrogate($segment[$lastIndex])) { $length-- }
-                    $chunk = $segment.Substring($offset, $length)
-                    Invoke-InputMethod -Device $keyboard -Method 'TypeText' -Arguments @{ AsciiText = $chunk }
-                    $chunks++
-                    $offset += $length
-                    Start-Sleep -Milliseconds 15
-                }
-            }
+            $chunks = Send-KeyboardText -Keyboard $keyboard -Text ([string]$request.text)
             $result = @{ vm = $vm.Name; chunks_sent = $chunks; completed = $true }
         }
         'console_press_keys' {
             $vm = Get-ExactVm -Name $request.vm
             $keyboard = Get-InputDevice -Vm $vm -ClassName 'Msvm_Keyboard'
-            $pressed = @()
-            try {
-                foreach ($key in $request.keys) {
-                    $code = Convert-KeyName -Name ([string]$key)
-                    Invoke-InputMethod -Device $keyboard -Method 'PressKey' -Arguments @{ KeyCode = $code }
-                    $pressed += $code
-                }
-            } finally {
-                for ($index = $pressed.Count - 1; $index -ge 0; $index--) {
-                    Invoke-InputMethod -Device $keyboard -Method 'ReleaseKey' -Arguments @{ KeyCode = $pressed[$index] }
-                }
-            }
-            $result = @{ vm = $vm.Name; keys_sent = $pressed.Count; completed = $true }
+            $sent = Send-KeyChord -Keyboard $keyboard -Keys @($request.keys | ForEach-Object { [string]$_ })
+            $result = @{ vm = $vm.Name; keys_sent = $sent; completed = $true }
         }
         'console_key_state' {
             $vm = Get-ExactVm -Name $request.vm
@@ -1128,31 +1169,124 @@ function Invoke-BridgeOperation {
         'console_mouse_move' {
             $vm = Get-ExactVm -Name $request.vm
             $mouse = Get-InputDevice -Vm $vm -ClassName 'Msvm_SyntheticMouse'
-            Invoke-InputMethod -Device $mouse -Method 'SetAbsolutePosition' -Arguments @{
-                HorizontalPosition = [int]$request.x; VerticalPosition = [int]$request.y
-            }
+            Move-MousePointer -Mouse $mouse -X ([int]$request.x) -Y ([int]$request.y)
             $result = @{ vm = $vm.Name; x = $request.x; y = $request.y }
         }
         'console_click' {
             $vm = Get-ExactVm -Name $request.vm
             $mouse = Get-InputDevice -Vm $vm -ClassName 'Msvm_SyntheticMouse'
             if ($request.PSObject.Properties.Name -contains 'x') {
-                Invoke-InputMethod -Device $mouse -Method 'SetAbsolutePosition' -Arguments @{
-                    HorizontalPosition = [int]$request.x; VerticalPosition = [int]$request.y
-                }
+                Move-MousePointer -Mouse $mouse -X ([int]$request.x) -Y ([int]$request.y)
             }
-            Invoke-InputMethod -Device $mouse -Method 'ClickButton' -Arguments @{
-                ButtonIndex = [uint32]$request.button_index
-            }
+            Invoke-MouseClick -Mouse $mouse -ButtonIndex ([int]$request.button_index)
             $result = @{ vm = $vm.Name; button_index = $request.button_index; completed = $true }
         }
         'console_scroll' {
             $vm = Get-ExactVm -Name $request.vm
             $mouse = Get-InputDevice -Vm $vm -ClassName 'Msvm_SyntheticMouse'
-            Invoke-InputMethod -Device $mouse -Method 'SetScrollPosition' -Arguments @{
-                ScrollPositionDelta = [int]$request.delta
-            }
+            Invoke-MouseScroll -Mouse $mouse -Delta ([int]$request.delta)
             $result = @{ vm = $vm.Name; delta = $request.delta; completed = $true }
+        }
+        'console_batch' {
+            # One request, one device lookup: the whole ordered batch runs in this
+            # worker so an intermediate state cannot be interleaved with another call.
+            $vm = Get-ExactVm -Name $request.vm
+            $keyboard = $null
+            $mouse = $null
+            $results = @()
+            $index = 0
+            foreach ($action in $request.actions) {
+                $kind = [string]$action.type
+                switch ($kind) {
+                    'text' {
+                        if ($null -eq $keyboard) { $keyboard = Get-InputDevice -Vm $vm -ClassName 'Msvm_Keyboard' }
+                        $chunks = Send-KeyboardText -Keyboard $keyboard -Text ([string]$action.text)
+                        $entry = @{ chunks_sent = $chunks; completed = $true }
+                    }
+                    'keys' {
+                        if ($null -eq $keyboard) { $keyboard = Get-InputDevice -Vm $vm -ClassName 'Msvm_Keyboard' }
+                        $sent = Send-KeyChord -Keyboard $keyboard -Keys @($action.keys | ForEach-Object { [string]$_ })
+                        $entry = @{ keys_sent = $sent; completed = $true }
+                    }
+                    'ctrl_alt_delete' {
+                        if ($null -eq $keyboard) { $keyboard = Get-InputDevice -Vm $vm -ClassName 'Msvm_Keyboard' }
+                        Invoke-InputMethod -Device $keyboard -Method 'TypeCtrlAltDel'
+                        $entry = @{ completed = $true }
+                    }
+                    'move' {
+                        if ($null -eq $mouse) { $mouse = Get-InputDevice -Vm $vm -ClassName 'Msvm_SyntheticMouse' }
+                        Move-MousePointer -Mouse $mouse -X ([int]$action.x) -Y ([int]$action.y)
+                        $entry = @{ x = [int]$action.x; y = [int]$action.y }
+                    }
+                    'click' {
+                        if ($null -eq $mouse) { $mouse = Get-InputDevice -Vm $vm -ClassName 'Msvm_SyntheticMouse' }
+                        if ($action.PSObject.Properties.Name -contains 'x') {
+                            Move-MousePointer -Mouse $mouse -X ([int]$action.x) -Y ([int]$action.y)
+                        }
+                        Invoke-MouseClick -Mouse $mouse -ButtonIndex ([int]$action.button_index)
+                        $entry = @{ button_index = [int]$action.button_index; completed = $true }
+                    }
+                    'scroll' {
+                        if ($null -eq $mouse) { $mouse = Get-InputDevice -Vm $vm -ClassName 'Msvm_SyntheticMouse' }
+                        Invoke-MouseScroll -Mouse $mouse -Delta ([int]$action.delta)
+                        $entry = @{ delta = [int]$action.delta; completed = $true }
+                    }
+                    'wait' {
+                        Start-Sleep -Milliseconds ([int]$action.milliseconds)
+                        $entry = @{ waited_ms = [int]$action.milliseconds }
+                    }
+                    default { throw "Unsupported console action '$kind'." }
+                }
+                $results += @{ index = $index; type = $kind; result = $entry }
+                $index++
+            }
+            $result = @{ vm = $vm.Name; actions_completed = $results.Count; results = $results }
+        }
+        'vm_thumbnail' {
+            # The Hyper-V console thumbnail is RGB565 at exactly the requested size,
+            # which is what makes its pixels line up with SetAbsolutePosition.
+            $vm = Get-ExactVm -Name $request.vm
+            $width = [int]$request.width
+            $height = [int]$request.height
+            if ($width -lt 1 -or $width -gt 16384 -or $height -lt 1 -or $height -gt 16384) {
+                throw 'Thumbnail width and height must be between 1 and 16384 pixels.'
+            }
+            $services = @(
+                Get-CimInstance -Namespace 'root/virtualization/v2' `
+                    -ClassName 'Msvm_VirtualSystemManagementService'
+            )
+            if ($services.Count -ne 1) {
+                throw "Expected one Msvm_VirtualSystemManagementService; found $($services.Count)."
+            }
+            $vmCim = Get-VmCim -Vm $vm
+            $response = Invoke-CimMethod -InputObject $services[0] `
+                -MethodName 'GetVirtualSystemThumbnailImage' -Arguments @{
+                    TargetSystem = $vmCim
+                    WidthPixels = [uint16]$width
+                    HeightPixels = [uint16]$height
+                }
+            $returnValue = [uint32]$response.ReturnValue
+            if ($returnValue -ne 0) {
+                throw "GetVirtualSystemThumbnailImage returned $returnValue for '$($vm.Name)'."
+            }
+            $data = @($response.ImageData)
+            $minimum = $width * $height * 2
+            if ($data.Count -lt $minimum) {
+                throw "The console thumbnail was shorter than $minimum bytes."
+            }
+            # Rows can be padded; the stride is whatever the payload length implies.
+            $stride = [int][Math]::Floor($data.Count / $height)
+            if ($stride -lt ($width * 2)) { $stride = $width * 2 }
+            $result = @{
+                vm = $vm.Name
+                state = $vm.State.ToString()
+                width = $width
+                height = $height
+                format = 'rgb565'
+                byte_length = $data.Count
+                stride_bytes = $stride
+                data = [Convert]::ToBase64String([byte[]]$data)
+            }
         }
         'media_list' {
             $vm = Get-ExactVm -Name $request.vm

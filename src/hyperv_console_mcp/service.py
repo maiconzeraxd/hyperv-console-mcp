@@ -15,12 +15,24 @@ from typing import Any, Callable, TypeVar
 
 from .audit import AuditLogger
 from .backend import HyperVBackend
+from .capture import changed_fraction, decode_rgb565, sample_image, thumbnail_screenshot
 from .config import Settings
-from .errors import BackendError, HyperVError, PolicyError, ValidationError
+from .errors import (
+    BackendError,
+    CaptureError,
+    HyperVError,
+    PolicyError,
+    ValidationError,
+)
 from .serial import SerialManager
 
 MAX_GUEST_FILE_BYTES = 8 * 1024 * 1024
 COMMAND_PREVIEW_LINES = 20
+# console_wait_for_change polls a small thumbnail rather than the full framebuffer.
+WAIT_SAMPLE_WIDTH = 160
+WAIT_SAMPLE_SIZE = (64, 36)
+WAIT_POLL_SECONDS = 0.4
+WAIT_CHANGE_THRESHOLD = 0.01
 # Every MCP tool annotated MUTATION must request approval here, once per call.
 GATED_TOOLS = frozenset({
     "vm_power", "checkpoint_create", "checkpoint_restore", "checkpoint_delete",
@@ -1275,11 +1287,6 @@ class HyperVService:
                 {"vm": vm, "left": left, "right": right, "middle": middle}, vm_name=vm,
             )
 
-    def console_wait(self, milliseconds: int) -> dict[str, Any]:
-        duration = _integer(milliseconds, "milliseconds", 1, 30_000)
-        time.sleep(duration / 1000)
-        return {"waited_ms": duration}
-
     def console_batch(self, vm_name: str, actions: list[dict[str, Any]]) -> dict[str, Any]:
         vm = self._write(
             vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
@@ -1330,7 +1337,8 @@ class HyperVService:
                     button = arguments.get("button", "left")
                     if button not in BUTTONS:
                         raise ValidationError(f"actions[{index}].button must be left, right, or middle.")
-                    arguments["button"] = button
+                    arguments["button_index"] = BUTTONS[button]
+                    del arguments["button"]
             elif kind == "scroll":
                 arguments["delta"] = _integer(
                     arguments.get("delta"), f"actions[{index}].delta", -100_000, 100_000
@@ -1344,31 +1352,18 @@ class HyperVService:
                     raise ValidationError("The cumulative console batch wait budget is 30000 ms.")
                 arguments["milliseconds"] = duration
             prepared.append((index, kind, arguments))
-        # One approval covers the whole batch; the per-action calls inherit it.
+        # One approval and one bridge request cover the whole ordered batch, so an
+        # intermediate state cannot be interleaved with another console call.
         with self._approve("console_batch", vm, {
             "actions": [kind for _, kind, _ in prepared],
             "action_count": len(prepared),
         }):
-            results = []
-            for index, kind, arguments in prepared:
-                if kind == "text":
-                    result = self.console_type_text(vm, arguments["text"])
-                elif kind == "keys":
-                    result = self.console_press_keys(vm, arguments["keys"])
-                elif kind == "click":
-                    result = self.console_click(
-                        vm, arguments.get("button", "left"), arguments.get("x"), arguments.get("y")
-                    )
-                elif kind == "move":
-                    result = self.console_mouse_move(vm, arguments["x"], arguments["y"])
-                elif kind == "scroll":
-                    result = self.console_scroll(vm, arguments["delta"])
-                elif kind == "wait":
-                    result = self.console_wait(arguments["milliseconds"])
-                else:
-                    result = self.console_ctrl_alt_delete(vm)
-                results.append({"index": index, "type": kind, "result": result})
-        return {"vm": vm, "actions_completed": len(results), "results": results}
+            payload = [
+                {"type": kind, **arguments} for _, kind, arguments in prepared
+            ]
+            return self._run(
+                "console_batch", "console_batch", {"vm": vm, "actions": payload}, vm_name=vm
+            )
 
     def console_ctrl_alt_delete(self, vm_name: str) -> dict[str, Any]:
         vm = self._write(
@@ -1426,15 +1421,147 @@ class HyperVService:
             vm_name, self.settings.allow_screenshots, "HYPERV_MCP_ALLOW_SCREENSHOTS"
         )
 
-    def capture_screenshot(
-        self, capture: Any, vm_name: str, region: str = "window", max_width: int = 1600
-    ) -> Any:
+    def _video_head(self, vm: str) -> tuple[int, int]:
+        """The guest display resolution, which is the coordinate space mouse tools use."""
+        info = self._run("console_info", "console_info", {"vm": vm}, vm_name=vm)
+        for head in info.get("video_heads") or []:
+            if not isinstance(head, dict):
+                continue
+            width, height = head.get("horizontal"), head.get("vertical")
+            if isinstance(width, int) and isinstance(height, int) and width > 0 and height > 0:
+                return width, height
+        raise CaptureError(
+            "The VM reported no video head with a current resolution. Start the guest and retry."
+        )
+
+    def _thumbnail_image(self, vm: str, width: int, height: int) -> Any:
+        result = self._run(
+            "vm_thumbnail", "vm_thumbnail",
+            {"vm": vm, "width": width, "height": height}, vm_name=vm,
+        )
+        encoded = result.get("data")
+        if not isinstance(encoded, str) or not encoded:
+            raise CaptureError("The bridge returned no console thumbnail payload.")
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise CaptureError("The console thumbnail payload was not valid base64.") from exc
+        stride = result.get("stride_bytes")
+        return decode_rgb565(
+            payload,
+            int(result.get("width") or width),
+            int(result.get("height") or height),
+            stride=stride if isinstance(stride, int) else None,
+        )
+
+    def capture_thumbnail(self, vm_name: str, max_width: int = 1600) -> Any:
+        """Screenshot straight from the Hyper-V console thumbnail, with no VMConnect window."""
         name = self.authorize_screenshot(vm_name)
-        with self._approve("console_screenshot", name, {"region": region}):
+        width = _integer(max_width, "max_width", 640, 3840)
+        with self._approve("console_screenshot", name, {"source": "thumbnail", "max_width": width}):
+            head_width, head_height = self._video_head(name)
+            image = self._thumbnail_image(name, head_width, head_height)
+            return thumbnail_screenshot(
+                image, vm=name, source_width=head_width, source_height=head_height,
+                max_width=width,
+            )
+
+    def capture_screenshot(
+        self, capture: Any, vm_name: str, source: str = "thumbnail",
+        region: str = "window", max_width: int = 1600,
+    ) -> Any:
+        if source == "thumbnail":
+            return self.capture_thumbnail(vm_name, max_width)
+        if source != "vmconnect":
+            raise ValidationError("source must be 'thumbnail' or 'vmconnect'.")
+        if region not in {"window", "client"}:
+            raise ValidationError("region must be 'window' or 'client'.")
+        name = self.authorize_screenshot(vm_name)
+        with self._approve("console_screenshot", name, {"source": "vmconnect", "region": region}):
             return self._local_action(
                 "console_screenshot", name,
                 lambda: capture.capture(name, region=region, max_width=max_width),
             )
+
+    def console_wait_for_change(
+        self, vm_name: str, timeout_ms: int = 30_000,
+        region: list[int] | None = None, min_change: float = WAIT_CHANGE_THRESHOLD,
+    ) -> dict[str, Any]:
+        """Poll a small console thumbnail until the screen changes or the deadline passes."""
+        name = self.authorize_screenshot(vm_name)
+        timeout = _integer(timeout_ms, "timeout_ms", 250, 120_000)
+        if isinstance(min_change, bool) or not isinstance(min_change, (int, float)) or not (
+            0.0 <= float(min_change) <= 1.0
+        ):
+            raise ValidationError("min_change must be a number between 0 and 1.")
+        box = self._region(region)
+        head_width, head_height = self._video_head(name)
+        sample_width = min(WAIT_SAMPLE_WIDTH, head_width)
+        sample_height = max(1, round(head_height * sample_width / head_width))
+        scaled = None
+        if box is not None:
+            x, y, width, height = box
+            if x + width > head_width or y + height > head_height:
+                raise ValidationError(
+                    f"region exceeds the {head_width}x{head_height} guest display."
+                )
+            scaled = (
+                round(x * sample_width / head_width),
+                round(y * sample_height / head_height),
+                max(1, round(width * sample_width / head_width)),
+                max(1, round(height * sample_height / head_height)),
+            )
+        before = sample_image(
+            self._thumbnail_image(name, sample_width, sample_height),
+            region=scaled, size=WAIT_SAMPLE_SIZE,
+        )
+        started = time.monotonic()
+        deadline = started + timeout / 1000
+        polls = 0
+        fraction = 0.0
+        changed = False
+        while True:
+            # Always sample at least once, even when the timeout is shorter than a
+            # poll interval, so a short wait still observes the screen.
+            time.sleep(min(WAIT_POLL_SECONDS, max(0.01, deadline - time.monotonic())))
+            polls += 1
+            after = sample_image(
+                self._thumbnail_image(name, sample_width, sample_height),
+                region=scaled, size=WAIT_SAMPLE_SIZE,
+            )
+            fraction = changed_fraction(before, after)
+            if fraction >= float(min_change):
+                changed = True
+                break
+            if time.monotonic() >= deadline:
+                break
+        return {
+            "vm": name,
+            "changed": changed,
+            "timed_out": not changed,
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+            "polls": polls,
+            "change_fraction": round(fraction, 4),
+            "min_change": float(min_change),
+            "timeout_ms": timeout,
+            "region": list(box) if box is not None else None,
+            "display": {"width": head_width, "height": head_height},
+            "sample": {"width": sample_width, "height": sample_height},
+        }
+
+    @staticmethod
+    def _region(region: Any) -> tuple[int, int, int, int] | None:
+        if region is None:
+            return None
+        if not isinstance(region, (list, tuple)) or len(region) != 4:
+            raise ValidationError("region must be [x, y, width, height] or omitted.")
+        x, y, width, height = (
+            _integer(value, f"region[{index}]", 0, 32_767)
+            for index, value in enumerate(region)
+        )
+        if width < 1 or height < 1:
+            raise ValidationError("region width and height must be at least 1.")
+        return (x, y, width, height)
 
     def debug_serial_status(self, vm_name: str) -> dict[str, Any]:
         name = self._vm(vm_name)

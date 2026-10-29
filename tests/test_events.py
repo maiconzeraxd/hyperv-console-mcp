@@ -154,16 +154,19 @@ def test_bridge_operations_are_not_approved_one_by_one(tmp_path, monkeypatch, ap
 
 def test_one_tool_call_requests_exactly_one_approval(service, approvals) -> None:
     hyperv, backend = service
-    result = hyperv.console_batch("NORTH-Test", [
+    hyperv.console_batch("NORTH-Test", [
         {"type": "keys", "keys": ["enter"]},
         {"type": "wait", "milliseconds": 1},
         {"type": "scroll", "delta": 1},
     ])
-    assert result["actions_completed"] == 3
     assert [call[0] for call in approvals.calls] == ["console_batch"]
     assert approvals.calls[0][2] == {"actions": ["keys", "wait", "scroll"], "action_count": 3}
-    assert [operation for operation, _ in backend.calls] == [
-        "console_press_keys", "console_scroll"
+    # The whole ordered batch is one bridge request, not one request per action.
+    assert [operation for operation, _ in backend.calls] == ["console_batch"]
+    assert backend.calls[0][1]["actions"] == [
+        {"type": "keys", "keys": ["enter"]},
+        {"type": "wait", "milliseconds": 1},
+        {"type": "scroll", "delta": 1},
     ]
 
 

@@ -1,4 +1,4 @@
-"""Experimental capture of an existing VMConnect window in the interactive session."""
+"""Screenshot capture: the Hyper-V console thumbnail, and an existing VMConnect window."""
 
 from __future__ import annotations
 
@@ -7,14 +7,127 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 from .errors import CaptureError
+
+MAX_PNG_BYTES = 12 * 1024 * 1024
+# Hyper-V returns the console thumbnail as little-endian RGB565, which is Pillow's
+# BGR;16 raw mode (blue in the low five bits, red in the high five).
+RGB565_RAW_MODE = "BGR;16"
 
 
 @dataclass(frozen=True, slots=True)
 class Screenshot:
     png: bytes
     metadata: dict[str, object]
+
+
+def _pillow() -> Any:
+    try:
+        from PIL import Image
+    except ImportError as exc:  # pragma: no cover - Pillow is a declared dependency
+        raise CaptureError("Pillow is required for screenshot encoding.") from exc
+    return Image
+
+
+def decode_rgb565(
+    data: bytes, width: int, height: int, *, stride: int | None = None
+) -> Any:
+    """Decode a Hyper-V console thumbnail into an RGB image.
+
+    Rows may be padded, so the caller can pass the stride the payload implies; a
+    payload that cannot hold ``width * height`` pixels is refused rather than
+    silently cropped.
+    """
+    Image = _pillow()
+    if width <= 0 or height <= 0:
+        raise CaptureError("Thumbnail dimensions must be positive.")
+    if stride is None:
+        stride = len(data) // height if len(data) % height == 0 else width * 2
+    if stride < width * 2 or len(data) < stride * height:
+        raise CaptureError(
+            f"The thumbnail payload holds {len(data)} bytes, too few for "
+            f"{width}x{height} RGB565 pixels."
+        )
+    try:
+        return Image.frombytes("RGB", (width, height), data, "raw", RGB565_RAW_MODE, stride, 1)
+    except (ValueError, OSError) as exc:
+        raise CaptureError(f"The thumbnail payload could not be decoded: {exc}") from exc
+
+
+def encode_png(image: Any, *, max_width: int) -> tuple[bytes, Any, float]:
+    """Downscale to ``max_width`` at most and encode PNG; returns (png, image, scale)."""
+    Image = _pillow()
+    if not 640 <= max_width <= 3840:
+        raise CaptureError("Screenshot max_width must be between 640 and 3840.")
+    scale = min(1.0, max_width / image.width)
+    if scale < 1.0:
+        image = image.resize(
+            (max_width, max(1, round(image.height * scale))), Image.Resampling.LANCZOS
+        )
+    output = BytesIO()
+    image.save(output, format="PNG", compress_level=6)
+    png = output.getvalue()
+    if len(png) > MAX_PNG_BYTES:
+        raise CaptureError("The captured PNG exceeds 12 MiB; retry with a smaller max_width.")
+    return png, image, scale
+
+
+def thumbnail_screenshot(
+    image: Any,
+    *,
+    vm: str,
+    source_width: int,
+    source_height: int,
+    max_width: int = 1600,
+) -> Screenshot:
+    """Wrap a decoded console thumbnail as a PNG with coordinate metadata."""
+    png, scaled, scale = encode_png(image, max_width=max_width)
+    metadata: dict[str, object] = {
+        "vm": vm,
+        "experimental": False,
+        "source": "hyper-v console thumbnail",
+        "source_method": (
+            "Msvm_VirtualSystemManagementService.GetVirtualSystemThumbnailImage"
+        ),
+        "width": scaled.width,
+        "height": scaled.height,
+        "source_width": source_width,
+        "source_height": source_height,
+        "capture_scale": round(scale, 6),
+        # The thumbnail is requested at the video-head resolution, so at scale 1.0
+        # its pixels are the same pixels console_mouse_move uses.
+        "coordinates_match_mouse": scale >= 1.0,
+        "coordinate_note": (
+            "Mouse tools take guest-display pixels. This image is the video head at "
+            "1:1 when coordinates_match_mouse is true; otherwise divide screenshot "
+            "coordinates by capture_scale."
+        ),
+    }
+    return Screenshot(png=png, metadata=metadata)
+
+
+def sample_image(
+    image: Any,
+    *,
+    region: tuple[int, int, int, int] | None = None,
+    size: tuple[int, int] = (64, 36),
+) -> bytes:
+    """Grayscale, downscaled sample of an image, optionally cropped, for change detection."""
+    Image = _pillow()
+    if region is not None:
+        left, top, width, height = region
+        image = image.crop((left, top, left + width, top + height))
+    return image.convert("L").resize(size, Image.Resampling.BOX).tobytes()
+
+
+def changed_fraction(before: bytes, after: bytes, *, threshold: int = 8) -> float:
+    """Fraction of sampled pixels that differ by more than ``threshold`` grey levels."""
+    if not before or len(before) != len(after):
+        return 1.0
+    changed = sum(1 for first, second in zip(before, after) if abs(first - second) > threshold)
+    return changed / len(before)
 
 
 class _Rect(ctypes.Structure):
@@ -71,7 +184,6 @@ class VMConnectCapture:
             from PIL import Image
         except ImportError as exc:
             raise CaptureError("Pillow is required for VMConnect capture.") from exc
-
         handle, title = self._find_window(vm_name)
         user32 = ctypes.windll.user32
         if user32.IsIconic(handle):
@@ -94,17 +206,7 @@ class VMConnectCapture:
         image = self._print_window(
             handle, original_width, original_height, region=region, image_class=Image
         )
-        scale = min(1.0, max_width / original_width)
-        if scale < 1.0:
-            image = image.resize(
-                (max_width, max(1, round(original_height * scale))),
-                image.Resampling.LANCZOS,
-            )
-        output = BytesIO()
-        image.save(output, format="PNG", compress_level=6)
-        png = output.getvalue()
-        if len(png) > 12 * 1024 * 1024:
-            raise CaptureError("The captured PNG exceeds 12 MiB; retry with a smaller max_width.")
+        png, image, scale = encode_png(image, max_width=max_width)
         metadata: dict[str, object] = {
             "vm": vm_name,
             "experimental": True,
@@ -116,6 +218,7 @@ class VMConnectCapture:
             "source_width": original_width,
             "source_height": original_height,
             "capture_scale": round(scale, 6),
+            "coordinates_match_mouse": False,
             "coordinate_note": (
                 "Mouse tools use guest-display pixels, not screenshot pixels. "
                 "Account for VMConnect controls, scaling, and letterboxing."

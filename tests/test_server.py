@@ -30,7 +30,7 @@ def server() -> tuple[object, FakeBackend]:
 def test_all_tools_are_discoverable(server) -> None:
     mcp, _ = server
     tools = {tool.name: tool for tool in anyio.run(mcp.list_tools)}
-    assert len(tools) == 60
+    assert len(tools) == 61
     assert tools["vm_list"].input_schema["type"] == "object"
     assert tools["vm_list"].input_schema.get("required", []) == []
     assert "password" not in tools["guest_exec"].input_schema["properties"]
@@ -51,9 +51,14 @@ def test_all_tools_are_discoverable(server) -> None:
         "start", "shutdown", "save", "pause", "resume", "turn_off", "reset"
     }
     assert tools["guest_read_file"].input_schema["properties"]["max_bytes"]["default"] == 65_536
+    assert set(tools["console_screenshot"].input_schema["properties"]["source"]["enum"]) == {
+        "thumbnail", "vmconnect"
+    }
+    assert tools["console_screenshot"].input_schema["properties"]["source"]["default"] == "thumbnail"
     assert set(tools["console_screenshot"].input_schema["properties"]["region"]["enum"]) == {
         "window", "client"
     }
+    assert tools["console_wait_for_change"].annotations.read_only_hint is True
 
 
 def test_tool_calls_service_and_returns_structured_output(server) -> None:
@@ -89,7 +94,7 @@ def test_screenshot_returns_metadata_png_and_audit(server, tmp_path, monkeypatch
     result = anyio.run(
         server_with_capture.call_tool,
         "console_screenshot",
-        {"vm_name": "NORTH-Test", "region": "client"},
+        {"vm_name": "NORTH-Test", "source": "vmconnect", "region": "client"},
     )
     assert isinstance(result.content[0], TextContent)
     assert isinstance(result.content[1], ImageContent)
