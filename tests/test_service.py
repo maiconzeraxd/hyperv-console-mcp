@@ -665,3 +665,49 @@ def test_guest_config_mutations_are_gated() -> None:
     assert "guest_autologon_configure" in GATED_TOOLS
     assert "guest_config_revert" in GATED_TOOLS
     assert "guest_config_status" not in GATED_TOOLS
+
+
+def test_the_lab_profile_runs_mutations_without_the_approval_dialog(
+    enabled: HyperVService, backend: FakeBackend, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("HYPERV_MCP_PROFILE", "lab")
+    monkeypatch.setenv("HYPERV_MCP_REQUIRE_DASHBOARD_APPROVAL", "true")
+    monkeypatch.setenv("HYPERV_MCP_EVENT_DIRECTORY", str(tmp_path / "events"))
+    asked: list[tuple] = []
+    monkeypatch.setattr(
+        "hyperv_console_mcp.ipc.request_approval", lambda *args, **kwargs: asked.append(args)
+    )
+
+    enabled.power("NORTH-Test", "start")
+
+    assert asked == []
+    assert backend.calls[-1] == ("vm_power", {"vm": "NORTH-Test", "action": "start"})
+
+
+def test_the_safe_profile_still_asks_when_approval_is_required(
+    enabled: HyperVService, backend: FakeBackend, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.delenv("HYPERV_MCP_PROFILE", raising=False)
+    monkeypatch.setenv("HYPERV_MCP_REQUIRE_DASHBOARD_APPROVAL", "true")
+    monkeypatch.setenv("HYPERV_MCP_EVENT_DIRECTORY", str(tmp_path / "events"))
+    asked: list[tuple] = []
+    monkeypatch.setattr(
+        "hyperv_console_mcp.ipc.request_approval",
+        lambda operation, vm, summary=None: asked.append((operation, vm, summary)),
+    )
+
+    enabled.power("NORTH-Test", "start")
+
+    assert [entry[0] for entry in asked] == ["vm_power"]
+    assert backend.calls[-1][0] == "vm_power"
+
+
+def test_host_status_reports_the_profile_and_capabilities(
+    enabled: HyperVService, backend: FakeBackend
+) -> None:
+    backend.responses["host_status"] = {"hypervisor_present": True}
+    result = enabled.host_status()
+    assert result["hypervisor_present"] is True
+    assert result["profile"] == "safe"
+    assert result["capabilities"]["power"] is True
+    assert result["allowlist"] == ["NORTH-Test"]

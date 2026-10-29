@@ -34,3 +34,47 @@ def test_lab_roots_honour_absolute_environment_overrides(tmp_path: Path) -> None
 def test_relative_lab_roots_are_rejected_at_startup(tmp_path: Path, name: str) -> None:
     with pytest.raises(ValidationError, match="absolute path"):
         Settings.from_env({"LOCALAPPDATA": str(tmp_path), name: "relative\\directory"})
+
+
+def test_the_safe_profile_is_the_default_and_enables_nothing(tmp_path: Path) -> None:
+    settings = Settings.from_env({"LOCALAPPDATA": str(tmp_path)})
+    assert settings.profile == "safe"
+    assert settings.allow_power is False
+    assert settings.allow_guest is False
+    assert settings.allow_media is False
+
+
+def test_the_lab_profile_enables_every_capability(tmp_path: Path) -> None:
+    settings = Settings.from_env({
+        "LOCALAPPDATA": str(tmp_path),
+        "HYPERV_MCP_PROFILE": "lab",
+        "HYPERV_MCP_ALLOWED_VMS": "LAB-Test",
+    })
+    assert settings.profile == "lab"
+    for name in (
+        "allow_power", "allow_checkpoints", "allow_guest", "allow_console",
+        "allow_screenshots", "allow_debugger", "allow_media",
+    ):
+        assert getattr(settings, name) is True, name
+
+
+def test_the_lab_profile_does_not_invent_an_allowlist(tmp_path: Path) -> None:
+    settings = Settings.from_env({"LOCALAPPDATA": str(tmp_path), "HYPERV_MCP_PROFILE": "lab"})
+    assert settings.allowed_vms == frozenset()
+
+
+def test_an_explicit_false_holds_one_capability_back_in_the_lab_profile(
+    tmp_path: Path,
+) -> None:
+    settings = Settings.from_env({
+        "LOCALAPPDATA": str(tmp_path),
+        "HYPERV_MCP_PROFILE": "lab",
+        "HYPERV_MCP_ALLOW_MEDIA": "false",
+    })
+    assert settings.allow_power is True
+    assert settings.allow_media is False
+
+
+def test_an_unknown_profile_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="HYPERV_MCP_PROFILE"):
+        Settings.from_env({"LOCALAPPDATA": str(tmp_path), "HYPERV_MCP_PROFILE": "yolo"})

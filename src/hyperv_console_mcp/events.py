@@ -255,6 +255,11 @@ class ProgressReporter:
 
 
 def _approval_required() -> bool:
+    # The lab profile exists so an autonomous loop does not wait for a click on
+    # every step. It records every operation instead, and the allowlist and
+    # every confirm_* field still apply.
+    if os.environ.get("HYPERV_MCP_PROFILE", "").strip().casefold() == "lab":
+        return False
     enabled = os.environ.get(
         "HYPERV_MCP_REQUIRE_DASHBOARD_APPROVAL", "false"
     ).strip().casefold() in {"1", "true", "yes", "on"}

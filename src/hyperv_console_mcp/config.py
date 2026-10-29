@@ -81,10 +81,29 @@ def _transport(values: Mapping[str, str], name: str) -> str:
         raise ValidationError(f"{name} must be auto, psdirect, or ssh.")
     return value
 
+def _profile(values: Mapping[str, str]) -> str:
+    value = values.get("HYPERV_MCP_PROFILE", "safe").strip().casefold() or "safe"
+    if value not in {"safe", "lab"}:
+        raise ValidationError("HYPERV_MCP_PROFILE must be safe or lab.")
+    return value
+
+# The lab profile turns every capability on for the allowlisted VMs. It never
+# widens the allowlist itself: an empty list still refuses every mutation.
+CAPABILITY_VARIABLES = (
+    "HYPERV_MCP_ALLOW_POWER",
+    "HYPERV_MCP_ALLOW_CHECKPOINTS",
+    "HYPERV_MCP_ALLOW_GUEST",
+    "HYPERV_MCP_ALLOW_CONSOLE",
+    "HYPERV_MCP_ALLOW_SCREENSHOTS",
+    "HYPERV_MCP_ALLOW_DEBUGGER",
+    "HYPERV_MCP_ALLOW_MEDIA",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class Settings:
     allowed_vms: frozenset[str] = frozenset()
+    profile: str = "safe"
     allow_power: bool = False
     allow_checkpoints: bool = False
     allow_guest: bool = False
@@ -125,15 +144,25 @@ class Settings:
             for key in env
             if key.startswith(PER_VM_TRANSPORT_PREFIX) and len(key) > len(PER_VM_TRANSPORT_PREFIX)
         }
+        profile = _profile(env)
+
+        def capability(variable: str) -> bool:
+            # The lab profile enables everything for the allowlisted VMs; an
+            # explicit "false" still wins so a single capability can be held
+            # back without leaving the profile.
+            if env.get(variable, "").strip():
+                return _boolean(env, variable)
+            return profile == "lab"
         return cls(
             allowed_vms=names,
-            allow_power=_boolean(env, "HYPERV_MCP_ALLOW_POWER"),
-            allow_checkpoints=_boolean(env, "HYPERV_MCP_ALLOW_CHECKPOINTS"),
-            allow_guest=_boolean(env, "HYPERV_MCP_ALLOW_GUEST"),
-            allow_console=_boolean(env, "HYPERV_MCP_ALLOW_CONSOLE"),
-            allow_screenshots=_boolean(env, "HYPERV_MCP_ALLOW_SCREENSHOTS"),
-            allow_debugger=_boolean(env, "HYPERV_MCP_ALLOW_DEBUGGER"),
-            allow_media=_boolean(env, "HYPERV_MCP_ALLOW_MEDIA"),
+            profile=profile,
+            allow_power=capability("HYPERV_MCP_ALLOW_POWER"),
+            allow_checkpoints=capability("HYPERV_MCP_ALLOW_CHECKPOINTS"),
+            allow_guest=capability("HYPERV_MCP_ALLOW_GUEST"),
+            allow_console=capability("HYPERV_MCP_ALLOW_CONSOLE"),
+            allow_screenshots=capability("HYPERV_MCP_ALLOW_SCREENSHOTS"),
+            allow_debugger=capability("HYPERV_MCP_ALLOW_DEBUGGER"),
+            allow_media=capability("HYPERV_MCP_ALLOW_MEDIA"),
             guest_username=env.get("HYPERV_MCP_GUEST_USERNAME") or None,
             guest_password=env.get("HYPERV_MCP_GUEST_PASSWORD") or None,
             guest_transport=_transport(env, "HYPERV_MCP_GUEST_TRANSPORT"),

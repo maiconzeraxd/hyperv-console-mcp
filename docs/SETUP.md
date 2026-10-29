@@ -15,6 +15,17 @@ $env:HYPERV_MCP_ALLOW_MEDIA = 'false'
 
 For PowerShell Direct only, additionally set `HYPERV_MCP_GUEST_USERNAME` and `HYPERV_MCP_GUEST_PASSWORD` in the protected host environment. They are not command-line arguments or tool parameters.
 
+## Profiles
+
+`HYPERV_MCP_PROFILE=safe` (the default) keeps every capability off until its own `HYPERV_MCP_ALLOW_*` variable is set. `HYPERV_MCP_PROFILE=lab` enables all seven capabilities for the allowlisted VMs and stops asking the dashboard for approval, so an autonomous loop does not wait for a click on every step:
+
+```powershell
+$env:HYPERV_MCP_PROFILE = 'lab'
+$env:HYPERV_MCP_ALLOWED_VMS = 'NORTH-Test'
+```
+
+What the lab profile does **not** change: the allowlist (an empty `HYPERV_MCP_ALLOWED_VMS` still refuses every mutation), the `confirm_*` fields, the confined host paths, the ban on host driver/payload execution, and the audit and event records, which keep every operation. An explicit `HYPERV_MCP_ALLOW_<CAPABILITY>=false` still wins, so one capability can be held back inside the profile. The active profile is reported by `hyperv_host_status` and shown in the dashboard sidebar.
+
 ## Guest credential
 
 The primary place for the guest password is the current user's Windows Credential Manager, under the generic target `HyperVConsoleMCP/<vm>`. Set it from the dashboard's **Guest access** page (typed locally, written straight into the vault) or with `guest_credential_set` from a Python session. It is deliberately not an MCP tool, so the AI never types the password. `guest_password_rotate` generates a new random password, sets it in the guest, proves a fresh session accepts it, and only then stores it, restoring the previous password if the guest rejects the new one. `guest_credential_status` reports where the credential came from and whether PowerShell Direct and SSH accept it, and never returns the secret.

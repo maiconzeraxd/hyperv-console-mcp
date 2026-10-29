@@ -98,6 +98,7 @@ For kernel work, choose **KDNET** after reviewing a suitable network path, or **
 
 - Local stdio only; no HTTP server or unauthenticated network listener.
 - Read-only mode by default; allowlist required for every mutation.
+- `HYPERV_MCP_PROFILE=lab` enables every capability for the allowlisted VMs and skips the per-mutation dashboard approval. It does not widen the allowlist, skip a `confirm_*` field, or stop the audit and event records; an explicit `HYPERV_MCP_ALLOW_*=false` still wins.
 - Console input is real input to the VM and can change state immediately.
 - Screenshots may contain sensitive guest information and are gated separately.
 - Audit events contain timestamp, operation, VM, outcome, and error code only. Guest commands, typed text, passwords, and file contents are excluded.

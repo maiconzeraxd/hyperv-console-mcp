@@ -258,7 +258,12 @@ class Dashboard(tk.Tk):
         nav.pack_propagate(False)
         ttk.Label(nav, text="HYPER-V", font=("Segoe UI Semibold", 22), foreground=COLORS["accent"]).pack(anchor="w")
         ttk.Label(nav, text="Control Center", foreground=COLORS["muted"]).pack(anchor="w", pady=(0, 8))
-        ttk.Label(nav, textvariable=tk.StringVar(value=self.vm_name), foreground=COLORS["blue"]).pack(anchor="w", pady=(0, 24))
+        ttk.Label(nav, textvariable=tk.StringVar(value=self.vm_name), foreground=COLORS["blue"]).pack(anchor="w", pady=(0, 4))
+        self.profile = tk.StringVar(value=f"profile: {self.settings.profile}")
+        ttk.Label(
+            nav, textvariable=self.profile,
+            foreground=COLORS["warning"] if self.settings.profile == "lab" else COLORS["muted"],
+        ).pack(anchor="w", pady=(0, 24))
         self.content = ttk.Frame(self, padding=26)
         self.content.pack(side="right", fill="both", expand=True)
         for page in (
@@ -272,6 +277,7 @@ class Dashboard(tk.Tk):
             ("Power", self.settings.allow_power), ("Guest", self.settings.allow_guest),
             ("Console", self.settings.allow_console), ("Checkpoints", self.settings.allow_checkpoints),
             ("Media", self.settings.allow_media), ("Debugger", self.settings.allow_debugger),
+            ("Screenshots", self.settings.allow_screenshots),
         ):
             flags.append(("● " if enabled else "○ ") + label)
         self.capabilities = tk.StringVar(value="\n".join(flags))

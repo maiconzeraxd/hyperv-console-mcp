@@ -232,7 +232,19 @@ class HyperVService:
             raise
 
     def host_status(self) -> dict[str, Any]:
-        return self._run("host_status", "host_status")
+        result = self._run("host_status", "host_status")
+        result["profile"] = self.settings.profile
+        result["capabilities"] = {
+            "power": self.settings.allow_power,
+            "checkpoints": self.settings.allow_checkpoints,
+            "guest": self.settings.allow_guest,
+            "console": self.settings.allow_console,
+            "screenshots": self.settings.allow_screenshots,
+            "debugger": self.settings.allow_debugger,
+            "media": self.settings.allow_media,
+        }
+        result["allowlist"] = sorted(self.settings.allowed_vms)
+        return result
 
     def list_vms(self) -> dict[str, Any]:
         result = self._run("vm_list", "vm_list")

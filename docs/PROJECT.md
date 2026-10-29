@@ -188,3 +188,11 @@ An independent, local Model Context Protocol server for Hyper-V on Windows. It c
 - Dashboard: the Guest access page gained one `leave`/`on`/`off` row per setting, an optional restart, and Apply / Read automation state / Revert buttons.
 - Local validation: 203 passing tests (8 new in `tests/test_guest_config.py`, 11 in `tests/test_service.py`), clean Ruff, all PowerShell files parse, PSScriptAnalyzer reports no errors or warnings on `src`.
 - Not yet validated live: nothing in this delivery has run against a Windows guest. The `Add-Type` compilation of the LSA P/Invoke, `LsaStorePrivateData` on a real LSA policy, the registry writes, the `powercfg` indices, `query user` parsing after a real autologon, and whether Win10/11 actually honour the LSA secret in the target VM are all modelled only by mocks. `guest_config_status` uploads its helper script on every call, so a strictly read-only guest policy would need that upload allowed.
+
+### 2026-10-29 — v0.2 phase 4: the lab profile
+
+- `HYPERV_MCP_PROFILE=safe|lab` (`safe` by default). `lab` turns the seven `HYPERV_MCP_ALLOW_*` capabilities on for the allowlisted VMs and makes `_approval_required()` return false, so the autonomous loop does not wait for a dashboard click on every step. An explicit `HYPERV_MCP_ALLOW_<CAPABILITY>=false` still wins, so one capability can be held back inside the profile.
+- What the profile deliberately does not touch: the allowlist (an empty `HYPERV_MCP_ALLOWED_VMS` still refuses every mutation, and `_write` checks that before anything else), the `confirm_*` fields, the confined host paths, the ban on host driver/payload execution, and the audit and event records, which still record every operation.
+- `hyperv_host_status` now also reports `profile`, `capabilities` (the seven flags) and the allowlist, and the dashboard sidebar shows the active profile next to the VM name.
+- Local validation: 212 passing tests (5 new in `tests/test_config.py`, 3 in `tests/test_service.py`), clean Ruff.
+- Not yet validated live: no server has been started with `HYPERV_MCP_PROFILE=lab` against a real VM. The profile changes only configuration and approval routing, but the first lab run should confirm that `hyperv_host_status` reports it and that no approval dialog appears.
