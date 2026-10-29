@@ -1494,6 +1494,56 @@ function Invoke-BridgeOperation {
                 reboot_required = $true; automatic_reboot = $false
             }
         }
+        # One inbound rule, for one program, on one UDP port, on the lab switch's
+        # host interface. Nothing here opens a port to any other network.
+        'kdnet_firewall_apply' {
+            $vm = Get-ExactVm -Name $request.vm
+            $ruleName = [string]$request.rule_name
+            if ($ruleName -notmatch '^HyperVConsoleMCP KDNET [^\\/:*?"<>|]+$') {
+                throw "The firewall rule name '$ruleName' is not one this tool creates."
+            }
+            $port = [int]$request.port
+            if ($port -lt 50000 -or $port -gt 50039) {
+                throw "The KDNET port must be between 50000 and 50039."
+            }
+            $program = [string]$request.program
+            if (-not (Test-Path -LiteralPath $program -PathType Leaf)) {
+                throw "The debugger executable '$program' was not found; the rule was not created."
+            }
+            $interfaceAlias = [string]$request.interface_alias
+            if (-not (Get-NetAdapter -InterfaceAlias $interfaceAlias -ErrorAction SilentlyContinue)) {
+                throw "The host interface '$interfaceAlias' was not found; the rule was not created."
+            }
+            # Re-running prepare must not stack duplicate rules.
+            $existing = @(Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue)
+            if ($existing.Count -gt 0) {
+                Remove-NetFirewallRule -Name $ruleName -Confirm:$false -ErrorAction Stop
+            }
+            $rule = New-NetFirewallRule -Name $ruleName -DisplayName $ruleName `
+                -Description 'HyperVConsoleMCP KDNET: kernel debugger traffic on the lab switch.' `
+                -Direction Inbound -Action Allow -Protocol UDP -LocalPort $port `
+                -Program $program -InterfaceAlias $interfaceAlias -Profile Any `
+                -Confirm:$false -ErrorAction Stop
+            $result = @{
+                vm = $vm.Name
+                rule_name = $rule.Name
+                created = $true
+                port = $port
+                program = $program
+                interface_alias = $interfaceAlias
+            }
+        }
+        'kdnet_firewall_remove' {
+            $vm = Get-ExactVm -Name $request.vm
+            $ruleName = [string]$request.rule_name
+            $existing = @(Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue)
+            $removed = $false
+            if ($existing.Count -gt 0) {
+                Remove-NetFirewallRule -Name $ruleName -Confirm:$false -ErrorAction Stop
+                $removed = $true
+            }
+            $result = @{ vm = $vm.Name; rule_name = $ruleName; removed = $removed }
+        }
         default {
             throw ([System.ArgumentException]::new("Unsupported bridge operation '$Operation'."))
         }

@@ -264,6 +264,44 @@ def _restore(service: Any, vm_name: str, run_id: str) -> dict[str, Any]:
     }
 
 
+DEBUGGERS = ("none", "serial", "kdnet")
+
+
+def _debugger_report(
+    service: Any,
+    vm_name: str,
+    transport: str,
+    attached: dict[str, Any],
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    """After a run: let kd say what happened, then parse it when it was a bugcheck."""
+    debug: dict[str, Any] = {
+        "transport": transport,
+        "attached": True,
+        "log_path": attached.get("log_path"),
+        "event": None,
+        "analysis": None,
+    }
+    try:
+        event = service.kd_wait_event(vm_name, timeout_ms=2_000)
+    except HyperVError as exc:
+        debug["error"] = exc.code
+        return debug
+    debug["event"] = event.get("event")
+    debug["module"] = event.get("module")
+    if event.get("event") != "bugcheck":
+        return debug
+    report["outcome"] = "bugcheck"
+    report["detail"] = (
+        "kd stopped the target on a bugcheck; the parsed analysis is in debugger.analysis"
+    )
+    try:
+        debug["analysis"] = service.kd_analyze(vm_name).get("report")
+    except HyperVError as exc:
+        debug["analysis_error"] = exc.code
+    return debug
+
+
 def cycle(
     service: Any,
     vm_name: str,
@@ -275,18 +313,31 @@ def cycle(
     checkpoint_before: bool = True,
     revert_after: bool = False,
     include_kernel_dump: bool = True,
+    debugger: str = "none",
 ) -> dict[str, Any]:
-    """One autonomous iteration: run, collect evidence, optionally revert."""
+    """One autonomous iteration: run, collect evidence, optionally revert.
+
+    With a debugger attached, a bugcheck no longer looks like a hang: kd stops
+    at the prompt and the cycle reports the bugcheck plus the parsed analysis
+    instead of guessing from uptime.
+    """
     if not isinstance(revert_after, bool):
         raise ValidationError("revert_after must be a boolean value.")
     if not isinstance(include_kernel_dump, bool):
         raise ValidationError("include_kernel_dump must be a boolean value.")
+    if debugger not in DEBUGGERS:
+        raise ValidationError(f"debugger must be one of: {', '.join(DEBUGGERS)}.")
+    attached: dict[str, Any] | None = None
+    if debugger != "none":
+        attached = service.kd_attach(vm_name, debugger)
     report = run(
         service, vm_name,
         package_id=package_id, run_id=run_id,
         expected_manifest_sha256=expected_manifest_sha256,
         timeout_seconds=timeout_seconds, checkpoint_before=checkpoint_before,
     )
+    if attached is not None:
+        report["debugger"] = _debugger_report(service, vm_name, debugger, attached, report)
     evidence: dict[str, Any]
     if not report["payload_executed"]:
         evidence = {"collected": False, "reason": "the run did not execute a payload"}

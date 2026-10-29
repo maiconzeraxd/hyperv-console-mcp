@@ -373,7 +373,9 @@ def create_server(
 
     @tool(
         "lab_cycle", annotations=MUTATION,
-        description="Lab profile only. lab_run, then collect evidence into HYPERV_MCP_EVIDENCE_ROOT, then optionally restore checkpoint pre-<run_id>. Returns one structured report.",
+        description="Lab profile only. Optionally attach kd (debugger='serial' or 'kdnet'), run the package, "
+        "collect evidence into HYPERV_MCP_EVIDENCE_ROOT, then optionally restore checkpoint pre-<run_id>. "
+        "With a debugger, a bugcheck is reported as a bugcheck with the parsed !analyze -v instead of a hang.",
     )
     async def lab_cycle(
         vm_name: str,
@@ -384,10 +386,12 @@ def create_server(
         checkpoint_before: bool = True,
         revert_after: bool = False,
         include_kernel_dump: bool = True,
+        debugger: Literal["none", "serial", "kdnet"] = "none",
     ) -> dict[str, Any]:
         return await _invoke(
             service.lab_cycle, vm_name, package_id, run_id, expected_manifest_sha256,
             timeout_seconds, checkpoint_before, revert_after, include_kernel_dump,
+            debugger,
         )
 
     @tool(
@@ -617,6 +621,170 @@ def create_server(
     )
     async def debug_guest_prepare(vm_name: str, confirm_vm: str) -> dict[str, Any]:
         return await _invoke(service.debug_guest_prepare, vm_name, confirm_vm)
+
+    @tool(
+        "debug_kdnet_status", annotations=READ_ONLY,
+        description="Read the KDNET setup of a VM: prepared port, host address, switch, firewall rule, "
+        "whether the key is in the Credential Manager, and whether kd is attached. Never returns the key.",
+    )
+    async def debug_kdnet_status(vm_name: str) -> dict[str, Any]:
+        return await _invoke(service.debug_kdnet_status, vm_name)
+
+    @tool(
+        "debug_kdnet_prepare", annotations=MUTATION,
+        description="Prepare KDNET on the internal lab switch: attach the VM adapter, allocate a UDP port "
+        "in 50000-50039, set the guest BCD debug settings over PowerShell Direct, add a host firewall rule "
+        "for kd.exe on that port only, and store the generated key in the Windows Credential Manager. "
+        "The key never appears in a result. Requires ALLOW_DEBUGGER and confirm_vm; reboot the guest afterwards.",
+    )
+    async def debug_kdnet_prepare(
+        vm_name: str,
+        confirm_vm: str,
+        port: int | None = None,
+        use_existing_adapter: bool = False,
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.debug_kdnet_prepare, vm_name, confirm_vm, port, use_existing_adapter
+        )
+
+    @tool(
+        "debug_kdnet_deprovision", annotations=MUTATION,
+        description="Remove the KDNET firewall rule, turn guest BCD debugging off, delete the stored key and "
+        "the local KDNET state. Detaches an attached kd session first. Requires ALLOW_DEBUGGER and confirm_vm.",
+    )
+    async def debug_kdnet_deprovision(vm_name: str, confirm_vm: str) -> dict[str, Any]:
+        return await _invoke(service.debug_kdnet_deprovision, vm_name, confirm_vm)
+
+    @tool(
+        "kd_attach", annotations=MUTATION,
+        description="Start kd.exe against a VM over KDNET (default) or the COM1 debugger pipe and keep it "
+        "attached. A serial-console reader on the same pipe is detached first. Every session is logged under "
+        "the configured kd root. Requires ALLOW_DEBUGGER.",
+    )
+    async def kd_attach(
+        vm_name: str,
+        transport: Literal["serial", "kdnet"] = "kdnet",
+        break_on_connect: bool = False,
+        initial_break: bool = False,
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.kd_attach, vm_name, transport, break_on_connect, initial_break
+        )
+
+    @tool(
+        "kd_status", annotations=READ_ONLY,
+        description="Read the kd session state machine (disconnected, waiting_for_target, running, broken), "
+        "pid, transport, log path and command count for a VM.",
+    )
+    async def kd_status(vm_name: str) -> dict[str, Any]:
+        return await _invoke(service.kd_status, vm_name)
+
+    @tool(
+        "kd_detach", annotations=MUTATION,
+        description="Detach kd from a VM, resuming the target if it is stopped and closing the log. "
+        "Requires ALLOW_DEBUGGER.",
+    )
+    async def kd_detach(vm_name: str) -> dict[str, Any]:
+        return await _invoke(service.kd_detach, vm_name)
+
+    @tool(
+        "kd_break", annotations=MUTATION,
+        description="Break into a running target and wait for the kd prompt. Uses the console break-in first "
+        "and falls back to vm_inject_nmi when the target does not stop (nmi=false disables the fallback). "
+        "Requires ALLOW_DEBUGGER.",
+    )
+    async def kd_break(
+        vm_name: str, nmi: bool | None = None, timeout_ms: int | None = None
+    ) -> dict[str, Any]:
+        return await _invoke(service.kd_break, vm_name, nmi, timeout_ms)
+
+    @tool(
+        "kd_go", annotations=MUTATION,
+        description="Resume the target (g, gh, gn, gc, gu) and wait until it breaks again or the timeout "
+        "expires. Requires ALLOW_DEBUGGER.",
+    )
+    async def kd_go(
+        vm_name: str, command: str = "g", timeout_ms: int | None = None
+    ) -> dict[str, Any]:
+        return await _invoke(service.kd_go, vm_name, command, timeout_ms)
+
+    @tool(
+        "kd_command", annotations=MUTATION,
+        description="Run one kd command on an attached session and return its output, delimited by a unique "
+        "per-session marker rather than a timeout. Commands that resume the target belong in kd_go. "
+        "Requires ALLOW_DEBUGGER.",
+    )
+    async def kd_command(
+        vm_name: str, command: str, timeout_ms: int | None = None
+    ) -> dict[str, Any]:
+        return await _invoke(service.kd_command, vm_name, command, timeout_ms)
+
+    @tool(
+        "kd_wait_event", annotations=READ_ONLY,
+        description="Wait for the next kernel event: break, bugcheck, module load, target exit, or timeout. "
+        "Read-only: it observes the attached session and never sends a command.",
+    )
+    async def kd_wait_event(vm_name: str, timeout_ms: int | None = None) -> dict[str, Any]:
+        return await _invoke(service.kd_wait_event, vm_name, timeout_ms)
+
+    @tool(
+        "kd_set_breakpoint", annotations=MUTATION,
+        description="Set a software breakpoint (bp) or deferred breakpoint (bu) with an optional command "
+        "string, e.g. MyDriver!Init or nt!KeBugCheckEx. Requires ALLOW_DEBUGGER.",
+    )
+    async def kd_set_breakpoint(
+        vm_name: str, target: str, deferred: bool = False, command: str | None = None
+    ) -> dict[str, Any]:
+        return await _invoke(service.kd_set_breakpoint, vm_name, target, deferred, command)
+
+    @tool(
+        "kd_clear_breakpoints", annotations=MUTATION,
+        description="Clear every breakpoint in the attached session (bc *). Requires ALLOW_DEBUGGER.",
+    )
+    async def kd_clear_breakpoints(vm_name: str) -> dict[str, Any]:
+        return await _invoke(service.kd_clear_breakpoints, vm_name)
+
+    @tool(
+        "kd_break_on_load", annotations=MUTATION,
+        description="Break (sxe ld:module) or stop breaking (sxd ld:module) when a driver loads, so a load "
+        "can be caught before its entry point runs. Requires ALLOW_DEBUGGER.",
+    )
+    async def kd_break_on_load(
+        vm_name: str, module: str, enabled: bool = True
+    ) -> dict[str, Any]:
+        return await _invoke(service.kd_break_on_load, vm_name, module, enabled)
+
+    @tool(
+        "kd_stack", annotations=READ_ONLY,
+        description="Read the current call stack (k) of the broken target.",
+    )
+    async def kd_stack(vm_name: str, depth: int = 20) -> dict[str, Any]:
+        return await _invoke(service.kd_stack, vm_name, depth)
+
+    @tool(
+        "kd_modules", annotations=READ_ONLY,
+        description="List loaded modules with base addresses and symbols (lm) in the attached session.",
+    )
+    async def kd_modules(vm_name: str) -> dict[str, Any]:
+        return await _invoke(service.kd_modules, vm_name)
+
+    @tool(
+        "kd_analyze", annotations=READ_ONLY,
+        description="Run !analyze -v on the attached session and return the parsed report: bugcheck code, "
+        "parameters, blamed driver, bucket id, and top stack frames.",
+    )
+    async def kd_analyze(vm_name: str) -> dict[str, Any]:
+        return await _invoke(service.kd_analyze, vm_name)
+
+    @tool(
+        "kd_dump_open", annotations=READ_ONLY,
+        description="Analyze a crash dump on the host with kd -z, running !analyze -v plus optional extra "
+        "commands. The dump must live under the configured evidence root and end in .dmp.",
+    )
+    async def kd_dump_open(
+        vm_name: str, dump_path: str, commands: list[str] | None = None
+    ) -> dict[str, Any]:
+        return await _invoke(service.kd_dump_open, vm_name, dump_path, commands)
 
     @mcp.tool(
         name="console_screenshot",

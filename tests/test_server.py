@@ -30,7 +30,7 @@ def server() -> tuple[object, FakeBackend]:
 def test_all_tools_are_discoverable(server) -> None:
     mcp, _ = server
     tools = {tool.name: tool for tool in anyio.run(mcp.list_tools)}
-    assert len(tools) == 61
+    assert len(tools) == 78
     assert tools["vm_list"].input_schema["type"] == "object"
     assert tools["vm_list"].input_schema.get("required", []) == []
     assert "password" not in tools["guest_exec"].input_schema["properties"]
@@ -59,6 +59,20 @@ def test_all_tools_are_discoverable(server) -> None:
         "window", "client"
     }
     assert tools["console_wait_for_change"].annotations.read_only_hint is True
+    # Kernel debugging: commands mutate the target, analysis only reads it.
+    assert tools["kd_command"].annotations.destructive_hint is True
+    assert tools["kd_attach"].annotations.read_only_hint is False
+    for name in ("kd_status", "kd_wait_event", "kd_stack", "kd_modules",
+                 "kd_analyze", "kd_dump_open", "debug_kdnet_status"):
+        assert tools[name].annotations.read_only_hint is True, name
+    assert set(tools["kd_attach"].input_schema["properties"]["transport"]["enum"]) == {
+        "serial", "kdnet"
+    }
+    assert set(tools["lab_cycle"].input_schema["properties"]["debugger"]["enum"]) == {
+        "none", "serial", "kdnet"
+    }
+    assert "key" not in tools["debug_kdnet_prepare"].input_schema["properties"]
+    assert "password" not in tools["kd_attach"].input_schema["properties"]
 
 
 def test_tool_calls_service_and_returns_structured_output(server) -> None:

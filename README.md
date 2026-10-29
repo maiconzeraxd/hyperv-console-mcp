@@ -1,12 +1,12 @@
 # hyperv-console-mcp
 
-A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/) server for **Hyper-V on Windows**. It combines VM management, checkpoints, PowerShell Direct diagnostics, synthetic keyboard/mouse input, console screenshots without VMConnect, installation media, serial consoles, and serial WinDbg preparation in one stdio server.
+A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/) server for **Hyper-V on Windows**. It combines VM management, checkpoints, PowerShell Direct diagnostics, synthetic keyboard/mouse input, console screenshots without VMConnect, installation media, serial consoles, and serial WinDbg preparation and a live kd.exe kernel-debugging session in one stdio server.
 
-**Alpha status:** 250 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. An earlier elevated read-only MCP diagnostic succeeded against `NORTH-Test` for host, VM, console, serial status, media, and checkpoint queries. Live mutations, PowerShell Direct guest operations and SSH provisioning were not exercised in this delivery. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
+**Alpha status:** 324 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. An earlier elevated read-only MCP diagnostic succeeded against `NORTH-Test` for host, VM, console, serial status, media, and checkpoint queries. Live mutations, PowerShell Direct guest operations and SSH provisioning were not exercised in this delivery. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
 
 ## Highlights
 
-- **61 MCP tools** with read-only/destructive annotations and structured results.
+- **78 MCP tools** with read-only/destructive annotations and structured results.
 - Inventory, pause/resume, bounded state waiting, power, checkpoints, and bounded guest file transfer.
 - Guest OS health, processes, services, and recent event logs through PowerShell Direct.
 - Hyper-V `Msvm_Keyboard` and `Msvm_SyntheticMouse`, explicit key/button states, and ordered console batches: works without guest networking.
@@ -66,13 +66,14 @@ See [client configuration](docs/SETUP.md) for a stdio JSON example. All mutation
 | Console | `console_info`, `console_type_text`, `console_press_keys`, `console_key_state`, `console_mouse_buttons`, `console_batch`, `console_wait_for_change`, `console_ctrl_alt_delete`, `console_mouse_move`, `console_click`, `console_scroll`, `console_screenshot` |
 | Media/boot | `media_list`, `media_mount`, `media_eject` |
 | Serial console | `serial_status`, `serial_connect`, `serial_read`, `serial_send`, `serial_disconnect` |
-| Kernel debugging | `debug_serial_status`, `debug_serial_prepare`, `debug_guest_prepare`, `vm_inject_nmi` |
+| Kernel debugging (setup) | `debug_serial_status`, `debug_serial_prepare`, `debug_guest_prepare`, `debug_kdnet_status`, `debug_kdnet_prepare`, `debug_kdnet_deprovision`, `vm_inject_nmi` |
+| Kernel debugging (kd session) | `kd_attach`, `kd_status`, `kd_detach`, `kd_break`, `kd_go`, `kd_command`, `kd_wait_event`, `kd_set_breakpoint`, `kd_clear_breakpoints`, `kd_break_on_load`, `kd_stack`, `kd_modules`, `kd_analyze`, `kd_dump_open` |
 | SSH (optional) | `guest_ssh_provision`, `guest_ssh_status`, `guest_ssh_deprovision` |
 | Guest credentials | `guest_credential_status`, `guest_password_rotate`, `guest_credential_forget` |
 | Guest automation | `guest_autologon_configure`, `guest_config_status`, `guest_config_revert` |
 | Driver lab | `lab_init`, `lab_diagnostics`, `lab_stage`, `lab_verify`, `lab_collect`, `lab_guest_configure` |
 | Driver lab (lab profile) | `lab_run`, `lab_cycle` |
-| Activity | `events_snapshot` |
+| Activity | `events_snapshot`, `operation_status` |
 
 Power actions are `start`, `shutdown`, `save`, `pause`, `resume`, `turn_off`, and `reset`. Forced power needs `confirm_vm` equal to `vm_name`. Restore/delete need the VM name and exact checkpoint GUID confirmed. Overwriting an existing guest file needs `overwrite=true` and an exact `confirm_path`.
 
@@ -94,6 +95,8 @@ The server reuses one local PowerShell worker for host and console work and a se
 
 For kernel work, choose **KDNET** after reviewing a suitable network path, or **COM1/named pipe** to preserve a no-network VM. Guest BCD and host COM1 preparation are separate, explicitly confirmed operations. Neither stops nor reboots the VM automatically.
 
+`kd_attach` then drives a real `kd.exe` from the server: one session per VM, a per-session marker that delimits every command's output (never a sleep), an explicit `disconnected → waiting_for_target → running ↔ broken` state reported by `kd_status`, break-in through the console with `vm_inject_nmi` as the fallback, and a full log under `%LOCALAPPDATA%\HyperVConsoleMCP\kd\<vm>\`. `debug_kdnet_prepare` sets up the internal lab switch, a UDP port in 50000–50039 and a host firewall rule that names `kd.exe`; the generated key lives only in the Windows Credential Manager and is masked in everything the tool returns. Symbols come from the Microsoft symbol server into a local cache, plus any staged lab package that ships a `.pdb`. In the lab profile, `lab_cycle(..., debugger="kdnet")` attaches kd before the run and reports a bugcheck with the parsed `!analyze -v` instead of calling it a hang.
+
 - [Performance rationale and benchmarks](docs/PERFORMANCE.md)
 - [WinDbg, KDNET, and serial setup](docs/DEBUGGING.md)
 
@@ -103,6 +106,7 @@ For kernel work, choose **KDNET** after reviewing a suitable network path, or **
 - Read-only mode by default; allowlist required for every mutation.
 - `HYPERV_MCP_PROFILE=lab` enables every capability for the allowlisted VMs and skips the per-mutation dashboard approval. It does not widen the allowlist, skip a `confirm_*` field, or stop the audit and event records; an explicit `HYPERV_MCP_ALLOW_*=false` still wins. `lab_run`/`lab_cycle`, which execute a staged package, exist only in this profile.
 - Console input is real input to the VM and can change state immediately.
+- The `kd_*` tools follow the same allowlist and require `HYPERV_MCP_ALLOW_DEBUGGER`; the KDNET key is generated on the host, stored in the Windows Credential Manager and masked in every result. The host-side KDNET change is one firewall rule for `kd.exe` on one UDP port of the internal lab switch — never an external switch.
 - Screenshots may contain sensitive guest information and are gated separately.
 - Audit events contain timestamp, operation, VM, outcome, and error code only. Guest commands, typed text, passwords, and file contents are excluded.
 - A guest-command timeout may leave that command running; inspect before retrying.

@@ -17,6 +17,9 @@ from typing import Any
 from .errors import BackendError, PolicyError
 
 TARGET_PREFIX = "HyperVConsoleMCP/"
+# A KDNET key is not a credential pair, but it is a secret with the same rules:
+# it never appears in a tool argument, a result, an event, or the audit log.
+KDNET_TARGET_PREFIX = "HyperVConsoleMCP/kdnet/"
 CRED_TYPE_GENERIC = 1
 CRED_PERSIST_LOCAL_MACHINE = 2
 ERROR_NOT_FOUND = 1168
@@ -156,6 +159,38 @@ class CredentialStore:
         return self.read(vm_name) is not None
 
 
+class SecretStore:
+    """Generic secrets in the current user's vault under a caller-chosen prefix.
+
+    The username field carries the key name, so a KDNET key for a VM reads as
+    target ``HyperVConsoleMCP/kdnet/<vm>`` with user ``kdnet``.
+    """
+
+    def __init__(self, prefix: str) -> None:
+        self.prefix = prefix
+
+    def _target(self, key: str) -> str:
+        return self.prefix + key
+
+    def read(self, key: str) -> str | None:
+        entry = _read(self._target(key))
+        return entry[1] if entry and entry[1] else None
+
+    def write(self, key: str, secret: str, *, label: str = "kdnet") -> None:
+        if not secret:
+            raise PolicyError("A stored secret cannot be empty.")
+        _write(self._target(key), label, secret)
+
+    def delete(self, key: str) -> bool:
+        return _delete(self._target(key))
+
+    def has(self, key: str) -> bool:
+        try:
+            return _read(self._target(key)) is not None
+        except PolicyError:
+            return False
+
+
 def resolve(settings: Any, vm_name: str) -> tuple[str, str]:
     """Username and password for PowerShell Direct, store first, env as fallback.
 
@@ -215,9 +250,11 @@ def generate_password(length: int = PASSWORD_LENGTH) -> str:
 
 __all__ = [
     "CRED_TYPE_GENERIC",
+    "KDNET_TARGET_PREFIX",
     "PASSWORD_LENGTH",
     "TARGET_PREFIX",
     "CredentialStore",
+    "SecretStore",
     "generate_password",
     "resolve",
     "source",

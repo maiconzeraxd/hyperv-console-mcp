@@ -31,6 +31,7 @@ class FakeLabService:
         run_error: Exception | None = None,
         events: list[dict[str, Any]] | None = None,
         evidence: bool = True,
+        kd_event: dict[str, Any] | None = None,
     ) -> None:
         self.state = state
         self.uptime = uptime
@@ -40,6 +41,7 @@ class FakeLabService:
         self.run_error = run_error
         self.events = events
         self.evidence = evidence
+        self.kd_event = kd_event or {"event": "break", "module": None}
         self.calls: list[tuple[str, Any]] = []
         self.commands: list[str] = []
         self.files: dict[str, bytes] = {}
@@ -114,6 +116,19 @@ class FakeLabService:
             "content_base64": base64.b64encode(data).decode(),
             "sha256": hashlib.sha256(data).hexdigest(),
         }}
+
+    # -- debugger side -----------------------------------------------------
+    def kd_attach(self, vm_name: str, transport: str = "kdnet", **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("kd_attach", transport))
+        return {"attached": True, "transport": transport, "log_path": "C:/kd/session.log"}
+
+    def kd_wait_event(self, vm_name: str, timeout_ms: int | None = None) -> dict[str, Any]:
+        self.calls.append(("kd_wait_event", timeout_ms))
+        return dict(self.kd_event)
+
+    def kd_analyze(self, vm_name: str) -> dict[str, Any]:
+        self.calls.append(("kd_analyze", vm_name))
+        return {"report": {"found": True, "bugcheck_code": "0xd1", "blamed_driver": "MyDriver.sys"}}
 
 
 def _run(service: FakeLabService, **overrides: Any) -> dict[str, Any]:
@@ -238,12 +253,15 @@ def test_cycle_collects_evidence_and_restores_the_checkpoint(tmp_path: Path) -> 
     assert ("checkpoint_restore", "11111111-1111-1111-1111-111111111111") in service.calls
 
 
-def test_cycle_keeps_the_report_when_the_guest_cannot_produce_evidence() -> None:
+def test_cycle_keeps_the_report_when_the_guest_cannot_produce_evidence(
+    tmp_path: Path,
+) -> None:
     service = FakeLabService(
         run_error=BackendError("the guest session dropped", code="bridge_transport"),
         after={"state": "Running", "uptime_seconds": 5},
         evidence=False,
     )
+    service.settings = replace(service.settings, evidence_root=tmp_path)
     report = lab_run.cycle(
         service, "NORTH-Test",
         package_id="north.1", run_id="run-1",
@@ -267,6 +285,54 @@ def test_cycle_does_not_collect_after_a_package_failed_verification(tmp_path: Pa
     assert report["outcome"] == "not_verified"
     assert report["evidence"]["collected"] is False
     assert "evidence" not in [name for name, _ in service.calls]
+
+
+# -- debugger integration ---------------------------------------------------
+
+
+def test_cycle_attaches_kd_and_reports_a_bugcheck_instead_of_a_hang(tmp_path: Path) -> None:
+    service = FakeLabService(
+        run_error=BackendError("the guest session dropped", code="bridge_transport"),
+        after={"state": "Running", "uptime_seconds": 900},
+        evidence=False,
+        kd_event={"event": "bugcheck", "module": None},
+    )
+    service.settings = replace(service.settings, evidence_root=tmp_path)
+    report = lab_run.cycle(
+        service, "NORTH-Test",
+        package_id="north.1", run_id="run-1",
+        expected_manifest_sha256=DIGEST, debugger="kdnet",
+    )
+
+    assert ("kd_attach", "kdnet") in service.calls
+    assert ("kd_wait_event", 2_000) in service.calls
+    assert report["outcome"] == "bugcheck"
+    assert report["debugger"]["event"] == "bugcheck"
+    assert report["debugger"]["analysis"]["bugcheck_code"] == "0xd1"
+    assert ("kd_analyze", "NORTH-Test") in service.calls
+
+
+def test_cycle_without_a_debugger_never_touches_kd(tmp_path: Path) -> None:
+    service = FakeLabService(run_result={"success": True, "exit_code": 0})
+    service.settings = replace(service.settings, evidence_root=tmp_path)
+    report = lab_run.cycle(
+        service, "NORTH-Test",
+        package_id="north.1", run_id="run-1",
+        expected_manifest_sha256=DIGEST,
+    )
+    assert "debugger" not in report
+    assert not [name for name, _ in service.calls if name.startswith("kd_")]
+
+
+def test_cycle_rejects_an_unknown_debugger_before_attaching() -> None:
+    service = FakeLabService()
+    with pytest.raises(ValidationError):
+        lab_run.cycle(
+            service, "NORTH-Test",
+            package_id="north.1", run_id="run-1",
+            expected_manifest_sha256=DIGEST, debugger="windbgx",
+        )
+    assert service.calls == []
 
 
 # -- service boundary -------------------------------------------------------

@@ -128,6 +128,11 @@ class Settings:
     evidence_root: Path = field(default_factory=lambda: _local_root("evidence"))
     event_directory: Path = field(default_factory=lambda: _local_root("events"))
     event_retention_days: int = 14
+    debuggers_dir: Path | None = None
+    kd_log_root: Path = field(default_factory=lambda: _local_root("kd"))
+    symbol_root: Path = field(default_factory=lambda: _local_root("symbols"))
+    kd_timeout_seconds: float = 60.0
+    kd_startup_timeout_seconds: float = 60.0
 
     @classmethod
     def from_env(cls, values: Mapping[str, str] | None = None) -> "Settings":
@@ -195,6 +200,19 @@ class Settings:
             ),
             event_retention_days=_integer(
                 env, "HYPERV_MCP_EVENT_RETENTION_DAYS", 14, 1, 3650
+            ),
+            debuggers_dir=_optional_path(env, "HYPERV_MCP_DEBUGGERS_DIR"),
+            kd_log_root=_absolute_path(
+                env, "HYPERV_MCP_KD_LOG_ROOT", _local_root("kd", env)
+            ),
+            symbol_root=_absolute_path(
+                env, "HYPERV_MCP_SYMBOL_ROOT", _local_root("symbols", env)
+            ),
+            kd_timeout_seconds=float(
+                _integer(env, "HYPERV_MCP_KD_TIMEOUT_SECONDS", 60, 1, 3600)
+            ),
+            kd_startup_timeout_seconds=float(
+                _integer(env, "HYPERV_MCP_KD_STARTUP_TIMEOUT_SECONDS", 60, 1, 900)
             ),
         )
 
