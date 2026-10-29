@@ -208,6 +208,14 @@ function Invoke-Command {
             },
             "file", "EncodedPath,EncodedParts,PartCount,ExpectedSize,ExpectedHash", 5,
         ),
+        (
+            "guest_publish_package",
+            {
+                "package_id": "pkg.1", "transfer_id": "0" * 32,
+                "manifest_sha256": "0" * 64,
+            },
+            "package", "PackageId,TransferId,ExpectedHash", 3,
+        ),
     ],
 )
 def test_guest_file_operations_bind_every_argument(
@@ -252,6 +260,41 @@ def test_guest_exec_keeps_native_stderr_from_failing_a_successful_command(
     assert execution["had_errors"] is False
     assert execution["error_records"] == []
     assert "progress" in execution["output"]
+
+
+# Remoting rethrows a guest error as a generic RuntimeException that carries the
+# original exception, so the host has to unwrap it to keep not_found distinct.
+REMOTED_FAILURE = """
+function Invoke-Command {
+    param($VMName, $Credential, $ArgumentList, $ScriptBlock)
+    try { & $ScriptBlock @ArgumentList }
+    catch { throw [System.Management.Automation.RuntimeException]::new($_.Exception.Message, $_.Exception) }
+}
+"""
+
+
+def test_a_missing_guest_file_is_reported_as_not_found(tmp_path: Path) -> None:
+    with pytest.raises(BackendError, match="Guest file not found") as error:
+        invoke_with_mocks(
+            tmp_path, REMOTED_FAILURE, "guest_read_file",
+            {**GUEST_PAYLOAD, "path": "C:\\DriverLab\\hvmcp-missing-4d1a.bin", "max_bytes": 4096},
+        )
+    assert error.value.code == "not_found"
+
+
+def test_a_generic_guest_failure_is_not_mistaken_for_a_missing_file(tmp_path: Path) -> None:
+    mocks = """
+function Invoke-Command {
+    param($VMName, $Credential, $ArgumentList, $ScriptBlock)
+    throw 'The guest is unreachable.'
+}
+"""
+    with pytest.raises(BackendError, match="unreachable") as error:
+        invoke_with_mocks(
+            tmp_path, mocks, "guest_read_file",
+            {**GUEST_PAYLOAD, "path": "C:\\DriverLab\\hvmcp-missing-4d1a.bin", "max_bytes": 4096},
+        )
+    assert error.value.code == "bridge_error"
 
 
 FULL_VM_MOCK = """

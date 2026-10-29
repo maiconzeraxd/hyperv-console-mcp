@@ -78,3 +78,16 @@ An independent, local Model Context Protocol server for Hyper-V on Windows. It c
 - Added nested-operation event regression coverage, real-bridge mocked tests, policy tests, dashboard/lab tests, Ruff, PowerShell syntax CI, MCP stdio smoke CI and a non-Windows import job. GitHub execution is not claimed until Actions actually runs.
 - Local validation: 71 passing tests, clean Ruff checks, valid PowerShell syntax, successful 44-tool stdio/policy-denial smoke, and successful sdist/wheel builds. The unelevated smoke shell cannot read the live host; the earlier elevated read-only validation remains separate.
 - No live mutation, guest BCD change, package execution, driver or mapper run was performed during this delivery.
+
+### 2026-10-29 — v0.2 phase 1: bridge and lab correctness
+
+- Fixed the bridge's `-ArgumentList`/`-Arguments` mismatch that broke `guest_read_file`, `guest_write_file`, `guest_read_chunk` and `guest_assemble_file`; a mocked-real-bridge test now asserts the bound parameter names and argument count for each operation plus the new `guest_publish_package`.
+- `guest_exec` now reports `had_errors`/`error_records` from the runspace error collection, so a non-terminating cmdlet error makes `success` false while native stderr from a successful command stays output. Regression tests cover both directions.
+- Graceful `shutdown`/`save` run as background Hyper-V jobs and return `{accepted, operation_id}`; the new READ-ONLY `operation_status` tool tracks them. `turn_off`/`reset` remain synchronous. The server now exposes 45 tools.
+- `HYPERV_MCP_LAB_ROOT`, `HYPERV_MCP_EVIDENCE_ROOT` and `HYPERV_MCP_EVENT_DIRECTORY` are read into `Settings` at startup and must be absolute.
+- Canonical manifest hashing now agrees between Python and Windows PowerShell 5.1: package paths are restricted to `[A-Za-z0-9._-]` per `/`-separated segment on both sides, the module escapes JSON strings by hand and sorts keys with `[StringComparer]::Ordinal`. Tests compare real hashes for special characters and ordinal ordering.
+- `Test-DriverLabPackage.ps1` fails on files the manifest does not describe; the run entry point must be a listed `Run-Lab.ps1` manifest member. Staging is all-or-nothing under `C:\DriverLab\Transfers\<transfer-id>\<package-id>` with an in-guest re-verification before a single directory rename publishes it, and `init` prunes transfers older than 24 hours.
+- A missing guest file is now `not_found` (the guest reports absence as data and the host raises a typed error, because remoting does not preserve guest exception types); `lab_init` installs tools only on `not_found` instead of overwriting after any bridge error.
+- PSScriptAnalyzer 1.25 runs in CI with default rules and reports no errors or warnings; Ruff is pinned to 0.17.3.
+- Local validation: 102 passing tests, clean Ruff, valid PowerShell syntax, clean PSScriptAnalyzer.
+- Not yet validated live: the publish/atomic-move path and the guest-side verification. `tests/live_lab_publish.py` covers them against a disposable VM and has not been run in this delivery. No VM, guest, driver, mapper or payload was executed.

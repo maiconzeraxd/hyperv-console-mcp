@@ -194,7 +194,8 @@ class EventSink:
 
 MUTATING_OPERATIONS = frozenset({
     "vm_power", "checkpoint_create", "checkpoint_restore", "checkpoint_delete",
-    "guest_exec", "guest_write_file", "guest_assemble_file", "console_type_text",
+    "guest_exec", "guest_write_file", "guest_assemble_file", "guest_publish_package",
+    "console_type_text",
     "console_press_keys", "console_key_state", "console_mouse_buttons",
     "console_ctrl_alt_delete", "console_mouse_move", "console_click", "console_scroll",
     "media_mount", "media_eject", "debug_serial_prepare", "debug_guest_prepare",

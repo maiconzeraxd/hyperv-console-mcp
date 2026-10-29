@@ -144,7 +144,11 @@ class DriverLabTransfer:
             raise ValidationError("chunk_bytes must be between 1 MiB and 8 MiB.")
         source = source.resolve()
         package_id = manifest["package_id"]
-        destination = self.guest_package_path(package_id)
+        # Nothing is written under Packages until every byte has been staged and
+        # re-verified: the whole transfer lands in Transfers\<id>\<package> first and a
+        # single directory rename publishes it.
+        transfer_id = uuid.uuid4().hex
+        staging = rf"{GUEST_ROOT}\Transfers\{transfer_id}\{package_id}"
         transfers = []
         reporter = ProgressReporter(EVENTS, "package.stage", vm_name, uuid.uuid4().hex)
         total = sum(entry["size"] for entry in manifest["files"])
@@ -161,10 +165,10 @@ class DriverLabTransfer:
                     digest.update(block)
             if digest.hexdigest() != entry["sha256"]:
                 raise ValidationError(f"Package file changed after manifest creation: {relative}")
-        for entry in manifest["files"]:
+        for index, entry in enumerate(manifest["files"]):
             relative = self._entry_path(entry)
             local = source.joinpath(*PurePosixPath(relative).parts)
-            remote = destination + "\\" + "\\".join(PurePosixPath(relative).parts)
+            remote = staging + "\\" + "\\".join(PurePosixPath(relative).parts)
             if entry["size"] <= chunk_bytes:
                 result = self.service.guest_write_file(
                     vm_name, remote, base64.b64encode(local.read_bytes()).decode("ascii"),
@@ -172,7 +176,9 @@ class DriverLabTransfer:
                 )
                 chunks = 1
             else:
-                chunks = self._stage_large(vm_name, local, remote, entry, chunk_bytes)
+                chunks = self._stage_large(
+                    vm_name, local, remote, entry, chunk_bytes, transfer_id, index
+                )
                 result = {"file": {"sha256": entry["sha256"], "bytes_written": entry["size"]}}
             actual = result["file"]["sha256"].casefold()
             if actual != entry["sha256"]:
@@ -181,20 +187,25 @@ class DriverLabTransfer:
             completed += entry["size"]
             reporter.update((completed * 100 // max(total, 1)) - 1, f"Verified {relative}.")
         metadata = self.service.guest_write_file(
-            vm_name, destination + r"\lab-manifest.json",
+            vm_name, staging + r"\lab-manifest.json",
             base64.b64encode(canonical_json(manifest)).decode("ascii"), create_parent=True,
         )
+        digest = manifest_hash(manifest)
+        published = self.service.guest_publish_package(
+            vm_name, package_id, transfer_id, digest
+        )["package"]
         return {
-            "package_id": package_id, "guest_path": destination,
-            "manifest_sha256": manifest_hash(manifest), "files": transfers,
-            "manifest_file": metadata["file"], "payload_executed": False,
+            "package_id": package_id, "guest_path": published["guest_path"],
+            "manifest_sha256": digest, "files": transfers,
+            "manifest_file": metadata["file"],
+            "files_verified": published["files_verified"], "payload_executed": False,
         }
 
     def _stage_large(
-        self, vm_name: str, local: Path, remote: str, entry: dict[str, Any], chunk_bytes: int
+        self, vm_name: str, local: Path, remote: str, entry: dict[str, Any],
+        chunk_bytes: int, transfer_id: str, index: int,
     ) -> int:
-        transfer_id = uuid.uuid4().hex
-        directory = rf"{GUEST_ROOT}\Transfers\{transfer_id}"
+        directory = rf"{GUEST_ROOT}\Transfers\{transfer_id}\parts\{index:04d}"
         count = (entry["size"] + chunk_bytes - 1) // chunk_bytes
         with local.open("rb") as stream:
             for index in range(count):

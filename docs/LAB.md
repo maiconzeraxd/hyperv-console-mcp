@@ -57,6 +57,10 @@ Limits are 512 files and 2 GiB per package. Paths must be portable Windows relat
 
 The host rechecks every file before sending it. Small files use atomic guest writes; large files use 1–8 MiB chunks (4 MiB by default), temporary parts, assembly into a temporary destination and final size/hash verification. Package IDs and run IDs allow letters, digits, dots and hyphens, with a 64-character limit. A package cannot be overwritten implicitly.
 
+Staging is all-or-nothing. Every file, plus the manifest, is written under `C:\DriverLab\Transfers\<transfer-id>\<package-id>` and re-verified in the guest — size, SHA-256, the manifest hash the host approved, and the absence of unlisted files. Only then is that one directory renamed into `C:\DriverLab\Packages`. A transfer that fails part-way leaves `Packages` untouched, and `init` deletes staging directories older than 24 hours.
+
+`Test-DriverLabPackage.ps1` fails when the package directory holds a file the manifest does not describe, and the run entry point must be a listed manifest member (`Run-Lab.ps1`), not merely a file that happens to exist on disk.
+
 Evidence downloads validate each chunk and the final SHA-256, write to a unique temporary host file, flush it and rename only after verification. Evidence collection is not a rollback and does not remove guest artifacts.
 
 ## Manual run boundary

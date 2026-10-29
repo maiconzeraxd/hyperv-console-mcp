@@ -6,6 +6,19 @@ if ([IO.Path]::GetFullPath($Root) -ne 'C:\DriverLab') { throw 'The lab root is f
 foreach ($name in @('Packages', 'Transfers', 'Runs', 'Evidence', 'Tools')) {
     [IO.Directory]::CreateDirectory((Join-Path $Root $name)) | Out-Null
 }
+# A staging directory older than a day belongs to an interrupted transfer; it can
+# never be published because the host no longer holds its transfer id.
+$cutoff = [DateTime]::UtcNow.AddHours(-24)
+$pruned = 0
+foreach ($directory in @(Get-ChildItem -LiteralPath (Join-Path $Root 'Transfers') -Directory -Force)) {
+    if ($directory.LastWriteTimeUtc -ge $cutoff) { continue }
+    try {
+        [IO.Directory]::Delete($directory.FullName, $true)
+        $pruned++
+    } catch {
+        Write-Verbose "Could not prune $($directory.FullName): $($_.Exception.Message)"
+    }
+}
 $tools = Join-Path $Root 'Tools'
 $names = @('DriverLab.Common.psm1', 'Test-DriverLabPackage.ps1', 'Get-DriverLabDiagnostics.ps1', 'New-DriverLabEvidence.ps1', 'Invoke-DriverLabRun.ps1')
 $files = foreach ($name in $names) {
@@ -15,6 +28,6 @@ $files = foreach ($name in $names) {
     [pscustomobject]@{ name = $name; sha256 = $hash.Hash.ToLowerInvariant(); size = (Get-Item -LiteralPath $path).Length }
 }
 [pscustomobject]@{
-    root = $Root; initialized = $true; tools = @($files)
+    root = $Root; initialized = $true; tools = @($files); pruned_transfers = $pruned
     security_changed = $false; payload_executed = $false
 } | ConvertTo-Json -Depth 5 -Compress

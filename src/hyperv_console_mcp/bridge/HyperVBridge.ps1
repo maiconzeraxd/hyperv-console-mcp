@@ -518,7 +518,11 @@ function Invoke-BridgeOperation {
                     $path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedPath))
                     if (-not [IO.Path]::IsPathRooted($path)) { throw 'The guest path must be absolute.' }
                     $info = [IO.FileInfo]::new($path)
-                    if (-not $info.Exists) { throw "Guest file not found: $path" }
+                    # Absence is reported as data: the host turns it into a typed error it
+                    # can classify, because remoting does not preserve guest exception types.
+                    if (-not $info.Exists) {
+                        return [pscustomobject]@{ path = $path; status = 'not_found' }
+                    }
                     if ($info.Length -gt $MaximumBytes) { throw "Guest file exceeds the $MaximumBytes byte limit." }
                     $bytes = [IO.File]::ReadAllBytes($info.FullName)
                     $sha = [Security.Cryptography.SHA256]::Create()
@@ -529,8 +533,15 @@ function Invoke-BridgeOperation {
                         size = $bytes.Length
                         content_base64 = [Convert]::ToBase64String($bytes)
                         sha256 = $hash
+                        status = 'ok'
                     }
                 }
+            if ($null -ne $guestResult.PSObject.Properties['status'] -and
+                $guestResult.status -eq 'not_found') {
+                throw [IO.FileNotFoundException]::new(
+                    "Guest file not found: $($guestResult.path)", [string]$guestResult.path
+                )
+            }
             $result = @{ vm = $vm.Name; file = $guestResult }
         }
         'guest_write_file' {
@@ -545,7 +556,7 @@ function Invoke-BridgeOperation {
                     $fullPath = [IO.Path]::GetFullPath($path)
                     $directory = [IO.Path]::GetDirectoryName($fullPath)
                     if (-not [IO.Directory]::Exists($directory)) {
-                        if (-not $CreateParent) { throw "Guest directory does not exist: $directory" }
+                        if (-not $CreateParent) { throw [IO.DirectoryNotFoundException]::new("Guest directory does not exist: $directory") }
                         [IO.Directory]::CreateDirectory($directory) | Out-Null
                     }
                     if ([IO.File]::Exists($fullPath) -and -not $Overwrite) {
@@ -614,8 +625,11 @@ function Invoke-BridgeOperation {
                     $parts = [IO.Path]::GetFullPath([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedParts)))
                     $packageRoot = [IO.Path]::GetFullPath('C:\DriverLab\Packages\')
                     $transferRoot = [IO.Path]::GetFullPath('C:\DriverLab\Transfers\')
-                    if (-not $path.StartsWith($packageRoot, [StringComparison]::OrdinalIgnoreCase)) {
-                        throw 'Assembly destination must remain under C:\DriverLab\Packages.'
+                    # Large files are assembled inside their staging directory and only
+                    # reach Packages once the whole package is published.
+                    if (-not $path.StartsWith($packageRoot, [StringComparison]::OrdinalIgnoreCase) -and
+                        -not $path.StartsWith($transferRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                        throw 'Assembly destination must remain under C:\DriverLab\Packages or C:\DriverLab\Transfers.'
                     }
                     if (-not $parts.StartsWith($transferRoot, [StringComparison]::OrdinalIgnoreCase)) {
                         throw 'Assembly chunks must remain under C:\DriverLab\Transfers.'
@@ -654,6 +668,92 @@ function Invoke-BridgeOperation {
                     [pscustomobject]@{ path = $path; bytes_written = $length; sha256 = $actual }
                 }
             $result = @{ vm = $vm.Name; file = $guestResult }
+        }
+        'guest_publish_package' {
+            $vm = Get-ExactVm -Name $request.vm
+            $packageId = [string]$request.package_id
+            $transferId = [string]$request.transfer_id
+            $expectedHash = [string]$request.manifest_sha256
+            if ($packageId -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$') { throw 'package_id is invalid.' }
+            if ($transferId -notmatch '^[0-9a-f]{32}$') { throw 'transfer_id is invalid.' }
+            if ($expectedHash -notmatch '^[0-9a-f]{64}$') { throw 'manifest_sha256 is invalid.' }
+            # Everything is staged under Transfers\<id>\<package> and verified here before a
+            # single directory rename makes it visible to the guest tooling. A failed transfer
+            # therefore never leaves a half-written package in Packages.
+            $guestResult = Invoke-GuestQuery -Vm $vm -Request $request `
+                -Arguments $packageId, $transferId, $expectedHash -Query {
+                    param($PackageId, $TransferId, $ExpectedHash)
+                    $transferRoot = [IO.Path]::GetFullPath("C:\DriverLab\Transfers\$TransferId")
+                    $staging = [IO.Path]::GetFullPath((Join-Path $transferRoot $PackageId))
+                    $final = [IO.Path]::GetFullPath("C:\DriverLab\Packages\$PackageId")
+                    if (-not $staging.StartsWith($transferRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                        throw 'The staging directory escapes C:\DriverLab\Transfers.'
+                    }
+                    if (-not [IO.Directory]::Exists($staging)) { throw "The staged package is missing: $staging" }
+                    if ([IO.Directory]::Exists($final) -or [IO.File]::Exists($final)) {
+                        throw 'The package directory already exists; packages are immutable.'
+                    }
+                    $manifestPath = Join-Path $staging 'lab-manifest.json'
+                    if (-not [IO.File]::Exists($manifestPath)) { throw 'The staged package has no manifest.' }
+                    $bytes = [IO.File]::ReadAllBytes($manifestPath)
+                    if ($bytes.Length -gt 4MB) { throw 'Manifest exceeds its size limit.' }
+                    $sha = [Security.Cryptography.SHA256]::Create()
+                    try { $actualHash = [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant() }
+                    finally { $sha.Dispose() }
+                    if ($actualHash -cne $ExpectedHash) { throw 'The staged manifest does not match the host-approved hash.' }
+                    $manifest = [Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json
+                    $count = @($manifest.files).Count
+                    if ($manifest.schema -ne 1 -or $manifest.package_id -ne $PackageId -or $count -lt 1 -or $count -gt 512) {
+                        throw 'The staged manifest is invalid.'
+                    }
+                    $listed = @{}
+                    $verified = 0
+                    foreach ($entry in @($manifest.files)) {
+                        $relative = [string]$entry.path
+                        if ($relative.Length -gt 240 -or $relative -cnotmatch '^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$') {
+                            throw 'The staged manifest contains an unsafe path.'
+                        }
+                        foreach ($part in $relative.Split('/')) {
+                            if ($part -ceq '.' -or $part -ceq '..' -or $part.EndsWith('.')) {
+                                throw 'The staged manifest contains an unsafe path.'
+                            }
+                        }
+                        $file = [IO.Path]::GetFullPath((Join-Path $staging ($relative.Replace('/', '\'))))
+                        if (-not $file.StartsWith($staging + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                            throw 'The staged manifest escapes its package directory.'
+                        }
+                        if (-not [IO.File]::Exists($file)) { throw "The staged package is missing a file: $relative" }
+                        $stream = [IO.File]::OpenRead($file)
+                        try {
+                            $length = $stream.Length
+                            $fileSha = [Security.Cryptography.SHA256]::Create()
+                            try { $fileHash = [BitConverter]::ToString($fileSha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+                            finally { $fileSha.Dispose() }
+                        } finally { $stream.Dispose() }
+                        if ($length -ne [Int64]$entry.size -or $fileHash -cne [string]$entry.sha256) {
+                            throw "The staged package failed verification: $relative"
+                        }
+                        $listed[$relative] = $true
+                        $verified++
+                    }
+                    $unlisted = @(Get-ChildItem -LiteralPath $staging -File -Recurse -Force | ForEach-Object {
+                        $_.FullName.Substring($staging.Length).TrimStart('\').Replace('\', '/')
+                    } | Where-Object { $_ -cne 'lab-manifest.json' -and -not $listed.ContainsKey($_) })
+                    if ($unlisted.Count) {
+                        throw "The staged package contains files that are not in the manifest: $($unlisted -join ', ')"
+                    }
+                    [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($final)) | Out-Null
+                    [IO.Directory]::Move($staging, $final)
+                    if ([IO.Directory]::Exists($transferRoot) -and
+                        @(Get-ChildItem -LiteralPath $transferRoot -Force).Count -eq 0) {
+                        [IO.Directory]::Delete($transferRoot)
+                    }
+                    [pscustomobject]@{
+                        package_id = $PackageId; guest_path = $final
+                        files_verified = $verified; manifest_sha256 = $ExpectedHash
+                    }
+                }
+            $result = @{ vm = $vm.Name; package = $guestResult }
         }
         'console_info' {
             $vm = Get-ExactVm -Name $request.vm
@@ -941,6 +1041,20 @@ function Convert-DvdDrive {
     }
 }
 
+function Test-NotFoundError {
+    # Remoting does not preserve guest exception types, so the host raises its own
+    # typed error and this only has to recognise it (plus Hyper-V's ObjectNotFound).
+    param([Parameter(Mandatory)]$ErrorRecord)
+    if ($ErrorRecord.CategoryInfo.Category -eq 'ObjectNotFound') { return $true }
+    $exception = $ErrorRecord.Exception
+    for ($depth = 0; $null -ne $exception -and $depth -lt 8; $depth++) {
+        if ($exception -is [System.IO.FileNotFoundException] -or
+            $exception -is [System.IO.DirectoryNotFoundException]) { return $true }
+        $exception = $exception.InnerException
+    }
+    return ([string]$ErrorRecord.FullyQualifiedErrorId) -match '^(FileNotFoundException|DirectoryNotFoundException)'
+}
+
 function Invoke-BridgeRequest {
     param([Parameter(Mandatory)][string]$Operation, [Parameter(Mandatory)]$Request)
     try {
@@ -956,7 +1070,7 @@ function Invoke-BridgeRequest {
             $code = 'access_denied'
         } elseif ($errorRecord.Exception -is [System.ArgumentException] -or $category -eq 'InvalidArgument') {
             $code = 'invalid_argument'
-        } elseif ($category -eq 'ObjectNotFound') {
+        } elseif ($category -eq 'ObjectNotFound' -or (Test-NotFoundError -ErrorRecord $errorRecord)) {
             $code = 'not_found'
         } elseif ($message -match 'permission|permiss|access denied|acesso negado') {
             # Some Hyper-V cmdlets wrap access failures in a generic RuntimeException.

@@ -31,7 +31,9 @@ def initialize(service: HyperVService, vm_name: str) -> dict[str, Any]:
         try:
             existing = service.guest_read_file(vm_name, remote, max_bytes=1_048_576)
         except HyperVError as exc:
-            if exc.code not in {"bridge_error", "backend_error"}:
+            # Only a missing file means "install it". Any other bridge failure has to
+            # surface instead of being mistaken for an absent tool.
+            if exc.code != "not_found":
                 raise
             service.guest_write_file(
                 vm_name, remote, base64.b64encode(content).decode("ascii"), create_parent=True,

@@ -385,6 +385,24 @@ class HyperVService:
             raise ValidationError("expected_sha256 must be a lowercase SHA-256 hexadecimal string.")
         return self._run("guest_assemble_file", "guest_assemble_file", payload, vm_name=vm_name)
 
+    def guest_publish_package(
+        self, vm_name: str, package_id: str, transfer_id: str, manifest_sha256: str
+    ) -> dict[str, Any]:
+        """Verify a staged package inside the guest and move it into Packages atomically."""
+        payload = self._guest(vm_name)
+        payload.update(
+            package_id=_text(package_id, "package_id", 64),
+            transfer_id=_text(transfer_id, "transfer_id", 32),
+            manifest_sha256=_text(manifest_sha256, "manifest_sha256", 64),
+        )
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,63}", payload["package_id"]) is None:
+            raise ValidationError("package_id must be 1-64 letters, digits, dots, or hyphens.")
+        if re.fullmatch(r"[0-9a-f]{32}", payload["transfer_id"]) is None:
+            raise ValidationError("transfer_id must be a 32-character lowercase hexadecimal id.")
+        if re.fullmatch(r"[0-9a-f]{64}", payload["manifest_sha256"]) is None:
+            raise ValidationError("manifest_sha256 must be a lowercase SHA-256 hexadecimal string.")
+        return self._run("guest_publish_package", "guest_publish_package", payload, vm_name=vm_name)
+
     def guest_write_file(
         self,
         vm_name: str,
