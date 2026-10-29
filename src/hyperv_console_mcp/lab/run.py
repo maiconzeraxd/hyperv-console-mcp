@@ -446,12 +446,37 @@ def _arm_driver_breakpoints(service: Any, vm_name: str, package_id: str) -> dict
 
 
 
+def _driver_symbols(service: Any, vm_name: str, modules: list[str]) -> dict[str, Any]:
+    """Did the test driver's symbols load? A stack of raw addresses answers less.
+
+    The PDB is staged beside the package and every lab directory holding one is
+    on ``_NT_SYMBOL_PATH``, but a driver built against another Windows build, or
+    one whose PDB did not travel with it, still resolves to a module and no
+    function names. kd is the only one that knows which of those happened.
+    """
+    entries: list[dict[str, Any]] = []
+    for module in modules:
+        try:
+            entries.append(service.kd_symbols(vm_name, module))
+        except HyperVError as exc:
+            entries.append({"module": module, "loaded": None, "error": exc.code})
+    return {
+        "modules": entries,
+        "resolved": [item["module"] for item in entries if item.get("loaded") is True],
+        "unresolved": [item["module"] for item in entries if item.get("loaded") is False],
+        "all_loaded": (
+            all(item.get("loaded") is True for item in entries) if entries else None
+        ),
+    }
+
+
 def _debugger_report(
     service: Any,
     vm_name: str,
     transport: str,
     attached: dict[str, Any],
     report: dict[str, Any],
+    modules: list[str] | None = None,
 ) -> dict[str, Any]:
     """After a run: let kd say what happened, then parse it when it was a bugcheck."""
     debug: dict[str, Any] = {
@@ -478,6 +503,9 @@ def _debugger_report(
         debug["analysis"] = service.kd_analyze(vm_name).get("report")
     except HyperVError as exc:
         debug["analysis_error"] = exc.code
+    # Only a broken-in target can answer this, which is why it is asked here
+    # rather than after every run.
+    debug["symbols"] = _driver_symbols(service, vm_name, list(modules or []))
     return debug
 
 
@@ -520,7 +548,10 @@ def cycle(
         timeout_seconds=timeout_seconds, checkpoint_before=checkpoint_before,
     )
     if attached is not None:
-        debug = _debugger_report(service, vm_name, debugger, attached, report)
+        debug = _debugger_report(
+            service, vm_name, debugger, attached, report,
+            (breakpoints or {}).get("modules") or [],
+        )
         debug["break_on_load"] = breakpoints
         report["debugger"] = debug
     evidence: dict[str, Any]

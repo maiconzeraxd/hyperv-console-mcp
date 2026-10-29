@@ -225,6 +225,16 @@ class FakeLabService:
         self.calls.append(("kd_break_on_load", module))
         return {"break_on_load": module, "enabled": enabled}
 
+    def kd_symbols(self, vm_name: str, module: str) -> dict[str, Any]:
+        self.calls.append(("kd_symbols", module))
+        # One driver resolves and the other does not, which is the report the
+        # lab flow has to be able to tell apart.
+        loaded = module != "Helper"
+        return {
+            "vm": vm_name, "module": module, "found": True, "loaded": loaded,
+            "symbol_kind": "private_pdb" if loaded else "export", "source": "!lmi",
+        }
+
 
 def _run(service: FakeLabService, **overrides: Any) -> dict[str, Any]:
     arguments: dict[str, Any] = {
@@ -591,6 +601,33 @@ def test_cycle_attaches_kd_and_reports_a_bugcheck_instead_of_a_hang(tmp_path: Pa
     assert report["debugger"]["event"] == "bugcheck"
     assert report["debugger"]["analysis"]["bugcheck_code"] == "0xd1"
     assert ("kd_analyze", "NORTH-Test") in service.calls
+
+
+def test_a_bugcheck_reports_whether_the_drivers_symbols_loaded(tmp_path: Path) -> None:
+    """A stack of raw addresses is not the evidence a stack with names is."""
+    service = FakeLabService(
+        run_error=BackendError("the guest session dropped", code="bridge_transport"),
+        after={"state": "Running", "uptime_seconds": 900},
+        evidence=False,
+        kd_event={"event": "bugcheck", "module": None},
+        manifest={"schema": 1, "package_id": "north.1", "files": [
+            {"path": "MyDriver.sys"}, {"path": "Helper.sys"},
+        ]},
+    )
+    service.settings = replace(service.settings, evidence_root=tmp_path)
+    report = lab_run.cycle(
+        service, "NORTH-Test",
+        package_id="north.1", run_id="run-1",
+        expected_manifest_sha256=DIGEST, debugger="kdnet",
+    )
+
+    symbols = report["debugger"]["symbols"]
+    assert symbols["resolved"] == ["MyDriver"]
+    assert symbols["unresolved"] == ["Helper"]
+    assert symbols["all_loaded"] is False
+    assert [value for name, value in service.calls if name == "kd_symbols"] == [
+        "MyDriver", "Helper",
+    ]
 
 
 def test_cycle_arms_a_break_on_load_for_each_driver_before_the_run(tmp_path: Path) -> None:

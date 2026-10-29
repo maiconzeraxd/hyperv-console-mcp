@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..errors import DebuggerError, PolicyError, ValidationError
-from ..kd import analyze_report, kdnet
+from ..kd import analyze_report, kdnet, symbols
 from ..kd.paths import session_log_path
 from ._base import KD_SYMBOL_SERVER, ServiceBase, _confined_path, _integer, _text
 
@@ -135,7 +135,7 @@ class DebuggerService(ServiceBase):
             return result
 
         with self._approve("kd_attach", vm, {
-            "transport": transport, "log_path": str(log), **details,
+            "transport": transport, "log_path": str(log), "symbol_path": symbol_path, **details,
         }):
             result = self._local_action("kd_attach", vm, action)
         return {**result, "serial_detached": serial_detached}
@@ -297,6 +297,27 @@ class DebuggerService(ServiceBase):
         session = self.kd.require(vm)
         result = self._local_action("kd_modules", vm, lambda: session.command("lm"))
         return {"vm": vm, **result}
+
+    def kd_symbols(self, vm_name: str, module: str) -> dict[str, Any]:
+        """Whether kd resolved a module's symbols, and from which PDB.
+
+        A read, like ``kd_modules``: it asks the debugger what it already knows.
+        ``!lmi`` is the direct answer, and ``lm`` covers a module kd has not
+        touched yet, which is what a driver that was loaded and unloaded before
+        the break looks like.
+        """
+        vm = self._kd_gate(vm_name)
+        session = self.kd.require(vm)
+        name = symbols.module_name(module)
+
+        def action() -> dict[str, Any]:
+            text = str(session.command(f"!lmi {name}").get("output", ""))
+            result = symbols.parse_lmi(text, name)
+            if not result["found"]:
+                result = symbols.parse_lm(str(session.command(f"lm m {name}").get("output", "")), name)
+            return result
+
+        return {"vm": vm, **self._local_action("kd_symbols", vm, action)}
 
     def kd_analyze(self, vm_name: str) -> dict[str, Any]:
         vm = self._kd_gate(vm_name)

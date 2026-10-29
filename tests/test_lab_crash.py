@@ -95,6 +95,16 @@ def test_kds_reading_is_kept_and_the_host_fills_what_it_cannot() -> None:
     assert merged["sources"] == ["kd", "host"]
 
 
+def test_the_merged_view_says_whether_the_names_are_real() -> None:
+    """A module plus an offset is not the same reading as a module and a function."""
+    merged = crash.merge(
+        None,
+        {"found": True, "bugcheck_code": "0xd1", "blamed_driver": "MyDriver.sys",
+         "symbols_resolved": False},
+    )
+    assert merged["symbols_resolved"] is False
+
+
 def test_a_dump_kd_could_not_read_leaves_the_hosts_numbers_standing() -> None:
     merged = crash.merge(
         {"bugcheck_code": "0x9f", "parameters": ["0x3"]},

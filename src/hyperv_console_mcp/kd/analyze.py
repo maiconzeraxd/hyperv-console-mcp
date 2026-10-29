@@ -123,6 +123,11 @@ def analyze_report(text: str) -> dict[str, Any]:
         if driver:
             report["blamed_driver"] = driver
         inner = probably.split("(", 1)[1].rstrip(" )").strip() if "(" in probably else ""
+        if inner:
+            # "MyDriver!Crash+0x1a" is a name kd resolved. "MyDriver+0x1a" is
+            # what it prints when the PDB was missing, and "!name" is its
+            # placeholder for a symbol it could not name at all.
+            report["symbols_resolved"] = "!" in inner and "!name" not in inner
         if inner and "!name" not in inner:
             report.setdefault("symbol_name", inner)
     if stack_start is not None:

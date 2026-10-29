@@ -100,6 +100,9 @@ def merge(host: Any, analysis: dict[str, Any]) -> dict[str, Any]:
         "default_bucket_id": analysis.get("default_bucket_id"),
         "blamed_driver": analysis.get("blamed_driver") or analysis.get("module_name"),
         "symbol_name": analysis.get("symbol_name"),
+        # Whether the names in this reading are real, or the module plus an
+        # offset kd prints when the PDB was not there.
+        "symbols_resolved": analysis.get("symbols_resolved"),
         "top_frames": analysis.get("top_frames"),
         "host_event": event or None,
         "sources": [
