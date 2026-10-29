@@ -15,7 +15,10 @@
 #
 # Output is one line: HVMCP_JSON:<base64 of the JSON result>, or HVMCP_ERROR:<text>.
 param(
-    [Parameter(Mandatory)][ValidateSet('Apply', 'Status', 'Revert')][string]$Mode,
+    # Not mandatory: the state-file test dot-sources this file to call its
+    # functions, and a mandatory parameter would fail that binding. The mode is
+    # validated in main instead, so the command line behaves the same.
+    [string]$Mode = '',
     [string]$SettingsPath = '',
     [string]$StatePath = 'C:\DriverLab\State\guest-config.json'
 )
@@ -278,14 +281,41 @@ function Remove-BcdValue {
 # -- power ----------------------------------------------------------------
 
 
-function Get-PowerSetting {
-    param([string]$Subgroup, [string]$Setting)
-    $text = (& powercfg.exe /query SCHEME_CURRENT $Subgroup $Setting) -join "`n"
-    $match = [regex]::Match($text, 'Current AC Power Setting Index:\s*(0x[0-9a-fA-F]+)')
-    if ($match.Success) {
-        return [Convert]::ToInt32($match.Groups[1].Value.Substring(2), 16)
-    }
+# powercfg prints its labels in the display language, so its output cannot be
+# parsed for the current values: on a pt-BR guest the English label this script
+# used to look for never appears and every value read back as null. The GUIDs
+# below are the documented constants for the three settings, and the CIM power
+# provider exposes the effective value of each plan under "{scheme}\AC\{setting}",
+# which is the number powercfg would print, in any language.
+$powerGuids = @{
+    STANDBYIDLE = '29f6c1db-86da-48c5-9fdb-f2b67b1f44da'
+    VIDEOIDLE = '3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e'
+    CONSOLELOCK = '0e796bdb-100d-47d6-a2d5-f7d2daa51f51'
+}
+
+function Get-ActiveSchemeGuid {
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes'
+    $active = (Get-ItemProperty -Path $key -Name 'ActivePowerScheme' -ErrorAction SilentlyContinue).ActivePowerScheme
+    if ($active) { return [string]$active }
+    # The scheme GUID itself is not localized, so this line is safe to match.
+    $text = (& powercfg.exe /getactivescheme) -join "`n"
+    $match = [regex]::Match($text, '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
+    if ($match.Success) { return $match.Value }
     return $null
+}
+
+function Get-PowerSetting {
+    param([string]$Setting)
+    $guid = $powerGuids[$Setting]
+    if (-not $guid) { return $null }
+    $scheme = Get-ActiveSchemeGuid
+    if (-not $scheme) { return $null }
+    $entry = Get-CimInstance -Namespace root\cimv2\power -ClassName Win32_PowerSettingDataIndex `
+        -ErrorAction SilentlyContinue |
+        Where-Object { $_.InstanceID -like "*$scheme*\AC\*$guid*" } |
+        Select-Object -First 1
+    if ($null -eq $entry) { return $null }
+    return [int]$entry.SettingIndexValue
 }
 
 function Set-PowerSetting {
@@ -309,6 +339,28 @@ $powerSettings = @(
 # -- state ----------------------------------------------------------------
 
 
+# Values read back from the state file arrive as PSCustomObjects, which cannot be
+# indexed or extended the way the records are used. Convert them, recursively, so
+# a second Apply (or a Revert after a restart) works on what the first one wrote.
+function ConvertTo-Hashtable {
+    param($Value)
+    if ($null -eq $Value) { return $null }
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        $result = @{}
+        foreach ($property in $Value.PSObject.Properties) {
+            $result[$property.Name] = ConvertTo-Hashtable -Value $property.Value
+        }
+        return $result
+    }
+    if ($Value -is [string]) { return $Value }
+    if ($Value -is [System.Collections.IEnumerable]) {
+        $items = @(foreach ($item in $Value) { ConvertTo-Hashtable -Value $item })
+        # The leading comma keeps a one-element list a list instead of a scalar.
+        return ,$items
+    }
+    return $Value
+}
+
 function Get-ConfigState {
     if (-not (Test-Path -LiteralPath $script:StateFile -PathType Leaf)) {
         return @{ version = 1; entries = @{} }
@@ -318,7 +370,7 @@ function Get-ConfigState {
     $entries = @{}
     if ($null -ne $parsed.entries) {
         foreach ($property in $parsed.entries.PSObject.Properties) {
-            $entries[$property.Name] = $property.Value
+            $entries[$property.Name] = ConvertTo-Hashtable -Value $property.Value
         }
     }
     return @{ version = 1; entries = $entries }
@@ -378,7 +430,7 @@ function Add-PreviousPower {
     $Record.power += @{
         subgroup = $Subgroup
         setting = $Setting
-        previous = Get-PowerSetting -Subgroup $Subgroup -Setting $Setting
+        previous = Get-PowerSetting -Setting $Setting
     }
 }
 
@@ -475,9 +527,9 @@ function Get-LiveConfig {
         windows_update_auto_reboot_blocked = ($reboot.value -eq 1)
         screensaver_active = $screenSave.value
         power = @{
-            standby_timeout_ac = Get-PowerSetting -Subgroup 'SUB_SLEEP' -Setting 'STANDBYIDLE'
-            monitor_timeout_ac = Get-PowerSetting -Subgroup 'SUB_VIDEO' -Setting 'VIDEOIDLE'
-            console_lock = Get-PowerSetting -Subgroup 'SUB_NONE' -Setting 'CONSOLELOCK'
+            standby_timeout_ac = Get-PowerSetting -Setting 'STANDBYIDLE'
+            monitor_timeout_ac = Get-PowerSetting -Setting 'VIDEOIDLE'
+            console_lock = Get-PowerSetting -Setting 'CONSOLELOCK'
         }
         interactive_sessions = $sessions
         driver_ready = @{
@@ -822,25 +874,31 @@ function Invoke-Revert {
 
 # -- main -----------------------------------------------------------------
 
-
-try {
-    $result = switch ($Mode) {
-        'Apply' { Invoke-Apply }
-        'Revert' { Invoke-Revert }
-        'Status' {
-            $state = Get-ConfigState
-            @{
-                mode = 'Status'
-                state_file = $script:StateFile
-                state_file_present = (Test-Path -LiteralPath $script:StateFile -PathType Leaf)
-                managed_entries = @($state.entries.Keys)
-                live = Get-LiveConfig
+# Dot-sourcing this file loads the functions and runs nothing, which is how the
+# state-file test drives them against a temporary file without touching a guest.
+if ($MyInvocation.InvocationName -ne '.') {
+    try {
+        if ($Mode -notin @('Apply', 'Status', 'Revert')) {
+            throw "-Mode must be Apply, Status or Revert; got '$Mode'."
+        }
+        $result = switch ($Mode) {
+            'Apply' { Invoke-Apply }
+            'Revert' { Invoke-Revert }
+            'Status' {
+                $state = Get-ConfigState
+                @{
+                    mode = 'Status'
+                    state_file = $script:StateFile
+                    state_file_present = (Test-Path -LiteralPath $script:StateFile -PathType Leaf)
+                    managed_entries = @($state.entries.Keys)
+                    live = Get-LiveConfig
+                }
             }
         }
+        $json = $result | ConvertTo-Json -Compress -Depth 10
+        Write-Output ('HVMCP_JSON:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)))
+    } catch {
+        Write-Output ('HVMCP_ERROR:' + $_.Exception.Message.Replace("`r", ' ').Replace("`n", ' '))
+        exit 1
     }
-    $json = $result | ConvertTo-Json -Compress -Depth 10
-    Write-Output ('HVMCP_JSON:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json)))
-} catch {
-    Write-Output ('HVMCP_ERROR:' + $_.Exception.Message.Replace("`r", ' ').Replace("`n", ' '))
-    exit 1
 }

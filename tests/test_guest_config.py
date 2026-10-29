@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import base64
 import json
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -222,3 +225,106 @@ def test_lab_apply_sends_only_the_driver_entries(tmp_path: Path) -> None:
     # The autologon section is absent, so no password is shipped with a lab change.
     assert "autologon" not in document(transport)
     assert SECRET not in transport.commands[0]
+
+
+STATE_WITH_ONE_ENTRY = {
+    "version": 1,
+    "updated_at": "2026-10-29T10:41:00.0000000Z",
+    "entries": {
+        "lock_screen": {
+            "values": [
+                {
+                    "path": r"HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization",
+                    "name": "NoLockScreen",
+                    "existed": False,
+                    "kind": None,
+                    "previous": None,
+                }
+            ],
+            "lsa": [],
+            "power": [],
+            "bcd": [],
+            "applied": {"no_lock_screen": True},
+        }
+    },
+}
+
+
+WINDOWS_POWERSHELL_ONLY = pytest.mark.skipif(
+    sys.platform != "win32" or shutil.which("powershell") is None,
+    reason="needs Windows PowerShell 5.1 to run the guest script",
+)
+
+
+def run_guest_probe(tmp_path: Path, lines: list[str]) -> Any:
+    """Dot-source the guest script in a fresh powershell.exe and run ``lines``.
+
+    The script only runs its mode when it is executed, so dot-sourcing it loads
+    the functions against a temporary state file and touches no guest.
+    """
+    script = Path(guest_config.__file__).with_name("guest_config.ps1")
+    probe = tmp_path / "probe.ps1"
+    probe.write_text(
+        "\n".join(["$ErrorActionPreference = 'Stop'", f". '{script}'", *lines]),
+        encoding="utf-8-sig",
+    )
+    completed = subprocess.run(
+        [shutil.which("powershell") or "powershell", "-NoProfile", "-NonInteractive",
+         "-ExecutionPolicy", "Bypass", "-File", str(probe)],
+        capture_output=True, text=True, timeout=180,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    return json.loads(completed.stdout.strip().splitlines()[-1])
+
+
+@WINDOWS_POWERSHELL_ONLY
+def test_a_recorded_state_can_be_read_and_extended_again(tmp_path: Path) -> None:
+    """A second Apply reads the state file the first one wrote.
+
+    Regression: ``ConvertFrom-Json`` hands back PSCustomObjects, and
+    ``Get-EntryRecord`` extends a record with ``$record[$field] = @()``, which
+    throws "cannot index into a PSObject". The first Apply worked because no
+    state file existed yet; every Apply after it failed on the live guest.
+    """
+    state_file = tmp_path / "guest-config.json"
+    state_file.write_text(json.dumps(STATE_WITH_ONE_ENTRY), encoding="utf-8")
+
+    payload = run_guest_probe(tmp_path, [
+        f"$script:StateFile = '{state_file}'",
+        "$state = Get-ConfigState",
+        "$record = Get-EntryRecord -State $state -Entry 'lock_screen'",
+        "$record.values += @{ path = 'HKCU:\\Control Panel\\Desktop'; name = 'ScreenSaveActive'"
+        "; existed = $true; kind = 'String'; previous = '1' }",
+        "$record.applied['no_lock_screen'] = $true",
+        "@{ entries = @($state.entries.Keys); values = @($record.values).Count;"
+        " applied = $record.applied['no_lock_screen'] } | ConvertTo-Json -Compress",
+    ])
+
+    assert payload["entries"] == ["lock_screen"]
+    assert payload["values"] == 2
+    assert payload["applied"] is True
+
+
+@WINDOWS_POWERSHELL_ONLY
+def test_the_power_values_are_read_without_parsing_localized_output(tmp_path: Path) -> None:
+    """powercfg prints its labels in the display language.
+
+    Regression: the reader matched the English label "Current AC Power Setting
+    Index", so on a pt-BR guest every power value came back null even though the
+    settings had been applied. The reader now goes through the CIM power
+    provider, which is language-neutral.
+    """
+    payload = run_guest_probe(tmp_path, [
+        "$values = @{}",
+        "foreach ($name in @('STANDBYIDLE', 'VIDEOIDLE', 'CONSOLELOCK')) {",
+        "    $value = Get-PowerSetting -Setting $name",
+        "    $values[$name] = @{ type = $(if ($null -eq $value) { 'null' }"
+        " else { $value.GetType().Name }); value = $value }",
+        "}",
+        "$values | ConvertTo-Json -Compress",
+    ])
+
+    assert set(payload) == {"STANDBYIDLE", "VIDEOIDLE", "CONSOLELOCK"}
+    for name, reading in payload.items():
+        assert reading["type"] == "Int32", f"{name}: {reading}"
+        assert reading["value"] >= 0
