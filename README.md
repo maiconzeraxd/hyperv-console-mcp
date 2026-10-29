@@ -6,7 +6,7 @@ A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/)
 
 ## Highlights
 
-- **53 MCP tools in eleven toolsets**, with read-only/destructive annotations and structured results; a profile registers only its own toolsets, so the default surface is 29 tools rather than every schema in every conversation.
+- **55 MCP tools in eleven toolsets**, with read-only/destructive annotations and structured results; a profile registers only its own toolsets, so the default surface is 29 tools rather than every schema in every conversation.
 - Inventory, pause/resume, bounded state waiting, power, checkpoints, and bounded guest file transfer.
 - A running VM reports its guest's computer name and OS from the Hyper-V key-value pair exchange,
   so a VM can be identified before any guest credential exists.
@@ -85,8 +85,8 @@ It merges one `mcpServers.hyperv` entry and leaves every other server and settin
 
 Every tool belongs to one toolset. A profile decides which toolsets are registered, and a
 tool that is not registered is never advertised, so its schema never enters the model's
-context. The `safe` profile registers 29 tools, `lab` registers 40, `HYPERV_MCP_TOOLSETS`
-replaces the set outright, and `all` enables everything (53 tools).
+context. The `safe` profile registers 29 tools, `lab` registers 43, `HYPERV_MCP_TOOLSETS`
+replaces the set outright, and `all` enables everything (55 tools).
 
 | Toolset | Tools | safe | lab |
 |---|---|:--:|:--:|
@@ -98,7 +98,7 @@ replaces the set outright, and `all` enables everything (53 tools).
 | `media` | `media_list`, `media_mount`, `media_eject` | ✓ | |
 | `ssh` | `guest_ssh_provision`, `guest_ssh_status`, `guest_ssh_deprovision` | ✓ | |
 | `serial` | `serial_status`, `serial_connect`, `serial_read`, `serial_send`, `serial_disconnect` | | |
-| `lab` | `lab_init`, `lab_diagnostics`, `lab_stage`, `lab_verify`, `lab_collect`, `lab_guest_configure`, `lab_run`, `lab_cycle` | | ✓ |
+| `lab` | `lab_init`, `lab_diagnostics`, `lab_stage`, `lab_verify`, `lab_collect`, `lab_guest_configure`, `lab_verifier`, `lab_driver_service`, `lab_run`, `lab_cycle` | | ✓ |
 | `kd` | `kd_attach`, `kd_status`, `kd_detach`, `kd_execution`, `kd_command`, `kd_wait_event`, `kd_breakpoint`, `kd_inspect`, `vm_inject_nmi` | | ✓ |
 | `debug` | `debug_status`, `debug_setup` | | ✓ |
 
@@ -129,7 +129,7 @@ The window is a WebView2 page (`pip install hyperv-console-mcp[ui]`, or pywebvie
 
 The MCP server and the dashboard are clients of one background service, so a KD or serial session the AI opens is the session the window shows, and the activity page lists what the other process did. A client that finds no host starts one (`hyperv-service`, or `hyperv-service --pipe NAME`) and joins it; `HYPERV_MCP_SHARED_SERVICE=false` keeps a private copy for a run that must not disturb a live one, and `HYPERV_MCP_SERVICE_PIPE` names a different pipe. The host reads its policy once at startup, so whichever client starts it decides the environment for both — set the level per VM in the access file rather than relying on a client's environment.
 
-The lab workflow initializes fixed guest directories, stages hash-verified packages and collects evidence. Package sources and evidence downloads are confined to `HYPERV_MCP_LAB_ROOT` and `HYPERV_MCP_EVIDENCE_ROOT`. Without the lab profile, running a package is a separate manual guest action requiring an exact run-specific approval phrase; with `HYPERV_MCP_PROFILE=lab`, `lab_run`/`lab_cycle` generate that phrase, checkpoint first and classify the outcome as `ok`, `failed`, `not_verified`, `bugcheck`, `hang` or `timeout`. See [the lab guide](docs/LAB.md); no driver or mapper is bundled or run by this repository.
+The lab workflow initializes fixed guest directories, stages hash-verified packages and collects evidence. Package sources and evidence downloads are confined to `HYPERV_MCP_LAB_ROOT` and `HYPERV_MCP_EVIDENCE_ROOT`. Without the lab profile, running a package is a separate manual guest action requiring an exact run-specific approval phrase; with `HYPERV_MCP_PROFILE=lab`, `lab_run`/`lab_cycle` generate that phrase, checkpoint first and classify the outcome as `ok`, `failed`, `not_verified`, `bugcheck`, `hang` or `timeout`. A bugcheck is then triaged from the dump the run collected — the newest minidump first, `!analyze -v` through kd, merged with the host's own crash record — and each cycle writes `lab-cycle.json` beside the evidence so two runs of the same package can be diffed. `lab_verifier` turns Driver Verifier on for named test drivers and `lab_driver_service` installs, starts, stops and removes a test kernel-driver service, both recorded and revertible in the guest; a refused driver is reported with its Win32 error and NTSTATUS, and signature enforcement is never bypassed. See [the lab guide](docs/LAB.md); no driver or mapper is bundled or run by this repository.
 
 ## Performance and debugging
 
@@ -137,7 +137,7 @@ The server reuses one local PowerShell worker for host and console work and a se
 
 For kernel work, choose **KDNET** after reviewing a suitable network path, or **COM1/named pipe** to preserve a no-network VM. Guest BCD and host COM1 preparation are separate, explicitly confirmed operations. Neither stops nor reboots the VM automatically.
 
-`kd_attach` then drives a real `kd.exe` from the server: one session per VM, a per-session marker that delimits every command's output (never a sleep), an explicit `disconnected → waiting_for_target → running ↔ broken` state reported by `kd_status`, break-in through the console with `vm_inject_nmi` as the fallback, and a full log under `%LOCALAPPDATA%\HyperVConsoleMCP\kd\<vm>\`. `debug_setup(transport="kdnet", action="prepare")` sets up the internal lab switch, a UDP port in 50000–50039 and a host firewall rule that names `kd.exe`; the generated key lives only in the Windows Credential Manager and is masked in everything the tool returns. Symbols come from the Microsoft symbol server into a local cache, plus any staged lab package that ships a `.pdb`. In the lab profile, `lab_cycle(..., debugger="kdnet")` attaches kd before the run, arms `sxe ld:<driver>` for each `.sys` in the package manifest, and reports a bugcheck with the parsed `!analyze -v` instead of calling it a hang.
+`kd_attach` then drives a real `kd.exe` from the server: one session per VM, a per-session marker that delimits every command's output (never a sleep), an explicit `disconnected → waiting_for_target → running ↔ broken` state reported by `kd_status`, break-in through the console with `vm_inject_nmi` as the fallback, and a full log under `%LOCALAPPDATA%\HyperVConsoleMCP\kd\<vm>\`. `debug_setup(transport="kdnet", action="prepare")` sets up the internal lab switch, a UDP port in 50000–50039 and a host firewall rule that names `kd.exe`; the generated key lives only in the Windows Credential Manager and is masked in everything the tool returns. Symbols come from the Microsoft symbol server into a local cache, plus any staged lab package that ships a `.pdb`. In the lab profile, `lab_cycle(..., debugger="kdnet")` attaches kd before the run, arms `sxe ld:<driver>` for each `.sys` in the package manifest, and reports a bugcheck with the parsed `!analyze -v` instead of calling it a hang, together with whether the test driver's symbols actually resolved.
 
 - [Performance rationale and benchmarks](docs/PERFORMANCE.md)
 - [WinDbg, KDNET, and serial setup](docs/WINDBG.md)

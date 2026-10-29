@@ -1345,6 +1345,69 @@ rendered from a live VM — the capture path needs an elevated session.
   `pipe_name()` now refuses a malformed override where it is read, and `hyperv-dashboard` shows a
   service failure in a message box instead of exiting silently when launched from the shortcut.
 
+### 2026-10-29 — v0.3 phase 6: Driver Verifier, recorded and revertible
+
+- **State read from the registry, never from `verifier /query`.** `transport/guest_verifier.ps1` reads
+  `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\VerifyDriverLevel` and
+  `VerifyDrivers`; the query output is translated on a pt-BR guest, which is the same class of defect
+  phase 1 fixed for bcdedit and powercfg. `transport/guest_verifier.py` names the flags and reports
+  undocumented bits as `0x…` numbers instead of guessing.
+- **Record and revert, not "disable".** Enabling writes `verifier.json` under
+  `C:\DriverLab\State\` holding what was there before; `Revert` restores that and removes the file,
+  so an operator's own Verifier setting survives the lab. Driver names are validated as names, never
+  as paths.
+- **The read side lives in `lab_diagnostics`.** A second listing tool would have cost a schema in
+  every conversation for one field; the diagnostics report already answers "what is this guest's
+  test state".
+
+### 2026-10-29 — v0.3 phase 6: a test driver's service lifecycle, with the numbers
+
+- **advapi32, not `sc.exe`.** `transport/guest_driver_service.ps1` opens the SCM with
+  `OpenSCManager`/`CreateService`/`StartService`/`ControlService`/`DeleteService`, so the Win32 error
+  from `StartService` and the driver's own NTSTATUS (`SERVICE_STATUS.dwServiceSpecificExitCode` under
+  `ERROR_SERVICE_SPECIFIC_ERROR`) come back as numbers rather than as translated text.
+- **A NULL that PowerShell turned into a machine name.** `OpenSCManager` failed with Win32 123
+  because a `[string]` P/Invoke parameter receives `""` for `$null`, and the SCM reads `""` as a
+  machine name. The sentinel has to be
+  `[System.Management.Automation.Language.NullString]::Value` *inline*: assigning it to a variable
+  turns it back into an empty string. Both call sites carry that comment.
+- **Signature enforcement is never bypassed.** The image must already be a `.sys` inside
+  `C:\DriverLab`; a refused load is reported with its code and the approval record says
+  `bypasses_signature_enforcement: False`.
+
+### 2026-10-29 — v0.3 phase 6: a crash is triaged from the dump the run already collected
+
+- **The newest minidump, not `MEMORY.DMP`.** `lab/crash.py::choose_dump` prefers a file under
+  `minidumps/` and breaks ties by the `modified_utc` the guest now stamps into `evidence.json`;
+  `!analyze -v` on a kernel dump reads as much as the guest has RAM. An index entry that escapes the
+  run directory is ignored, and a dump the host does not have is reported rather than opened.
+- **kd's reading is merged with the host's, not substituted for it.** `merge()` keeps the host's
+  event-18590 code and parameters when kd cannot open the dump or is not installed, and lists which
+  sources answered. A run that had a debugger attached and got an answer is not analyzed twice.
+- **The log is kept.** The full `!analyze -v` output is written beside the dump as `kd-analyze.log`,
+  and a triage failure never costs the run its report.
+
+### 2026-10-29 — v0.3 phase 6: whether the driver's symbols actually resolved
+
+- **`!lmi` first, `lm` as the fallback.** `kd/symbols.py` parses both; a PDB that kd found and then
+  rejected (`*** Mismatched PDB ***`) reads as unresolved, not as a load, because the stack has no
+  names either way. The lab flow asks for every `.sys` the package ships once kd is broken in, and
+  reports the resolved and unresolved sets beside the analysis.
+- **The dump path gets the same verdict without a second kd run.** An analysis that names a function
+  resolved symbols; one that names a module and an offset did not. `crash.merge` carries
+  `symbols_resolved` into the run report.
+- **The symbol path is in the approval summary.** `kd_attach` shows the `srv*` entry and every lab
+  package directory that carries a PDB before the session starts.
+
+### 2026-10-29 — v0.3 phase 6: every cycle writes down what it did
+
+- **`lab-cycle.json` beside the evidence.** `lab/report.py` keeps the package and the manifest hash
+  the run was asked to match, the checkpoint and its revert, the outcome, the crash reading with
+  `symbols_resolved`, the debugger's symbol result, and the evidence as one hash over its files —
+  sorted and indented, so two runs of the same package are a file diff.
+- **It is written last, and never fails the cycle.** A host that cannot write it still has the run
+  report: the record is a copy of the answer, not the answer.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,
@@ -1417,3 +1480,43 @@ the pages were rendered over a fake service and the real one, but no screenshot 
 been drawn in it. A real MCP mutation held open while an operator clicks *Approve once* in the
 window also waits on a human. `uvx hyperv-console-mcp` was not exercised as a launch path — the
 console scripts from a real install were, which is the same entry point.
+
+## Phase 6 report
+
+**What changed.** Driver QA that a lab iteration can actually use. `transport/guest_verifier.ps1` and
+`transport/guest_verifier.py` turn Driver Verifier on and off from the registry, record what they
+replaced, and restore it on `Revert`; `lab_verifier` exposes that and the read side is in
+`lab_diagnostics`. `transport/guest_driver_service.ps1` and `guest_driver_service.py` install, start,
+stop and remove a test kernel-driver service through advapi32, reporting the Win32 error and the
+driver's NTSTATUS; `lab_driver_service` exposes that. `lab/crash.py` triages the dump a bugcheck run
+already collected — newest minidump first, `!analyze -v` through the existing kd engine, merged with
+the host's event-18590 record, with `kd-analyze.log` kept beside it. `kd/symbols.py` parses `!lmi`
+and `lm` so the cycle can say whether the test driver's symbols loaded, and `analyze_report` derives
+the same verdict from a dump. `lab/report.py` writes `lab-cycle.json` beside the evidence: package,
+manifest hash, checkpoint and revert, outcome, crash reading, symbol result and one hash over the
+evidence files. The evidence index now carries `modified_utc` per file, which is what makes "newest
+dump" mean this run's crash.
+
+**Tests added across the phase.** `tests/test_guest_driver_service.py` (18): argument shape, path and
+name validation, the Win32-to-NTSTATUS mapping, unsigned-driver reporting, no verdict for a read, the
+confirm/approve split, and four Windows-only probes against the real SCM. `tests/test_lab_crash.py`
+(14): dump choice, escaping index entries, the merge with and without kd, the triage paths and a
+missing evidence root. `tests/test_kd_symbols.py` (14): `!lmi` and `lm` parsing including a rejected
+PDB, the module-name refusal, `symbols_resolved` from an analysis, and the read with its `lm`
+fallback. `tests/test_lab_report.py` (10): the record's contents, the evidence hash, a refused run id
+and an unwritable host. Cycle-level tests in `tests/test_lab_run.py` cover a crash without a debugger
+being triaged, a run that did not crash never touching kd, symbols being reported per driver, and the
+record being written. Suite: 840 passing, 1 skipped.
+
+**Validated live.** The driver-service program's P/Invoke was exercised against this host's real
+Service Control Manager — `OpenSCManager`, `OpenService` and `QueryServiceStatusEx` on `EventLog`,
+which needs no elevation — and returned `running` with its state code. That is the only part of the
+phase that touched a real Windows component; everything else ran against fakes.
+
+**Still pending, and why.** Nothing in this phase has been run against `NORTH-Test`: enabling the
+Verifier, installing a test driver service and a real bugcheck with a dump to triage all need an
+elevated shell and a payload, and running a payload stays a separate operator decision. The optional
+IOCTL robustness harness was not built — it is marked optional in the roadmap, and a malformed-input
+generator behind an AI-callable tool is the one item here whose shape deserves the operator's own
+sign-off rather than a phase default; the same loop is expressible today inside the operator's
+`Run-Lab.ps1`, which the lab already runs with a checkpoint.

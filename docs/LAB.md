@@ -119,10 +119,41 @@ With `debugger="kdnet"` or `"serial"` the cycle also attaches kd before step 4 a
 | `ok` | the guest runner finished and reported success |
 | `failed` | the runner finished non-zero, or answered without writing a result |
 | `not_verified` | the package did not match its manifest; nothing was executed |
-| `bugcheck` | the guest stopped answering and `vm_get` shows a lower uptime, i.e. a reboot |
+| `bugcheck` | the host recorded a guest crash during the run (event 18590), or the guest stopped answering and the VM rebooted |
 | `hang` | the guest stopped answering while the VM kept running |
 | `timeout` | the run hit `timeout_seconds` (10–3600) with the guest still alive |
 
-A `bugcheck` report also carries the System log's BugCheck (event 1001) entries when the guest came back far enough to answer. `vm_inject_nmi` forces a hung guest into the debugger when a hang must be turned into a crash to get a dump.
+A `bugcheck` report is triaged rather than left at the code: `lab/crash.py` picks the dump the cycle
+collected — the newest file under `minidumps/`, falling back to `MEMORY.DMP` — runs `!analyze -v`
+against it with kd on the host, and merges the reading with the host's own event-18590 record into
+`report.crash`. The merge is what keeps a run honest when kd cannot open the dump or is not
+installed: the host's bugcheck code and parameters stay, and `crash.error` says why. The full kd
+output is kept beside the evidence as `kd-analyze.log`. `crash.bugcheck.symbols_resolved` says
+whether the names in the stack are real; when a debugger was attached, `debugger.symbols` names each
+driver the package ships as resolved or not, which is the difference between a stack with function
+names and a module plus an offset. `vm_inject_nmi` forces a hung guest into the debugger when a hang
+must be turned into a crash to get a dump.
+
+Every cycle also writes `lab-cycle.json` beside the evidence: the package and the manifest hash the
+run was asked to match, the checkpoint and its revert, the outcome, the crash reading, the symbol
+result, and one hash over the collected files. Two runs of the same package are a file diff.
+
+## Driver Verifier and the driver service
+
+`lab_verifier` turns Driver Verifier on for named test drivers or for every driver, turns it off, or
+restores what the tool replaced. The flags are read from and written to the registry
+(`VerifyDriverLevel`, `VerifyDrivers`), never from `verifier /query`, whose output is translated on a
+localized guest. Enabling records the previous setting in `C:\DriverLab\State\verifier.json`;
+`revert` restores it and removes the file, so an operator's own Verifier configuration survives the
+lab. A change takes effect on the next restart, and this tool never restarts the VM.
+`lab_diagnostics` reports the current state.
+
+`lab_driver_service` installs a kernel-driver service for a `.sys` already staged under
+`C:\DriverLab`, starts, stops and removes it, or lists what this tool installed. It drives the
+Service Control Manager through advapi32, so `StartService`'s Win32 error and the driver's own
+NTSTATUS (from `SERVICE_STATUS.dwServiceSpecificExitCode`) are reported as numbers. Signature
+enforcement is never bypassed: a driver the guest refuses is reported with its code, and test signing
+stays the operator's boot setting (`lab_guest_configure`). Reading the state needs no confirmation;
+the other actions require `confirm_vm`.
 
 The run is synchronous: the guest worker is busy for its duration, while `vm_get`, console and dashboard calls keep working on the host worker. `lab_run` and `lab_cycle` are refused outside the lab profile — the approval phrase is never typed by the caller, and the profile is the operator's decision to let a loop execute staged packages.
