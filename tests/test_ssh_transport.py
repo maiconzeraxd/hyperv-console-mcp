@@ -7,6 +7,7 @@ SSH server. The guest script itself is exercised live only.
 from __future__ import annotations
 
 import base64
+import codecs
 import hashlib
 import json
 import re
@@ -25,6 +26,7 @@ from hyperv_console_mcp.transport.psdirect import PowerShellDirectTransport
 from hyperv_console_mcp.transport.ssh import (
     EXEC_MARKER,
     JSON_MARKER,
+    MAX_COMMAND_LINE,
     SshTransport,
     vm_key,
 )
@@ -99,9 +101,36 @@ class FakeTransportChannel:
         self.keepalive = seconds
 
 
+class FakeSftpFile:
+    """A write-only handle, which is all the uploaded-script path needs."""
+
+    def __init__(self, sftp: "FakeSftp", path: str) -> None:
+        self.sftp = sftp
+        self.path = path
+        self.buffer = b""
+
+    def write(self, data: bytes) -> int:
+        self.buffer += data
+        return len(data)
+
+    def close(self) -> None:
+        self.sftp.client.files[_norm(self.path)] = self.buffer
+
+    def __enter__(self) -> "FakeSftpFile":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+
 class FakeSftp:
     def __init__(self, client: "FakeSSHClient") -> None:
         self.client = client
+
+    def open(self, path: str, mode: str = "rb") -> FakeSftpFile:
+        if "w" not in mode:
+            raise IOError("this stub only writes")
+        return FakeSftpFile(self, path)
 
     def stat(self, path: str) -> object:
         if _norm(path) not in self.client.files:
@@ -140,6 +169,7 @@ class FakeSSHClient:
     corrupt_download = False
     preload_files: dict[str, bytes] = {}
     raw_output: tuple[str, int] | None = None
+    reject_file_run = False
     exec_handler = _default_exec
     guest_handler = _default_guest
 
@@ -186,31 +216,40 @@ class FakeSSHClient:
             return FakeStream(), FakeStream(text, status), FakeStream()
         if "-EncodedCommand " in command:
             script = base64.b64decode(command.rsplit(" ", 1)[1]).decode("utf-16-le")
-            self.scripts.append(script)
-            wrapped = re.search(r"FromBase64String\('([A-Za-z0-9+/=]+)'\)", script)
-            if wrapped is not None:
-                user_command = base64.b64decode(wrapped.group(1)).decode("utf-8")
-                line = EXEC_MARKER + base64.b64encode(
-                    json.dumps(self.exec_handler(user_command)).encode()
-                ).decode()
-                return FakeStream(), FakeStream(line), FakeStream()
-            if "Get-FileHash" in script:
-                return FakeStream(), FakeStream(self._hash_line(script)), FakeStream()
-            # The health probe: a plain script, not the exec wrapper.
-            if FakeSSHClient.health_fails:
+            return self._respond(script)
+        uploaded = re.search(r"-File '((?:[^']|'')*)'", command)
+        if uploaded is not None:
+            if FakeSSHClient.reject_file_run:
+                raise FakeSSHException("Channel closed")
+            path = uploaded.group(1).replace("''", "'")
+            data = self.files.get(_norm(path))
+            if data is None:
                 return FakeStream(), FakeStream("", 1), FakeStream()
-            body = json.dumps({"computer_name": "LAB", "windows_version": "10.0"})
-            return FakeStream(), FakeStream(body), FakeStream()
-        if "guest_operations.ps1" in command:
-            operation = re.search(r"-Operation '([^']*)'", command).group(1)
-            request = re.search(r"-Request '([^']*)'", command).group(1)
+            # PowerShell 5.1 reads a script as UTF-8 only when it starts with a BOM.
+            assert data.startswith(codecs.BOM_UTF8)
+            return self._respond(data[len(codecs.BOM_UTF8):].decode("utf-8"))
+        return self._respond(command)
+
+    def _respond(self, script: str):
+        self.scripts.append(script)
+        wrapped = re.search(r"FromBase64String\('([A-Za-z0-9+/=]+)'\)", script)
+        if wrapped is not None:
+            user_command = base64.b64decode(wrapped.group(1)).decode("utf-8")
+            line = EXEC_MARKER + base64.b64encode(
+                json.dumps(self.exec_handler(user_command)).encode()
+            ).decode()
+            return FakeStream(), FakeStream(line), FakeStream()
+        if "guest_operations.ps1" in script:
+            operation = re.search(r"-Operation '([^']*)'", script).group(1)
+            request = re.search(r"-Request '([^']*)'", script).group(1)
             payload = json.loads(base64.b64decode(request).decode("utf-8"))
             line = JSON_MARKER + base64.b64encode(
                 json.dumps(self.guest_handler(operation, payload)).encode()
             ).decode()
             return FakeStream(), FakeStream(line), FakeStream()
-        if "Get-FileHash" in command:
-            return FakeStream(), FakeStream(self._hash_line(command)), FakeStream()
+        if "Get-FileHash" in script:
+            return FakeStream(), FakeStream(self._hash_line(script)), FakeStream()
+        # The health probe: a plain script, not the exec wrapper.
         if FakeSSHClient.health_fails:
             return FakeStream(), FakeStream("", 1), FakeStream()
         body = json.dumps({"computer_name": "LAB", "windows_version": "10.0"})
@@ -255,6 +294,7 @@ def fake_paramiko(monkeypatch: pytest.MonkeyPatch):
     FakeSSHClient.corrupt_download = False
     FakeSSHClient.preload_files = {}
     FakeSSHClient.raw_output = None
+    FakeSSHClient.reject_file_run = False
     FakeSSHClient.exec_handler = _default_exec
     FakeSSHClient.guest_handler = _default_guest
     ssh_module._CLIENTS.clear()
@@ -382,6 +422,80 @@ def test_exec_without_the_wrapper_reports_the_channel_result(tmp_path: Path) -> 
     assert result.success is False
     assert result.exit_code == 2
     assert "raw failure" in result.output
+
+
+def test_a_short_script_stays_on_the_command_line(tmp_path: Path) -> None:
+    provision(tmp_path)
+    SshTransport(settings(tmp_path)).exec(VM, "Get-Date", timeout=30, max_output=1024)
+    client = FakeSSHClient.instances[-1]
+    assert "-EncodedCommand" in client.commands[-1]
+    assert len(client.commands[-1]) <= MAX_COMMAND_LINE
+
+
+def test_a_hundred_kilobyte_command_is_uploaded_instead_of_encoded(
+    tmp_path: Path,
+) -> None:
+    """Windows caps a command line at 32 767 characters, and the encoding triples it.
+
+    Regression: every script went out as `-EncodedCommand`, so `guest_exec` failed
+    near 8 KB of command and `guest_write_file` near 18 KB, against the 131 072
+    bytes the API accepts. A script too long for the line is now written to the
+    guest over SFTP and run with `-File`.
+    """
+    provision(tmp_path)
+    seen: list[str] = []
+
+    def handler(command: str) -> dict[str, Any]:
+        seen.append(command)
+        return _default_exec(command)
+
+    FakeSSHClient.exec_handler = handler
+    command = "Write-Output " + "A" * 100_000
+    result = SshTransport(settings(tmp_path)).exec(VM, command, timeout=60, max_output=1024)
+
+    client = FakeSSHClient.instances[-1]
+    assert seen == [command]
+    assert result.success is True
+    # The line that would have been generated is over the cap; nothing that long
+    # was ever sent.
+    assert len(SshTransport.encoded_line(client.scripts[-1])) > MAX_COMMAND_LINE
+    assert all(len(line) <= MAX_COMMAND_LINE for line in client.commands)
+    assert all("-EncodedCommand" not in line for line in client.commands)
+    assert any("-File " in line for line in client.commands)
+    # And the uploaded script is cleaned up afterwards.
+    assert [path for path in client.files if "exec-" in path] == []
+
+
+def test_a_large_guest_call_payload_also_goes_through_the_upload_path(
+    tmp_path: Path,
+) -> None:
+    provision(tmp_path)
+    seen: list[tuple[str, dict[str, Any]]] = []
+    FakeSSHClient.guest_handler = lambda operation, payload: (
+        seen.append((operation, payload)) or {"written": True}
+    )
+    content = base64.b64encode(b"x" * 100_000).decode("ascii")
+
+    result = SshTransport(settings(tmp_path)).call(
+        VM, "guest_write_file", {"path": r"C:\DriverLab\big.bin", "content_base64": content}
+    )
+
+    assert seen and seen[0][0] == "guest_write_file"
+    assert seen[0][1]["content_base64"] == content
+    assert result["written"] is True
+    client = FakeSSHClient.instances[-1]
+    assert all(len(line) <= MAX_COMMAND_LINE for line in client.commands)
+    assert [path for path in client.files if "exec-" in path] == []
+
+
+def test_the_uploaded_script_is_removed_when_the_run_fails(tmp_path: Path) -> None:
+    provision(tmp_path)
+    FakeSSHClient.reject_file_run = True
+    with pytest.raises(BackendError):
+        SshTransport(settings(tmp_path)).exec(VM, "Write-Output " + "A" * 100_000,
+                                              timeout=60, max_output=1024)
+    client = FakeSSHClient.instances[-1]
+    assert [path for path in client.files if "exec-" in path] == []
 
 
 def test_put_file_verifies_the_digest_the_guest_reports(tmp_path: Path) -> None:

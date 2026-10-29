@@ -12,12 +12,14 @@ persistent session has to be held by the client library.
 from __future__ import annotations
 
 import base64
+import codecs
 import hashlib
 import json
 import os
 import re
 import socket
 import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +30,15 @@ from .base import ExecResult, FileResult
 # Installed in the guest by guest_ssh_provision; it implements the structured
 # guest operations so the two transports run the same PowerShell.
 GUEST_SCRIPT = r"C:\ProgramData\HyperVConsoleMCP\guest_operations.ps1"
+GUEST_SCRIPT_DIRECTORY = r"C:\ProgramData\HyperVConsoleMCP"
 CONNECT_TIMEOUT_SECONDS = 10.0
 HEALTH_TIMEOUT_SECONDS = 2.0
 KEEPALIVE_SECONDS = 30
+# Windows caps a command line at 32 767 characters. `-EncodedCommand` sends the
+# script as base64 of UTF-16, which costs about 2.7 characters of command line
+# per character of script, so the old always-encoded path failed at roughly 8 KB
+# of guest command. Anything longer than this is uploaded and run by path.
+MAX_COMMAND_LINE = 28_000
 EXEC_MARKER = "HVMCP_EXEC_RESULT:"
 JSON_MARKER = "HVMCP_JSON:"
 ERROR_MARKER = "HVMCP_ERROR:"
@@ -269,6 +277,56 @@ class SshTransport:
                 raise BackendError(f"SSH session to {vm} failed: {exc}", code="ssh_error") from exc
             raise
 
+    @staticmethod
+    def encoded_line(script: str) -> str:
+        return f"powershell -NoProfile -NonInteractive -EncodedCommand {_encoded_command(script)}"
+
+    def _run_script(
+        self, vm: str, script: str, *, timeout: float
+    ) -> tuple[str, str, int]:
+        """Run a PowerShell script in the guest, however long it is.
+
+        The command line is the wrong place for a big script: Windows caps it at
+        32 767 characters and the encoding nearly triples the length. A script
+        that would not fit is written to a temporary file in the guest and run
+        with `-File`, which has no such limit.
+        """
+        line = self.encoded_line(script)
+        if len(line) <= MAX_COMMAND_LINE:
+            return self._run(vm, line, timeout=timeout)
+        return self._run_uploaded(vm, script, timeout=timeout)
+
+    def _run_uploaded(
+        self, vm: str, script: str, *, timeout: float
+    ) -> tuple[str, str, int]:
+        remote = f"{GUEST_SCRIPT_DIRECTORY}\\exec-{uuid.uuid4().hex}.ps1"
+        client = self._client(vm)
+        sftp = client.open_sftp()
+        try:
+            # Windows PowerShell 5.1 only reads a script as UTF-8 when it starts
+            # with a BOM; without one it falls back to the ANSI code page.
+            with sftp.open(_sftp_path(remote), "wb") as handle:
+                handle.write(codecs.BOM_UTF8 + script.encode("utf-8"))
+        finally:
+            sftp.close()
+        try:
+            return self._run(
+                vm,
+                "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass "
+                f"-File {ps_quote(remote)}",
+                timeout=timeout,
+            )
+        finally:
+            try:
+                cleanup = client.open_sftp()
+                try:
+                    cleanup.remove(_sftp_path(remote))
+                finally:
+                    cleanup.close()
+            except Exception:
+                # A leftover script is harmless; losing the real result is not.
+                pass
+
     # -- GuestTransport -----------------------------------------------------
 
     def exec(self, vm: str, command: str, *, timeout: float, max_output: int) -> ExecResult:
@@ -276,10 +334,7 @@ class SshTransport:
             payload=base64.b64encode(command.encode("utf-8")).decode("ascii"),
             marker=EXEC_MARKER,
         )
-        output, error, status = self._run(
-            vm, f"powershell -NoProfile -NonInteractive -EncodedCommand {_encoded_command(script)}",
-            timeout=timeout,
-        )
+        output, error, status = self._run_script(vm, script, timeout=timeout)
         payload = None
         for line in output.splitlines():
             if line.startswith(EXEC_MARKER):
@@ -315,9 +370,8 @@ class SshTransport:
         # The guest's sshd shell is powershell.exe, so a plain `-Command` string
         # is parsed twice and `$os` is expanded by the outer shell before the
         # inner one sees it. Encoding the command keeps it intact.
-        output, error, status = self._run(
-            vm, f"powershell -NoProfile -NonInteractive -EncodedCommand {_encoded_command(command)}",
-            timeout=HEALTH_TIMEOUT_SECONDS,
+        output, error, status = self._run_script(
+            vm, command, timeout=HEALTH_TIMEOUT_SECONDS
         )
         if status != 0:
             raise BackendError(
@@ -343,12 +397,16 @@ class SshTransport:
         if operation not in GUEST_OPERATIONS:
             raise ValidationError(f"{operation!r} is not a guest operation.")
         request = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
-        command = (
-            f"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass "
-            f"-File {ps_quote(GUEST_SCRIPT)} -Operation {ps_quote(operation)} "
+        # A large payload (a file being written, for instance) makes this line
+        # far longer than Windows allows, so it goes through the same runner as
+        # every other script rather than straight onto the command line.
+        script = (
+            f"& {ps_quote(GUEST_SCRIPT)} -Operation {ps_quote(operation)} "
             f"-Request {ps_quote(request)}"
         )
-        output, error, status = self._run(vm, command, timeout=self.settings.timeout_seconds)
+        output, error, status = self._run_script(
+            vm, script, timeout=self.settings.timeout_seconds
+        )
         for line in output.splitlines():
             if line.startswith(JSON_MARKER):
                 result = json.loads(base64.b64decode(line[len(JSON_MARKER):]).decode("utf-8"))
@@ -382,9 +440,8 @@ class SshTransport:
             "'HVMCP_HASH:not_found' } else { 'HVMCP_HASH:' + "
             f"(Get-FileHash -LiteralPath {ps_quote(remote)} -Algorithm SHA256).Hash.ToLowerInvariant() }}"
         )
-        output, _, _ = self._run(
-            vm, f"powershell -NoProfile -NonInteractive -EncodedCommand {_encoded_command(command)}",
-            timeout=self.settings.timeout_seconds,
+        output, _, _ = self._run_script(
+            vm, command, timeout=self.settings.timeout_seconds
         )
         for line in output.splitlines():
             if line.startswith("HVMCP_HASH:"):
