@@ -13,6 +13,8 @@ $InformationPreference = 'SilentlyContinue'
 
 # Background Hyper-V jobs (graceful shutdown / save) survive across requests in this worker.
 $script:PowerOperations = @{}
+# One reused New-PSSession per VM; a broken session or a rebooted guest forces a new one.
+$script:GuestSessions = @{}
 
 function Write-Response {
     param([Parameter(Mandatory)][hashtable]$Response)
@@ -186,6 +188,49 @@ function Convert-ToBase64Text {
     return [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Text))
 }
 
+function Get-VmUptime {
+    # A guest reboot resets the host-side uptime, which makes it a cheap boot identity.
+    param([Parameter(Mandatory)]$Vm)
+    $property = $Vm.PSObject.Properties['Uptime']
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+function Disconnect-GuestSession {
+    param([Parameter(Mandatory)][string]$VmName)
+    $entry = $script:GuestSessions[$VmName]
+    if ($null -eq $entry) { return }
+    $script:GuestSessions.Remove($VmName)
+    try {
+        Remove-PSSession -Session $entry.session -ErrorAction Stop
+    } catch {
+        # A session that already died needs no cleanup of its own.
+        Write-Verbose "Ignoring guest session cleanup failure: $($_.Exception.Message)"
+    }
+}
+
+function Get-GuestSession {
+    param([Parameter(Mandatory)]$Vm, [Parameter(Mandatory)]$Request)
+    $name = [string]$Vm.Name
+    $entry = $script:GuestSessions[$name]
+    if ($null -ne $entry) {
+        $uptime = Get-VmUptime -Vm $Vm
+        $rebooted = $false
+        if ($null -ne $uptime -and $null -ne $entry.uptime) {
+            $rebooted = ([TimeSpan]$uptime) -lt ([TimeSpan]$entry.uptime)
+        }
+        if ([string]$entry.session.State -eq 'Opened' -and -not $rebooted) { return $entry.session }
+        Disconnect-GuestSession -VmName $name
+    }
+    $credential = ConvertTo-GuestCredential -Request $Request
+    $session = New-PSSession -VMName $name -Credential $credential -ErrorAction Stop
+    $script:GuestSessions[$name] = [pscustomobject]@{
+        session = $session
+        uptime = Get-VmUptime -Vm $Vm
+    }
+    return $session
+}
+
 function Invoke-GuestQuery {
     param(
         [Parameter(Mandatory)]$Vm,
@@ -193,9 +238,54 @@ function Invoke-GuestQuery {
         [Parameter(Mandatory)][scriptblock]$Query,
         [Alias('ArgumentList')][object[]]$Arguments = @()
     )
-    $credential = ConvertTo-GuestCredential -Request $Request
-    return Invoke-Command -VMName $Vm.Name -Credential $credential -ArgumentList $Arguments -ScriptBlock $Query |
-        Select-Object -Property * -ExcludeProperty PSComputerName, RunspaceId, PSShowComputerName
+    $session = Get-GuestSession -Vm $Vm -Request $Request
+    try {
+        return Invoke-Command -Session $session -ArgumentList $Arguments -ScriptBlock $Query |
+            Select-Object -Property * -ExcludeProperty PSComputerName, RunspaceId, PSShowComputerName
+    } catch {
+        # A runspace that died between requests must not poison the cache.
+        if ([string]$session.State -ne 'Opened') { Disconnect-GuestSession -VmName ([string]$Vm.Name) }
+        throw
+    }
+}
+
+function Get-HostFileSha256 {
+    param([Parameter(Mandatory)][string]$Path)
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [IO.File]::OpenRead($Path)
+        try { $hash = $algorithm.ComputeHash($stream) } finally { $stream.Dispose() }
+    } finally { $algorithm.Dispose() }
+    return ([BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant()
+}
+
+# Runs inside the guest; absence is returned as data because remoting drops types.
+$script:GuestFileState = {
+    param($Path)
+    $info = [IO.FileInfo]::new($Path)
+    if (-not $info.Exists) { return [pscustomobject]@{ status = 'not_found'; path = $Path } }
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = $info.OpenRead()
+        try { $hash = $algorithm.ComputeHash($stream) } finally { $stream.Dispose() }
+    } finally { $algorithm.Dispose() }
+    [pscustomobject]@{
+        status = 'ok'
+        path = $info.FullName
+        size = [Int64]$info.Length
+        sha256 = ([BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant()
+    }
+}
+
+# Runs inside the guest before an upload: creates the parent and reports whether
+# the destination is already there, so the host can refuse to overwrite it.
+$script:EnsureGuestParent = {
+    param($Path)
+    $parent = [IO.Path]::GetDirectoryName($Path)
+    if ($parent -and -not [IO.Directory]::Exists($parent)) {
+        [void][IO.Directory]::CreateDirectory($parent)
+    }
+    return [IO.File]::Exists($Path)
 }
 
 function Invoke-BackgroundVmPower {
@@ -531,6 +621,75 @@ function Invoke-BridgeOperation {
                 )
             }
             $result = @{ vm = $vm.Name; file = $guestResult }
+        }
+        'guest_put_file' {
+            $vm = Get-ExactVm -Name $request.vm
+            $localPath = [string]$request.local_path
+            $remotePath = [string]$request.guest_path
+            $overwrite = [bool]$request.overwrite
+            if (-not [IO.Path]::IsPathRooted($localPath)) { throw 'The host path must be absolute.' }
+            if (-not [IO.Path]::IsPathRooted($remotePath)) { throw 'The guest path must be absolute.' }
+            $source = [IO.FileInfo]::new($localPath)
+            if (-not $source.Exists) {
+                throw [IO.FileNotFoundException]::new("Host file not found: $localPath", $localPath)
+            }
+            $session = Get-GuestSession -Vm $vm -Request $request
+            $destinationExists = Invoke-Command -Session $session -ArgumentList @($remotePath) `
+                -ScriptBlock $script:EnsureGuestParent
+            if ($destinationExists -and -not $overwrite) {
+                throw [IO.IOException]::new("The guest file already exists: $remotePath")
+            }
+            Copy-Item -LiteralPath $localPath -Destination $remotePath -ToSession $session -Force
+            $guestFile = Invoke-Command -Session $session -ArgumentList @($remotePath) `
+                -ScriptBlock $script:GuestFileState
+            if ($guestFile.status -eq 'not_found') {
+                throw [IO.FileNotFoundException]::new("Guest file not found: $remotePath", $remotePath)
+            }
+            $hostDigest = Get-HostFileSha256 -Path $localPath
+            if ([string]$guestFile.sha256 -ne $hostDigest) {
+                throw "The guest reported a different SHA-256 than the host sent for $remotePath."
+            }
+            $result = @{ vm = $vm.Name; file = $guestFile }
+        }
+        'guest_get_file' {
+            $vm = Get-ExactVm -Name $request.vm
+            $remotePath = [string]$request.guest_path
+            $localPath = [string]$request.local_path
+            $overwrite = [bool]$request.overwrite
+            if (-not [IO.Path]::IsPathRooted($localPath)) { throw 'The host path must be absolute.' }
+            if (-not [IO.Path]::IsPathRooted($remotePath)) { throw 'The guest path must be absolute.' }
+            $session = Get-GuestSession -Vm $vm -Request $request
+            $guestFile = Invoke-Command -Session $session -ArgumentList @($remotePath) `
+                -ScriptBlock $script:GuestFileState
+            if ($guestFile.status -eq 'not_found') {
+                throw [IO.FileNotFoundException]::new("Guest file not found: $remotePath", $remotePath)
+            }
+            $parent = [IO.Path]::GetDirectoryName($localPath)
+            if ($parent -and -not [IO.Directory]::Exists($parent)) {
+                [void][IO.Directory]::CreateDirectory($parent)
+            }
+            # Download beside the target and rename, so a failed copy never leaves a
+            # truncated file where the caller expects a complete one.
+            $temporary = "$localPath.part"
+            if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+            try {
+                Copy-Item -FromSession $session -LiteralPath $remotePath -Destination $temporary -Force
+                $hostDigest = Get-HostFileSha256 -Path $temporary
+                if ($hostDigest -ne [string]$guestFile.sha256) {
+                    throw "The copied file failed its SHA-256 check for $remotePath."
+                }
+                Move-Item -LiteralPath $temporary -Destination $localPath -Force
+            } catch {
+                if ([IO.File]::Exists($temporary)) {
+                    try { [IO.File]::Delete($temporary) } catch {
+                        Write-Verbose "Could not remove the partial download: $($_.Exception.Message)"
+                    }
+                }
+                throw
+            }
+            $result = @{ vm = $vm.Name; file = @{
+                path = $localPath; size = [Int64]$guestFile.size; sha256 = $hostDigest
+            } }
         }
         'guest_read_file' {
             $vm = Get-ExactVm -Name $request.vm
@@ -1121,6 +1280,7 @@ if ($Server) {
         Write-Response -Response $response
         [Console]::Out.Flush()
     }
+    foreach ($name in @($script:GuestSessions.Keys)) { Disconnect-GuestSession -VmName $name }
     exit 0
 }
 

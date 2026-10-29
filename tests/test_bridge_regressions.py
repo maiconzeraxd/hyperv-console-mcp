@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import shutil
 import sys
 from pathlib import Path
@@ -22,10 +23,14 @@ function Get-VM {
     param($Name)
     [pscustomobject]@{ Name = 'NORTH-Test'; State = 'Running'; Generation = 2 }
 }
+# Guest access reuses one PSSession per VM, so the mocks model that session.
+function New-PSSession { param($VMName, $Credential) [pscustomobject]@{ State = 'Opened'; Id = 1 } }
+function Remove-PSSession { param($Session, $ErrorAction) }
 """
 LOCAL_REMOTING = """
 function Invoke-Command {
-    param($VMName, $Credential, $ArgumentList, $ScriptBlock)
+    param($Session, $ArgumentList, $ScriptBlock)
+    if ([string]$Session.State -ne 'Opened') { throw 'The remote session is not open.' }
     & $ScriptBlock @ArgumentList
 }
 """
@@ -166,7 +171,7 @@ function Get-VM { param($Name) throw [System.UnauthorizedAccessException]::new('
 # which failed parameter binding before the guest scriptblock ever ran.
 BINDING_PROBE = """
 function Invoke-Command {
-    param($VMName, $Credential, $ArgumentList, $ScriptBlock)
+    param($Session, $ArgumentList, $ScriptBlock)
     $names = @($ScriptBlock.Ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
     [pscustomobject]@{
         bound = $true
@@ -266,7 +271,7 @@ def test_guest_exec_keeps_native_stderr_from_failing_a_successful_command(
 # original exception, so the host has to unwrap it to keep not_found distinct.
 REMOTED_FAILURE = """
 function Invoke-Command {
-    param($VMName, $Credential, $ArgumentList, $ScriptBlock)
+    param($Session, $ArgumentList, $ScriptBlock)
     try { & $ScriptBlock @ArgumentList }
     catch { throw [System.Management.Automation.RuntimeException]::new($_.Exception.Message, $_.Exception) }
 }
@@ -304,10 +309,153 @@ def test_guest_file_info_reports_absence_as_not_found(tmp_path: Path) -> None:
     assert error.value.code == "not_found"
 
 
+# Copy-Item has no session to talk to in these tests, so it degrades to a local copy.
+SESSION_COPY = LOCAL_REMOTING + """
+function Copy-Item {
+    param($LiteralPath, $Destination, $ToSession, $FromSession, [switch]$Force)
+    Microsoft.PowerShell.Management\\Copy-Item -LiteralPath $LiteralPath -Destination $Destination -Force
+}
+"""
+
+
+def test_guest_put_file_copies_a_host_path_and_verifies_the_guest_digest(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "driver.sys"
+    source.write_bytes(b"MZ" + bytes(range(64)))
+    target = tmp_path / "guest" / "driver.sys"
+    result = invoke_with_mocks(
+        tmp_path, SESSION_COPY, "guest_put_file",
+        {
+            **GUEST_PAYLOAD, "local_path": str(source),
+            "guest_path": str(target), "overwrite": False,
+        },
+    )
+    assert target.read_bytes() == source.read_bytes()
+    assert result["file"]["size"] == 66
+    assert result["file"]["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+def test_guest_put_file_refuses_to_replace_an_existing_guest_file(tmp_path: Path) -> None:
+    source = tmp_path / "host" / "driver.sys"
+    source.parent.mkdir()
+    source.write_bytes(b"new")
+    target = tmp_path / "guest" / "driver.sys"
+    target.parent.mkdir()
+    target.write_bytes(b"previous")
+    with pytest.raises(BackendError, match="already exists"):
+        invoke_with_mocks(
+            tmp_path, SESSION_COPY, "guest_put_file",
+            {
+                **GUEST_PAYLOAD, "local_path": str(source),
+                "guest_path": str(target), "overwrite": False,
+            },
+        )
+    assert target.read_bytes() == b"previous"
+
+
+def test_guest_put_file_rejects_a_guest_that_received_different_bytes(tmp_path: Path) -> None:
+    source = tmp_path / "host" / "driver.sys"
+    source.parent.mkdir()
+    source.write_bytes(b"MZ")
+    target = tmp_path / "guest" / "driver.sys"
+    tampered = SESSION_COPY + """
+function Copy-Item {
+    param($LiteralPath, $Destination, $ToSession, $FromSession, [switch]$Force)
+    [IO.File]::WriteAllText($Destination, 'tampered')
+}
+"""
+    with pytest.raises(BackendError, match="different SHA-256"):
+        invoke_with_mocks(
+            tmp_path, tampered, "guest_put_file",
+            {
+                **GUEST_PAYLOAD, "local_path": str(source),
+                "guest_path": str(target), "overwrite": True,
+            },
+        )
+
+
+def test_guest_get_file_leaves_no_partial_download_behind(tmp_path: Path) -> None:
+    guest_file = tmp_path / "guest" / "dump.bin"
+    guest_file.parent.mkdir()
+    guest_file.write_bytes(b"A" * 32)
+    target = tmp_path / "host" / "dump.bin"
+    failing = SESSION_COPY + """
+function Copy-Item {
+    param($LiteralPath, $Destination, $ToSession, $FromSession, [switch]$Force)
+    [IO.File]::WriteAllText($Destination, 'short')
+    throw 'The transfer was interrupted.'
+}
+"""
+    with pytest.raises(BackendError, match="interrupted"):
+        invoke_with_mocks(
+            tmp_path, failing, "guest_get_file",
+            {**GUEST_PAYLOAD, "guest_path": str(guest_file), "local_path": str(target),
+             "overwrite": True},
+        )
+    assert not target.exists()
+    assert not target.with_name("dump.bin.part").exists()
+
+
+def test_guest_get_file_downloads_and_verifies_the_copy(tmp_path: Path) -> None:
+    guest_file = tmp_path / "guest" / "dump.bin"
+    guest_file.parent.mkdir()
+    guest_file.write_bytes(b"B" * 48)
+    target = tmp_path / "host" / "dump.bin"
+    result = invoke_with_mocks(
+        tmp_path, SESSION_COPY, "guest_get_file",
+        {**GUEST_PAYLOAD, "guest_path": str(guest_file), "local_path": str(target),
+         "overwrite": True},
+    )
+    assert target.read_bytes() == b"B" * 48
+    assert result["file"]["sha256"] == hashlib.sha256(b"B" * 48).hexdigest()
+
+
+SESSION_REUSE = LOCAL_REMOTING + """
+$global:SessionLog = '{log}'
+$global:GetVmCalls = 0
+function New-PSSession {
+    param($VMName, $Credential)
+    Add-Content -LiteralPath $global:SessionLog -Value 'new'
+    [pscustomobject]@{ State = 'Opened'; Id = 1 }
+}
+function Get-VM {
+    param($Name)
+    $global:GetVmCalls++
+    # The third request reports a lower uptime, which means the guest rebooted.
+    $uptime = if ($global:GetVmCalls -le 2) { [TimeSpan]::FromMinutes(30) } else { [TimeSpan]::FromMinutes(2) }
+    [pscustomobject]@{
+        Name = 'NORTH-Test'; State = 'Running'; Generation = 2; Uptime = $uptime
+    }
+}
+"""
+
+
+def test_one_session_is_reused_until_the_guest_reboots(tmp_path: Path) -> None:
+    log = tmp_path / "sessions.log"
+    escaped = str(log).replace("'", "''")
+    mocks = SESSION_REUSE.replace("{log}", escaped)
+    escaped_bridge = str(BRIDGE).replace("'", "''")
+    wrapper = tmp_path / "MockBridge.ps1"
+    wrapper.write_text(
+        f"param([switch]$Server)\n{BASE_MOCKS}\n{mocks}\n& '{escaped_bridge}' -Server\n",
+        encoding="utf-8",
+    )
+    backend = PowerShellBackend(wrapper)
+    try:
+        for _ in range(3):
+            backend.invoke("guest_exec", {**GUEST_PAYLOAD, "command": "hostname"})
+    finally:
+        backend.close()
+    # Two requests share the first session; the rebooted third one starts over.
+    assert log.read_text(encoding="utf-8").split() == ["new", "new"]
+
+
+
 def test_a_generic_guest_failure_is_not_mistaken_for_a_missing_file(tmp_path: Path) -> None:
     mocks = """
 function Invoke-Command {
-    param($VMName, $Credential, $ArgumentList, $ScriptBlock)
+    param($Session, $ArgumentList, $ScriptBlock)
     throw 'The guest is unreachable.'
 }
 """

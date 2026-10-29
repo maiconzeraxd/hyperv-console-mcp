@@ -2,17 +2,11 @@
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
 from ..errors import PolicyError, ValidationError
-from .base import MAX_INLINE_BYTES, ExecResult, FileResult
-
-CHUNK_BYTES = 4 * 1024 * 1024
+from .base import ExecResult, FileResult
 
 # Structured guest operations that run the same guest-side PowerShell over any
 # transport; the transport only decides how the request reaches the guest.
@@ -80,64 +74,34 @@ class PowerShellDirectTransport:
         return self._invoke(operation, request)
 
     def put_file(self, vm: str, local: Path, remote: str, *, overwrite: bool) -> FileResult:
-        data = Path(local).read_bytes()
-        if len(data) > MAX_INLINE_BYTES:
-            raise ValidationError(
-                f"{Path(local).name} is larger than the {MAX_INLINE_BYTES} byte inline limit."
-            )
+        """Copy over the persistent session; the guest re-hashes what it received."""
+        source = Path(local)
+        if not source.is_file():
+            raise ValidationError(f"{source} is not a file.")
         payload = self._credentials(vm)
-        payload.update(
-            path=remote,
-            content_base64=base64.b64encode(data).decode("ascii"),
-            overwrite=overwrite,
-            create_parent=True,
-        )
-        written = self._invoke("guest_write_file", payload)["file"]
-        digest = hashlib.sha256(data).hexdigest()
-        if str(written.get("sha256", "")).casefold() != digest:
-            raise ValidationError("The guest reported a different SHA-256 than the host wrote.")
+        payload.update(local_path=str(source), guest_path=remote, overwrite=overwrite)
+        written = self._invoke("guest_put_file", payload)["file"]
         return FileResult(
-            path=remote, size=len(data), sha256=digest, transport=self.name,
-            bytes_transferred=len(data),
+            path=str(written.get("path") or remote),
+            size=int(written["size"]),
+            sha256=str(written["sha256"]),
+            transport=self.name,
+            bytes_transferred=source.stat().st_size,
         )
 
     def get_file(self, vm: str, remote: str, local: Path) -> FileResult:
-        info = self.file_info(vm, remote)
-        size = int(info["size"])
+        """Download over the persistent session into a host path, then verify."""
         target = Path(local)
         target.parent.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha256()
-        handle, temporary = tempfile.mkstemp(
-            prefix=target.name + ".", suffix=".part", dir=str(target.parent)
-        )
-        transferred = 0
-        try:
-            with os.fdopen(handle, "wb") as stream:
-                while transferred < size:
-                    count = min(CHUNK_BYTES, size - transferred)
-                    payload = self._credentials(vm)
-                    payload.update(path=remote, offset=transferred, count=count)
-                    chunk = self._invoke("guest_read_chunk", payload)["chunk"]
-                    data = base64.b64decode(chunk["content_base64"], validate=True)
-                    if len(data) != count:
-                        raise ValidationError("The guest returned a short chunk.")
-                    if hashlib.sha256(data).hexdigest() != str(chunk["sha256"]).casefold():
-                        raise ValidationError("A guest chunk failed its SHA-256 check.")
-                    stream.write(data)
-                    digest.update(data)
-                    transferred += count
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, target)
-        except BaseException:
-            try:
-                os.unlink(temporary)
-            except OSError:
-                pass
-            raise
+        payload = self._credentials(vm)
+        payload.update(guest_path=remote, local_path=str(target), overwrite=True)
+        fetched = self._invoke("guest_get_file", payload)["file"]
         return FileResult(
-            path=remote, size=size, sha256=digest.hexdigest(), transport=self.name,
-            bytes_transferred=transferred,
+            path=str(fetched.get("path") or target),
+            size=int(fetched["size"]),
+            sha256=str(fetched["sha256"]),
+            transport=self.name,
+            bytes_transferred=int(fetched["size"]),
         )
 
     def close(self, vm: str | None = None) -> None:

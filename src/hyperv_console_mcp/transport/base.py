@@ -6,10 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-# The bridge sends file content inline as base64 inside one JSON request, so a
-# single write is limited to the service's 8 MiB cap.
-MAX_INLINE_BYTES = 8 * 1024 * 1024
-
 
 @dataclass(frozen=True, slots=True)
 class ExecResult:

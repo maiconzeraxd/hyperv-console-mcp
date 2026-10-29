@@ -21,7 +21,6 @@ class FakeBackend:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.files: dict[str, bytes] = {}
-        self.corrupt_chunks = False
 
     def invoke(self, operation: str, payload: dict[str, Any], *, timeout=None):
         self.calls.append((operation, dict(payload)))
@@ -37,16 +36,21 @@ class FakeBackend:
             return {"vm": payload["vm"], "file": {
                 "path": payload["path"], "size": len(data), "status": "ok",
             }}
-        if operation == "guest_read_chunk":
-            data = self.files[payload["path"]]
-            start = int(payload["offset"])
-            chunk = data[start:start + int(payload["count"])]
-            digest = hashlib.sha256(chunk).hexdigest()
-            if self.corrupt_chunks:
-                # Same length, different bytes: only the digest can catch this.
-                chunk = bytes(len(chunk))
-            return {"vm": payload["vm"], "chunk": {
-                "content_base64": base64.b64encode(chunk).decode("ascii"),
+        if operation == "guest_put_file":
+            content = Path(payload["local_path"]).read_bytes()
+            self.files[payload["guest_path"]] = content
+            digest = hashlib.sha256(content).hexdigest()
+            return {"vm": payload["vm"], "file": {
+                "path": payload["guest_path"], "size": len(content),
+                "sha256": digest,
+            }}
+        if operation == "guest_get_file":
+            content = self.files[payload["guest_path"]]
+            target = Path(payload["local_path"])
+            target.write_bytes(content)
+            digest = hashlib.sha256(content).hexdigest()
+            return {"vm": payload["vm"], "file": {
+                "path": str(target), "size": len(content),
                 "sha256": digest,
             }}
         if operation == "guest_write_file":
@@ -121,7 +125,7 @@ def test_exec_without_credentials_fails_before_reaching_the_guest(backend: FakeB
     assert backend.calls == []
 
 
-def test_put_file_verifies_the_digest_the_guest_reported(
+def test_put_file_sends_a_host_path_over_the_session_and_returns_the_guest_digest(
     transport: PowerShellDirectTransport, backend: FakeBackend, tmp_path: Path
 ) -> None:
     source = tmp_path / "driver.sys"
@@ -130,63 +134,37 @@ def test_put_file_verifies_the_digest_the_guest_reported(
     assert result.size == 258
     assert result.sha256 == hashlib.sha256(source.read_bytes()).hexdigest()
     assert result.transport == "psdirect"
-    assert backend.calls[-1][1]["overwrite"] is True
+    operation, payload = backend.calls[-1]
+    assert operation == "guest_put_file"
+    assert payload["local_path"] == str(source)
+    assert payload["guest_path"] == r"C:\DriverLab\driver.sys"
+    assert payload["overwrite"] is True
+    assert "content_base64" not in payload
 
 
-def test_put_file_rejects_a_guest_digest_mismatch(
+def test_put_file_rejects_a_missing_host_file(
     transport: PowerShellDirectTransport, backend: FakeBackend, tmp_path: Path
 ) -> None:
-    source = tmp_path / "driver.sys"
-    source.write_bytes(b"MZ")
-    original = backend.invoke
-
-    def lying(operation: str, payload: dict[str, Any], *, timeout=None):
-        result = original(operation, payload, timeout=timeout)
-        if operation == "guest_write_file":
-            result["file"]["sha256"] = "0" * 64
-        return result
-
-    backend.invoke = lying  # type: ignore[method-assign]
-    with pytest.raises(ValidationError, match="different SHA-256"):
-        transport.put_file("NORTH-Test", source, r"C:\DriverLab\driver.sys", overwrite=False)
-
-
-def test_put_file_refuses_a_file_over_the_inline_limit(
-    transport: PowerShellDirectTransport, backend: FakeBackend, tmp_path: Path, monkeypatch
-) -> None:
-    monkeypatch.setattr("hyperv_console_mcp.transport.psdirect.MAX_INLINE_BYTES", 4)
-    source = tmp_path / "big.sys"
-    source.write_bytes(b"12345")
-    with pytest.raises(ValidationError, match="inline limit"):
-        transport.put_file("NORTH-Test", source, r"C:\DriverLab\big.sys", overwrite=False)
+    with pytest.raises(ValidationError, match="is not a file"):
+        transport.put_file(
+            "NORTH-Test", tmp_path / "absent.sys", r"C:\DriverLab\absent.sys", overwrite=False
+        )
     assert backend.calls == []
 
 
-def test_get_file_streams_chunks_and_replaces_the_target_atomically(
-    transport: PowerShellDirectTransport, backend: FakeBackend, tmp_path: Path, monkeypatch
+def test_get_file_downloads_to_the_target_and_reports_the_verified_digest(
+    transport: PowerShellDirectTransport, backend: FakeBackend, tmp_path: Path
 ) -> None:
     payload = bytes(range(256)) * 40
     backend.files[r"C:\DriverLab\dump.bin"] = payload
-    monkeypatch.setattr("hyperv_console_mcp.transport.psdirect.CHUNK_BYTES", 1000)
-    target = tmp_path / "dump.bin"
+    target = tmp_path / "nested" / "dump.bin"
     result = transport.get_file("NORTH-Test", r"C:\DriverLab\dump.bin", target)
     assert target.read_bytes() == payload
     assert result.size == len(payload)
     assert result.sha256 == hashlib.sha256(payload).hexdigest()
-    assert result.bytes_transferred == len(payload)
-    assert not list(tmp_path.glob("*.part"))
-
-
-def test_a_corrupt_chunk_leaves_no_partial_file(
-    transport: PowerShellDirectTransport, backend: FakeBackend, tmp_path: Path
-) -> None:
-    backend.files[r"C:\DriverLab\dump.bin"] = b"A" * 64
-    backend.corrupt_chunks = True
-    target = tmp_path / "dump.bin"
-    with pytest.raises(ValidationError, match="failed its SHA-256 check"):
-        transport.get_file("NORTH-Test", r"C:\DriverLab\dump.bin", target)
-    assert not target.exists()
-    assert not list(tmp_path.glob("*.part"))
+    assert result.transport == "psdirect"
+    assert backend.calls[-1][0] == "guest_get_file"
+    assert backend.calls[-1][1]["local_path"] == str(target)
 
 
 def test_every_guest_tool_result_names_its_transport(backend: FakeBackend, tmp_path: Path) -> None:

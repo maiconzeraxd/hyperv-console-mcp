@@ -83,7 +83,7 @@ The lab workflow initializes fixed guest directories, stages hash-verified packa
 
 ## Performance and debugging
 
-The server reuses one local PowerShell worker. The fake-worker benchmark measures startup and warm requests without Hyper-V; it is not presented as a live VM benchmark. PowerShell Direct remains the default for isolated guests. Optional SSH is appropriate only for frequent guest administration on an intentionally configured isolated network.
+The server reuses one local PowerShell worker and, inside it, one PowerShell Direct session per VM, so a guest request does not pay for a new remoting connection. File copies go over that session with `Copy-Item -ToSession`/`-FromSession` and are SHA-256 verified on both sides. The fake-worker benchmark measures startup and warm requests without Hyper-V; it is not presented as a live VM benchmark. PowerShell Direct remains the default for isolated guests. Optional SSH is appropriate only for frequent guest administration on an intentionally configured isolated network.
 
 For kernel work, choose **KDNET** after reviewing a suitable network path, or **COM1/named pipe** to preserve a no-network VM. Guest BCD and host COM1 preparation are separate, explicitly confirmed operations. Neither stops nor reboots the VM automatically.
 
