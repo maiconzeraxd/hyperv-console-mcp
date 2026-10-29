@@ -23,6 +23,18 @@ from hyperv_console_mcp.service import HyperVService
 windows_paths = pytest.mark.skipif(os.name != "nt", reason="Windows path semantics")
 
 
+@pytest.fixture(autouse=True)
+def empty_vault(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The suite must not depend on what this machine's Credential Manager holds.
+
+    An operator who provisioned `HyperVConsoleMCP/<vm>` for real would otherwise
+    turn the "no credentials" assertions green into red, and vice versa.
+    """
+    monkeypatch.setattr(
+        "hyperv_console_mcp.credentials._read", lambda target: None, raising=False
+    )
+
+
 class FakeBackend:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []

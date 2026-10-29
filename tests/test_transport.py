@@ -15,6 +15,15 @@ from hyperv_console_mcp.transport.base import GuestTransport
 from hyperv_console_mcp.transport.psdirect import PowerShellDirectTransport
 
 
+@pytest.fixture(autouse=True)
+def empty_vault(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The suite must not depend on what this machine's Credential Manager holds."""
+    monkeypatch.setattr(
+        "hyperv_console_mcp.credentials._read", lambda target: None, raising=False
+    )
+
+
+
 class FakeBackend:
     """Mirrors the bridge envelopes the transport consumes."""
 
