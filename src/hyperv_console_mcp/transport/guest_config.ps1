@@ -247,23 +247,45 @@ function Remove-RegistryValue {
 # -- boot configuration (BCD) ---------------------------------------------
 # Test signing and kernel debugging are boot entries, not registry values, so
 # they are read and written through bcdedit and recorded separately.
+#
+# bcdedit translates the labels around each entry but not the entries
+# themselves: the element name and the value are fixed tokens. A pt-BR guest
+# prints the same "testsigning             Yes" an English one does. The reader
+# used to compare that token against 'on', which bcdedit never prints, so test
+# signing and kernel debugging read back as off on every guest, in every
+# language, even when both were on. The token is normalised to on/off here, and
+# 'on'/'off' is also what bcdedit accepts as input on a localized guest
+# (verified against pt-BR: it takes on/off and rejects Sim).
+$bcdBooleanTokens = @{
+    'yes' = 'on'; 'no' = 'off'
+    'on' = 'on'; 'off' = 'off'
+    'true' = 'on'; 'false' = 'off'
+}
 
+function ConvertFrom-BcdEnum {
+    param([string]$Text, [string]$Name)
+    $match = [regex]::Match($Text, "(?m)^\s*$([regex]::Escape($Name))\s+(\S+)")
+    if (-not $match.Success) {
+        return @{ existed = $false; value = $null }
+    }
+    $token = $match.Groups[1].Value
+    $normalized = $bcdBooleanTokens[$token.ToLowerInvariant()]
+    if (-not $normalized) { $normalized = $token }
+    return @{ existed = $true; value = $normalized }
+}
 
 function Read-BcdValue {
     param([string]$Name)
     $text = (& bcdedit.exe /enum '{current}' 2>&1) -join "`n"
     if ($LASTEXITCODE -ne 0) { throw "bcdedit /enum failed: $text" }
-    $match = [regex]::Match($text, "(?m)^\s*$([regex]::Escape($Name))\s+(\S+)")
-    if (-not $match.Success) {
-        return @{ existed = $false; value = $null }
-    }
-    return @{ existed = $true; value = $match.Groups[1].Value }
+    return ConvertFrom-BcdEnum -Text $text -Name $Name
 }
 
 function Set-BcdValue {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param([string]$Name, [string]$Value)
     if (-not $PSCmdlet.ShouldProcess("bcdedit $Name", "Set it to $Value")) { return }
+    # 'on'/'off' is the value bcdedit accepts here, in any display language.
     $output = (& bcdedit.exe /set '{current}' $Name $Value 2>&1) -join ' '
     if ($LASTEXITCODE -ne 0) {
         throw "bcdedit /set $Name $Value failed: $output"

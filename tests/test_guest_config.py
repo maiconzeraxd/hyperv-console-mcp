@@ -306,6 +306,35 @@ def test_a_recorded_state_can_be_read_and_extended_again(tmp_path: Path) -> None
 
 
 @WINDOWS_POWERSHELL_ONLY
+def test_bcd_values_are_read_from_tokens_that_are_never_translated(tmp_path: Path) -> None:
+    """Regression: the reader compared the value against 'on', which bcdedit never prints.
+
+    bcdedit translates the labels around each boot entry, not the entries: a
+    pt-BR guest prints the same ``testsigning             Yes`` an English one
+    does. Comparing that token against 'on' was false on every guest, so Status
+    reported test signing and kernel debugging as off while both were on, and
+    Revert wrote "Yes" back as if it were a value bcdedit understands.
+    """
+    fixture = Path(__file__).with_name("fixtures") / "bcd-current-pt-br.txt"
+
+    payload = run_guest_probe(tmp_path, [
+        f"$text = Get-Content -LiteralPath '{fixture}' -Raw -Encoding UTF8",
+        "$r = @{}",
+        "foreach ($n in @('testsigning', 'debug', 'nx', 'bootux')) {",
+        "    $r[$n] = ConvertFrom-BcdEnum -Text $text -Name $n",
+        "}",
+        "$r | ConvertTo-Json -Depth 4 -Compress",
+    ])
+
+    assert payload["testsigning"] == {"existed": True, "value": "on"}
+    assert payload["debug"] == {"existed": True, "value": "on"}
+    # A value that is not a boolean is passed through untouched.
+    assert payload["nx"] == {"existed": True, "value": "OptIn"}
+    # An entry bcdedit does not list is absent, not off.
+    assert payload["bootux"] == {"existed": False, "value": None}
+
+
+@WINDOWS_POWERSHELL_ONLY
 def test_the_power_values_are_read_without_parsing_localized_output(tmp_path: Path) -> None:
     """powercfg prints its labels in the display language.
 
