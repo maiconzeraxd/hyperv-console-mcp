@@ -19,6 +19,7 @@ from .config import Settings
 from .errors import HyperVError
 from .events import EVENTS, EventLogReader, EventSink
 from .hostwmi import create_backend
+from .hostwmi.serial import suggested_pipe_name
 from .ipc import ApprovalBroker
 from .lab.cli import diagnostics, initialize
 from .lab.transfer import DriverLabTransfer, build_manifest
@@ -65,6 +66,103 @@ def _format_summary(summary: Any) -> str:
         "",
         json.dumps(rest, ensure_ascii=False, indent=2, sort_keys=True),
     ])
+
+
+def initial_vm_name(
+    requested: str | None, allowed: frozenset[str], discovered: list[str]
+) -> str | None:
+    """The VM to open without asking, or ``None`` when the operator must choose.
+
+    An explicit ``--vm`` wins. Otherwise the candidates are what Hyper-V
+    reports, narrowed by the allowlist when one is configured — so a host with
+    a single VM opens it with no configuration at all, while a host with two
+    asks rather than guessing which one the operator meant.
+    """
+    if requested:
+        return requested
+    candidates = [
+        name
+        for name in discovered
+        if not allowed or any(name.casefold() == entry.casefold() for entry in allowed)
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def existing_pipe_name(status: dict[str, Any]) -> str:
+    """The pipe COM1 is already on, or ``''`` when it is on none.
+
+    A derived name is only a suggestion. A port that was configured earlier —
+    by hand, by WinDbg, or by an older installation — keeps the name the host
+    reports, and the debugger page should show that rather than a new guess.
+    """
+    ports = status.get("com_ports") or []
+    first = next((port for port in ports if port.get("number") == 1), None)
+    path = str((first or {}).get("path") or "")
+    return path.rsplit("\\", 1)[-1] if path else ""
+
+
+class _VmChooser(tk.Toplevel):
+    """Pick the VM this window controls, from the ones Hyper-V reports."""
+
+    def __init__(self, master: tk.Misc, names: list[str], note: str = "") -> None:
+        super().__init__(master)
+        self.result: str | None = None
+        self.title("Choose a virtual machine")
+        self.configure(bg=COLORS["background"])
+        self.transient(master)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.bind("<Escape>", lambda _event: self.destroy())
+
+        frame = ttk.Frame(self, padding=18)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(
+            frame, text="Which virtual machine does this window control?",
+            font=("Segoe UI Semibold", 12),
+        ).pack(anchor="w")
+        ttk.Label(
+            frame, wraplength=460,
+            text=(
+                "Nothing is chosen by default: a VM named in this program would be "
+                "a guess about someone else's host. Type a name to use a VM Hyper-V "
+                "did not list."
+            ),
+        ).pack(anchor="w", pady=(6, 10))
+        if note:
+            ttk.Label(frame, text=note, foreground=COLORS["warning"], wraplength=460).pack(anchor="w", pady=(0, 8))
+
+        self.names = tk.Listbox(
+            frame, height=min(max(len(names), 3), 12), bg=COLORS["panel"], fg=COLORS["text"],
+            selectbackground="#254769", relief="flat", highlightthickness=0,
+        )
+        for name in names:
+            self.names.insert("end", name)
+        if names:
+            self.names.selection_set(0)
+        self.names.pack(fill="both", expand=True)
+        self.names.bind("<Double-Button-1>", lambda _event: self._open())
+
+        self.typed = tk.StringVar(value="")
+        row = ttk.Frame(frame)
+        row.pack(fill="x", pady=(10, 0))
+        ttk.Label(row, text="Or type a VM name").pack(side="left")
+        ttk.Entry(row, textvariable=self.typed, width=34).pack(side="left", padx=10)
+
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill="x", pady=(12, 0))
+        ttk.Button(buttons, text="Cancel", command=self.destroy).pack(side="right")
+        ttk.Button(buttons, text="Open", style="Accent.TButton", command=self._open).pack(side="right", padx=(0, 8))
+
+        self.update_idletasks()
+        self.grab_set()
+
+    def _open(self) -> None:
+        chosen = self.typed.get().strip()
+        if not chosen:
+            selection = self.names.curselection()
+            chosen = self.names.get(selection[0]) if selection else ""
+        if chosen:
+            self.result = chosen
+            self.destroy()
 
 
 class _ApprovalDialog(tk.Toplevel):
@@ -191,12 +289,24 @@ class _CredentialDialog(tk.Toplevel):
 
 
 class Dashboard(tk.Tk):
-    def __init__(self, vm_name: str) -> None:
+    def __init__(self, vm_name: str | None = None) -> None:
         super().__init__()
-        self.vm_name = vm_name
+        # The window stays hidden until a VM is chosen; a chooser over an empty
+        # main window reads as a program that failed to start.
+        self.withdraw()
+        self.cancelled = False
         self.settings = Settings.from_env()
         self.backend = EventSink(create_backend(), EVENTS)
         self.service = HyperVService(self.backend, self.settings)
+        self.vm_name = self._choose_vm(vm_name)
+        if not self.vm_name:
+            self.cancelled = True
+            self.backend.close()
+            self.destroy()
+            return
+        # Derived from the VM rather than fixed: two VMs configured from the
+        # same install must not fight over one pipe.
+        self.pipe_name = tk.StringVar(value=suggested_pipe_name(self.vm_name))
         self.queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.pending: dict[str, queue.Queue[bool]] = {}
         self.pending_lock = threading.Lock()
@@ -217,12 +327,32 @@ class Dashboard(tk.Tk):
         self._theme()
         self._layout()
         self.show(self.current_page)
+        self.deiconify()
         self.broker = ApprovalBroker(self._approval_requested)
         self.broker.start()
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.after(100, self._process_queue)
         self.after(500, self.refresh)
         self.after(2000, self._refresh_events)
+
+    def _choose_vm(self, requested: str | None) -> str:
+        """The VM this window is for: asked for, discovered, or chosen here."""
+        if requested:
+            return requested
+        names: list[str] = []
+        note = ""
+        try:
+            names = [str(vm["name"]) for vm in self.service.list_vms().get("vms") or []]
+        except HyperVError as exc:
+            note = f"Hyper-V did not answer: {exc}"
+        name = initial_vm_name(None, self.settings.allowed_vms, names)
+        if name:
+            return name
+        if not names and not note:
+            note = "Hyper-V reports no virtual machines on this host."
+        chooser = _VmChooser(self, names, note)
+        self.wait_window(chooser)
+        return chooser.result or ""
 
     def _theme(self) -> None:
         style = ttk.Style(self)
@@ -756,7 +886,6 @@ class Dashboard(tk.Tk):
             )
 
     def _page_debugger(self) -> None:
-        self.pipe_name = tk.StringVar(value="north-kd")
         frame = ttk.LabelFrame(self.content, text="COM1 / named pipe")
         frame.pack(fill="x")
         ttk.Label(frame, text="Pipe name", style="Panel.TLabel").pack(side="left")
@@ -820,6 +949,12 @@ class Dashboard(tk.Tk):
         self.recovery_card.set(f"{data['checkpoints']['count']} checkpoint(s)\nAutomatic: {vm['automatic_checkpoints_enabled']}")
         self.guest_card.set("PowerShell Direct\nQuery on demand")
         self._write_text(self.overview_text, _safe_json(data))
+        # COM1 is the authority on its own pipe name; the derived one is only
+        # the suggestion for a port that has never been configured. An edited
+        # field is left alone.
+        configured = existing_pipe_name(data.get("debug") or {})
+        if configured and self.pipe_name.get() == suggested_pipe_name(self.vm_name):
+            self.pipe_name.set(configured)
 
     def _guest_diagnostics(self) -> None:
         def done(result: Any) -> None:
@@ -998,9 +1133,15 @@ class Dashboard(tk.Tk):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--vm", default="NORTH-Test")
+    parser.add_argument(
+        "--vm",
+        help="Virtual machine to control. Omit it to open the only VM Hyper-V reports, or to choose from a list.",
+    )
     arguments = parser.parse_args()
-    Dashboard(arguments.vm).mainloop()
+    dashboard = Dashboard(arguments.vm)
+    if dashboard.cancelled:
+        return
+    dashboard.mainloop()
 
 
 if __name__ == "__main__":

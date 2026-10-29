@@ -1063,6 +1063,34 @@ Live on `NORTH-Test` through the WMI backend: `guest_facts.computer_name` `DESKT
 the same VM. This guest publishes no `ComputerName`, only `FullyQualifiedDomainName`, which is why
 the convenience field falls back to it. Tests: 647 passing, 1 skipped.
 
+### 2026-10-29 — v0.3 phase 5: the dashboard names no VM of its own
+
+Two constants were baked into the control center: `--vm` defaulted to `NORTH-Test` and the debugger
+page's COM1 pipe defaulted to `north-kd`. On any other host the first is a guess that either fails or
+silently attaches the window to the wrong VM, and the second means two VMs configured from one
+installation collide on a single pipe.
+
+- **`--vm` is optional.** `dashboard.initial_vm_name` decides what opens without asking: an explicit
+  name wins; otherwise the candidates are the VMs Hyper-V reports, narrowed by
+  `HYPERV_MCP_ALLOWED_VMS` when it is set. One candidate opens directly — a zero-config host with a
+  single VM needs no argument and no allowlist — and two or more open the `_VmChooser` list instead of
+  picking one. The chooser also accepts a typed name, so a VM the discovery call could not see is
+  still reachable, and cancelling exits without starting the event reader or the approval broker.
+- **The pipe name is derived from the VM.** `hostwmi/serial.py::suggested_pipe_name` turns the name
+  into what the provider's own regex accepts (`<slug>-kd`, at most 64 characters, lowercase, runs of
+  rejected characters collapsed to one hyphen), and the value is now created once per window instead
+  of being rebuilt on every visit to the Debugger page, which had been discarding an edited name.
+- A regression test reads every module under `src/hyperv_console_mcp` and fails if `NORTH-Test` or
+  `north-kd` appears again, so the defaults cannot creep back in. Documentation and fixtures keep
+  their examples.
+
+Not validated live in this slice: the chooser itself needs an interactive desktop, so it is covered
+only by the pure selection rule (`initial_vm_name`) and by the existing headless render test that
+constructs the window with an explicit VM. What was checked live is the discovery rule: elevated on
+this host, `list_vms` reported `NORTH-Test` as the only VM and `initial_vm_name` returned it both with
+and without `HYPERV_MCP_ALLOWED_VMS` set, so the window opens with no argument at all. Tests: 659
+passing, 1 skipped.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,

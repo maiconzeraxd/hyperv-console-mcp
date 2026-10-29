@@ -41,6 +41,19 @@ _NEXT_STEPS = [
 ]
 
 
+def suggested_pipe_name(vm_name: str) -> str:
+    """A pipe name derived from the VM, so no two VMs share one by default.
+
+    ``_PIPE_NAME`` is what the provider accepts, and a VM name is not: it may
+    hold spaces, accented letters and more than 64 characters. Everything
+    outside that alphabet becomes a hyphen, and the result is lowercased so a
+    difference in case cannot produce a second pipe for the same VM.
+    """
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", vm_name)
+    slug = re.sub(r"-{2,}", "-", slug).strip("-._").casefold()[:61]
+    return f"{slug or 'vm'}-kd"
+
+
 def debug_serial_status(connection: Connection, payload: dict[str, Any]) -> dict[str, Any]:
     vm = find_vm(connection, str(payload.get("vm") or ""))
     identifier = str(vm.get("Name") or "")

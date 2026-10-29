@@ -7,10 +7,14 @@ The native Windows dashboard observes and controls the same policy-gated service
 Run from an elevated PowerShell when Hyper-V management requires elevation:
 
 ```powershell
-python -I scripts\run_dashboard.py --vm NORTH-Test
+python -I scripts\run_dashboard.py
 ```
 
-After installation, `hyperv-dashboard --vm NORTH-Test` is equivalent. Use the same protected environment as the MCP host; a `.env` file is not loaded automatically.
+`--vm <name>` picks the VM up front. Without it the window opens the only VM Hyper-V reports on this host, and asks from a list when there is more than one — nothing in this program names a VM of its own. When `HYPERV_MCP_ALLOWED_VMS` is set it narrows that list, so an allowlist of one still opens without a prompt.
+
+After installation, `hyperv-dashboard` is equivalent. Use the same protected environment as the MCP host; a `.env` file is not loaded automatically.
+
+The debugger page's pipe name is derived from the chosen VM (`<vm>-kd`, lowercased, with anything the provider rejects turned into a hyphen), so two VMs configured from the same installation never share one.
 
 ## Pages
 

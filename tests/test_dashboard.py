@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("tkinter", reason="the dashboard is a tkinter application")
 
-from hyperv_console_mcp.dashboard import Dashboard  # noqa: E402
+from hyperv_console_mcp.dashboard import Dashboard, existing_pipe_name, initial_vm_name  # noqa: E402
 
 
 class UiBackend:
@@ -27,6 +27,46 @@ class UiBackend:
 
     def close(self):
         pass
+
+
+def test_an_explicit_vm_wins_over_discovery() -> None:
+    assert initial_vm_name("Chosen", frozenset(), ["Other", "Another"]) == "Chosen"
+
+
+def test_a_single_discovered_vm_opens_with_no_configuration() -> None:
+    """Zero-config: the host's only VM needs no --vm and no allowlist."""
+    assert initial_vm_name(None, frozenset(), ["Only-VM"]) == "Only-VM"
+
+
+def test_two_discovered_vms_ask_instead_of_guessing() -> None:
+    assert initial_vm_name(None, frozenset(), ["One", "Two"]) is None
+    assert initial_vm_name(None, frozenset(), []) is None
+
+
+def test_the_allowlist_narrows_the_choice() -> None:
+    """An allowlist of one still opens without a prompt, even on a busy host."""
+    assert initial_vm_name(None, frozenset({"lab-vm"}), ["LAB-VM", "prod"]) == "LAB-VM"
+    assert initial_vm_name(None, frozenset({"lab-vm"}), ["prod"]) is None
+
+
+def test_the_debugger_page_shows_the_pipe_com1_is_already_on() -> None:
+    """The port's own configuration outranks a name derived from the VM."""
+    assert existing_pipe_name({"com_ports": [{"number": 1, "path": r"\\.\pipe\north-kd"}]}) == "north-kd"
+    assert existing_pipe_name({"com_ports": [{"number": 1, "path": ""}]}) == ""
+    assert existing_pipe_name({"com_ports": [{"number": 2, "path": r"\\.\pipe\other"}]}) == ""
+    assert existing_pipe_name({}) == ""
+
+
+def test_no_shipped_module_names_a_vm_or_a_pipe() -> None:
+    """A default VM name and a default pipe name are guesses about the host."""
+    root = Path(__file__).resolve().parents[1] / "src" / "hyperv_console_mcp"
+    offenders = sorted(
+        str(path.relative_to(root))
+        for path in root.rglob("*.py")
+        if "NORTH-Test" in path.read_text(encoding="utf-8")
+        or "north-kd" in path.read_text(encoding="utf-8")
+    )
+    assert offenders == []
 
 
 def test_dashboard_pages_render_with_fake_backend(tmp_path, monkeypatch) -> None:

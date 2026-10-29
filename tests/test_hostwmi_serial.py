@@ -9,7 +9,11 @@ import pytest
 
 from hyperv_console_mcp.hostwmi.backend import WmiBackend
 from hyperv_console_mcp.hostwmi.connection import WmiFailure
-from hyperv_console_mcp.hostwmi.serial import debug_serial_prepare, debug_serial_status
+from hyperv_console_mcp.hostwmi.serial import (
+    debug_serial_prepare,
+    debug_serial_status,
+    suggested_pipe_name,
+)
 
 VM_ID = "D5AD7D1D-5CB3-441F-A9D7-138640C8F61A"
 CONTROLLER = "8E3A359F-559A-4B6A-98A9-1690A6100ED7"
@@ -218,4 +222,21 @@ def test_the_backend_serves_debug_serial_prepare() -> None:
     backend = WmiBackend(connect=PrepareConnection)
     result = backend.invoke("debug_serial_prepare", {"vm": "NORTH-Test", "pipe_name": "north-test-kd"})
     assert result["pipe_path"] == PIPE
+
+
+def test_the_pipe_name_is_derived_from_the_vm() -> None:
+    """A fixed pipe name is a guess about someone else's host."""
+    assert suggested_pipe_name("NORTH-Test") == "north-test-kd"
+    assert suggested_pipe_name("Lab VM Ñandú") == "lab-vm-and-kd"
+    assert suggested_pipe_name("---") == "vm-kd"
+
+
+@pytest.mark.parametrize("vm_name", ["NORTH-Test", "Lab VM Ñandú", "---", "x" * 200, "a b.c_d-e"])
+def test_a_derived_pipe_name_is_one_the_provider_accepts(vm_name: str) -> None:
+    """The name goes through the same regex a caller-supplied one does."""
+    result = debug_serial_prepare(
+        PrepareConnection(), {"vm": "NORTH-Test", "pipe_name": suggested_pipe_name(vm_name)}
+    )
+    assert result["debugger_mode"] == "On"
+    assert len(suggested_pipe_name(vm_name)) <= 64
 
