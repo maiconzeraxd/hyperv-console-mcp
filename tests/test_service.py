@@ -711,3 +711,90 @@ def test_host_status_reports_the_profile_and_capabilities(
     assert result["profile"] == "safe"
     assert result["capabilities"]["power"] is True
     assert result["allowlist"] == ["NORTH-Test"]
+
+
+def test_lab_guest_configure_refuses_unsigned_settings_under_secure_boot(
+    enabled: HyperVService, backend: FakeBackend
+) -> None:
+    backend.responses["vm_firmware"] = {"secure_boot": "On", "generation": 2, "state": "Running"}
+    with pytest.raises(PolicyError, match="Secure Boot is On"):
+        enabled.lab_guest_configure("NORTH-Test", "NORTH-Test", testsigning=True)
+    assert [name for name, _ in backend.calls] == ["vm_firmware"]
+
+
+def test_lab_guest_configure_turns_secure_boot_off_only_while_the_vm_is_off(
+    enabled: HyperVService, backend: FakeBackend, monkeypatch
+) -> None:
+    from hyperv_console_mcp.transport import guest_config
+
+    monkeypatch.setattr(
+        guest_config, "lab_apply",
+        lambda *args, **kwargs: pytest.fail("the guest must not be touched while the VM is Off"),
+    )
+    backend.responses["vm_firmware"] = {"secure_boot": "On", "generation": 2, "state": "Off"}
+    backend.responses["vm_get"] = {"vm": {"state": "Running"}}
+    with pytest.raises(PolicyError, match="while the VM is Off"):
+        enabled.lab_guest_configure(
+            "NORTH-Test", "NORTH-Test", testsigning=True, secure_boot_off=True
+        )
+
+    backend.responses["vm_get"] = {"vm": {"state": "Off"}}
+    backend.responses["vm_secure_boot"] = {"secure_boot": "Off", "enabled": False}
+    result = enabled.lab_guest_configure(
+        "NORTH-Test", "NORTH-Test", testsigning=True, secure_boot_off=True
+    )
+    assert result["secure_boot"] == "Off"
+    assert result["guest"] is None
+    assert result["reboot_required"] is False
+    assert backend.calls[-1] == ("vm_secure_boot", {"vm": "NORTH-Test", "enable": False})
+
+
+def test_lab_guest_configure_applies_the_recorded_entries(
+    enabled: HyperVService, backend: FakeBackend, monkeypatch
+) -> None:
+    from hyperv_console_mcp.transport import guest_config
+
+    seen: dict[str, Any] = {}
+
+    def fake(service, vm, **kwargs):
+        seen.update(kwargs)
+        seen["vm"] = vm
+        return {"mode": "Apply", "changed": ["testsigning:on", "crash_dump:kernel"]}
+
+    monkeypatch.setattr(guest_config, "lab_apply", fake)
+    backend.responses["vm_firmware"] = {"secure_boot": "Off", "generation": 2}
+    result = enabled.lab_guest_configure(
+        "NORTH-Test", "NORTH-Test", testsigning=True, crash_dump="kernel", disable_hvci=True
+    )
+    assert seen == {
+        "vm": "NORTH-Test", "testsigning": True, "kernel_debug": None,
+        "crash_dump": "kernel", "hvci": True,
+    }
+    assert result["reboot_required"] is True
+    assert result["secure_boot"] == "Off"
+
+
+def test_lab_guest_configure_validates_its_arguments(
+    enabled: HyperVService, backend: FakeBackend
+) -> None:
+    with pytest.raises(ValidationError, match="crash_dump"):
+        enabled.lab_guest_configure("NORTH-Test", "NORTH-Test", crash_dump="full")
+    with pytest.raises(ValidationError, match="testsigning"):
+        enabled.lab_guest_configure(
+            "NORTH-Test", "NORTH-Test", testsigning="yes"  # type: ignore[arg-type]
+        )
+    with pytest.raises(PolicyError, match="confirm_vm"):
+        enabled.lab_guest_configure("NORTH-Test", "other", testsigning=True)
+    assert backend.calls == []
+
+
+def test_lab_guest_configure_restart_needs_the_power_capability(
+    enabled: HyperVService, backend: FakeBackend, monkeypatch
+) -> None:
+    from hyperv_console_mcp.transport import guest_config
+
+    monkeypatch.setattr(guest_config, "lab_apply", lambda *args, **kwargs: {"changed": []})
+    backend.responses["vm_firmware"] = {"secure_boot": "Off", "generation": 2}
+    service = HyperVService(backend, replace(enabled.settings, allow_power=False), enabled.audit)
+    with pytest.raises(PolicyError, match="HYPERV_MCP_ALLOW_POWER"):
+        service.lab_guest_configure("NORTH-Test", "NORTH-Test", testsigning=True, restart=True)

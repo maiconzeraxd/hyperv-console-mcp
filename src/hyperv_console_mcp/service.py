@@ -29,6 +29,7 @@ GATED_TOOLS = frozenset({
     "guest_password_rotate", "guest_credential_forget",
     "guest_autologon_configure", "guest_config_revert",
     "lab_init", "lab_stage", "lab_collect", "lab_run", "lab_cycle",
+    "lab_guest_configure",
     "vm_inject_nmi",
     "console_type_text", "console_press_keys", "console_key_state",
     "console_mouse_buttons", "console_batch", "console_ctrl_alt_delete",
@@ -1103,6 +1104,100 @@ class HyperVService:
                 timeout_seconds=timeout_seconds, checkpoint_before=checkpoint_before,
                 revert_after=revert_after, include_kernel_dump=include_kernel_dump,
             )
+
+    def lab_guest_configure(
+        self,
+        vm_name: str,
+        confirm_vm: str,
+        *,
+        testsigning: bool | None = None,
+        kernel_debug: bool | None = None,
+        crash_dump: str | bool | None = None,
+        disable_hvci: bool | None = None,
+        secure_boot_off: bool = False,
+        restart: bool = False,
+    ) -> dict[str, Any]:
+        """Prepare the guest for driver work; every change is recorded and revertible."""
+        from .transport import guest_config
+
+        name = self._guest_vm(vm_name)
+        self._confirm(confirm_vm, name, "confirm_vm")
+        for label, value in (
+            ("testsigning", testsigning), ("kernel_debug", kernel_debug),
+            ("disable_hvci", disable_hvci),
+        ):
+            if value is not None and not isinstance(value, bool):
+                raise ValidationError(f"{label} must be true, false, or omitted.")
+        if crash_dump is not None and crash_dump is not False and crash_dump not in {
+            "kernel", "complete", "none"
+        }:
+            raise ValidationError("crash_dump must be kernel, complete, none, false, or omitted.")
+        for label, value in (("secure_boot_off", secure_boot_off), ("restart", restart)):
+            if not isinstance(value, bool):
+                raise ValidationError(f"{label} must be a boolean value.")
+
+        firmware = self._run("vm_firmware", "vm_firmware", {"vm": name}, vm_name=name)
+        secure_boot = str(firmware.get("secure_boot") or "")
+        if secure_boot_off and secure_boot.casefold() == "on":
+            state = str(self.get_vm(name)["vm"].get("state", ""))
+            if state.casefold() != "off":
+                raise PolicyError(
+                    "Secure Boot can only be turned off while the VM is Off; it is "
+                    f"{state or 'unknown'}. Power it off deliberately, call this tool again "
+                    "with secure_boot_off=true, then start it and call it again to configure "
+                    "the guest. This tool never changes power state."
+                )
+            with self._approve("vm_secure_boot", name, {
+                "secure_boot": "Off", "generation": firmware.get("generation"),
+            }):
+                changed = self._run(
+                    "vm_secure_boot", "vm_secure_boot", {"vm": name, "enable": False},
+                    vm_name=name,
+                )
+            return {
+                "vm": name,
+                "firmware": firmware,
+                "secure_boot": changed.get("secure_boot"),
+                "guest": None,
+                "reboot_required": False,
+                "next_steps": [
+                    "Start the VM deliberately.",
+                    "Call lab_guest_configure again with the VM Running to apply the guest settings.",
+                ],
+            }
+        if secure_boot.casefold() == "on" and (testsigning or kernel_debug):
+            raise PolicyError(
+                "Secure Boot is On, so test signing and kernel debugging would be ignored. "
+                "Power the VM off and call this tool with secure_boot_off=true, or disable "
+                "Secure Boot deliberately in Hyper-V first."
+            )
+
+        summary = {
+            "testsigning": testsigning,
+            "kernel_debug": kernel_debug,
+            "crash_dump": crash_dump,
+            "disable_hvci": disable_hvci,
+            "state_file": guest_config.GUEST_STATE_PATH,
+        }
+        with self._approve("lab_guest_configure", name, summary):
+            applied = guest_config.lab_apply(
+                self, name,
+                testsigning=testsigning, kernel_debug=kernel_debug,
+                crash_dump=crash_dump, hvci=disable_hvci,
+            )
+        result: dict[str, Any] = {
+            "vm": name,
+            "firmware": firmware,
+            "secure_boot": firmware.get("secure_boot"),
+            "guest": applied,
+            "reboot_required": bool(applied.get("changed")),
+            "restart": None,
+        }
+        if restart:
+            if not self.settings.allow_power:
+                raise PolicyError("Restarting the guest requires HYPERV_MCP_ALLOW_POWER.")
+            result["restart"] = self._restart_and_verify(name)
+        return result
 
     def vm_inject_nmi(self, vm_name: str, confirm_vm: str) -> dict[str, Any]:
         """Force a bugcheck in a hung guest so the debugger can catch it."""

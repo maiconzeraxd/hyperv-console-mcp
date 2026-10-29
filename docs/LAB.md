@@ -79,6 +79,23 @@ The runner checks administrator and hypervisor presence, the exact approval phra
 
 A checkpoint, debugger attachment or hash match does not make arbitrary kernel code safe and does not prevent a bugcheck. Preserve evidence before retrying with a different run ID.
 
+## Preparing the guest
+
+`lab_guest_configure` applies the boot and crash settings a driver lab needs, and records each one in the same `guest-config.json`:
+
+| Setting | Effect |
+|---|---|
+| `testsigning=true` | `bcdedit /set {current} testsigning on` |
+| `kernel_debug=true` | `bcdedit /set {current} debug on`; the transport (serial or KDNET) is configured separately |
+| `crash_dump=kernel\|complete\|none` | `CrashDumpEnabled`, `AutoReboot`, `Overwrite`, `AlwaysKeepMemoryDump` under `CrashControl` |
+| `disable_hvci=true` | `EnableVirtualizationBasedSecurity=0` and HVCI `Enabled=0` |
+
+Every toggle is tri-state: `true` applies it, `false` restores the value it replaced, and omitting it leaves that setting alone. All of them need a reboot, which `restart=true` performs (graceful shutdown, start, wait for an interactive session) when `HYPERV_MCP_ALLOW_POWER` is on.
+
+The tool reads `Get-VMFirmware` first. If Secure Boot is On, test signing and kernel debugging would be ignored, so it refuses; pass `secure_boot_off=true` **with the VM Off** and it turns Secure Boot off as its only action, then tells you to start the VM and call it again. It never changes power state on its own.
+
+`guest_config_status` reports the live values under `driver_ready`, including the crash-dump mode and whether the pagefile is large enough for a complete dump (RAM plus about 257 MB). The pagefile is reported, not resized.
+
 ## Autonomous runs (lab profile only)
 
 With `HYPERV_MCP_PROFILE=lab`, `lab_run` performs the same deliberate sequence without a human click:

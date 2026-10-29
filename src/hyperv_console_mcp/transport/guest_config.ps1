@@ -1,6 +1,7 @@
 # Guest side of the automation settings: autologon without a plain-text
-# password, no lock screen, no Ctrl+Alt+Del prompt, no screen blanking, and no
-# UAC consent prompt for administrators.
+# password, no lock screen, no Ctrl+Alt+Del prompt, no screen blanking, no
+# UAC consent prompt for administrators, and the driver-lab boot entries
+# (test signing, kernel debugging, crash dump, HVCI/VBS).
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File guest_config.ps1 `
 #       -Mode Apply -SettingsPath <json file> [-StatePath <file>]
@@ -27,6 +28,9 @@ $personalizationKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization
 $systemPolicyKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
 $updatePolicyKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
 $desktopKey = 'HKCU:\Control Panel\Desktop'
+$crashControlKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl'
+$deviceGuardKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard'
+$hvciKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity'
 $autologonSecretName = 'DefaultPassword'
 
 $script:StateFile = $StatePath
@@ -237,6 +241,40 @@ function Remove-RegistryValue {
     }
 }
 
+# -- boot configuration (BCD) ---------------------------------------------
+# Test signing and kernel debugging are boot entries, not registry values, so
+# they are read and written through bcdedit and recorded separately.
+
+
+function Read-BcdValue {
+    param([string]$Name)
+    $text = (& bcdedit.exe /enum '{current}' 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0) { throw "bcdedit /enum failed: $text" }
+    $match = [regex]::Match($text, "(?m)^\s*$([regex]::Escape($Name))\s+(\S+)")
+    if (-not $match.Success) {
+        return @{ existed = $false; value = $null }
+    }
+    return @{ existed = $true; value = $match.Groups[1].Value }
+}
+
+function Set-BcdValue {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([string]$Name, [string]$Value)
+    if (-not $PSCmdlet.ShouldProcess("bcdedit $Name", "Set it to $Value")) { return }
+    $output = (& bcdedit.exe /set '{current}' $Name $Value 2>&1) -join ' '
+    if ($LASTEXITCODE -ne 0) {
+        throw "bcdedit /set $Name $Value failed: $output"
+    }
+}
+
+function Remove-BcdValue {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([string]$Name)
+    if (-not $PSCmdlet.ShouldProcess("bcdedit $Name", 'Remove the value')) { return }
+    # bcdedit fails when the entry is already absent, which is the state we want.
+    & bcdedit.exe /deletevalue '{current}' $Name 2>&1 | Out-Null
+}
+
 # -- power ----------------------------------------------------------------
 
 
@@ -304,10 +342,10 @@ function Save-ConfigState {
 function Get-EntryRecord {
     param([hashtable]$State, [string]$Entry)
     if (-not $State.entries.ContainsKey($Entry)) {
-        $State.entries[$Entry] = @{ values = @(); lsa = @(); power = @(); applied = @{} }
+        $State.entries[$Entry] = @{ values = @(); lsa = @(); power = @(); bcd = @(); applied = @{} }
     }
     $record = $State.entries[$Entry]
-    foreach ($field in @('values', 'lsa', 'power')) {
+    foreach ($field in @('values', 'lsa', 'power', 'bcd')) {
         if ($null -eq $record.$field) { $record[$field] = @() }
         else { $record[$field] = @($record[$field]) }
     }
@@ -354,7 +392,43 @@ function Add-PreviousSecret {
     $Record.lsa += @{ name = $Name; existed = $present }
 }
 
+function Add-PreviousBcd {
+    param([hashtable]$Record, [string]$Name)
+    foreach ($existing in $Record.bcd) {
+        if ($existing.name -eq $Name) { return }
+    }
+    $current = Read-BcdValue -Name $Name
+    $Record.bcd += @{ name = $Name; existed = [bool]$current.existed; previous = $current.value }
+}
+
 # -- live view ------------------------------------------------------------
+
+function Convert-DumpMode {
+    param($Value)
+    switch ([int]$Value) {
+        0 { return 'none' }
+        1 { return 'complete' }
+        2 { return 'kernel' }
+        7 { return 'automatic' }
+        default { return 'other' }
+    }
+}
+
+# A complete dump needs the pagefile to cover RAM plus roughly 257 MB; a kernel
+# dump needs far less. The tool reports this instead of resizing the pagefile.
+function Get-DumpSupport {
+    $os = Get-CimInstance -ClassName Win32_OperatingSystem
+    $pageBytes = [int64]0
+    foreach ($page in @(Get-CimInstance -ClassName Win32_PageFileUsage -ErrorAction SilentlyContinue)) {
+        $pageBytes += [int64]$page.AllocatedBaseSize * 1MB
+    }
+    $memoryBytes = [int64]$os.TotalVisibleMemorySize * 1KB
+    return @{
+        memory_bytes = $memoryBytes
+        pagefile_bytes = $pageBytes
+        sufficient_for_complete_dump = ($pageBytes -ge ($memoryBytes + (257 * 1MB)))
+    }
+}
 
 
 function Get-LiveConfig {
@@ -370,6 +444,11 @@ function Get-LiveConfig {
     $update = Read-RegistryValue -Path $updatePolicyKey -Name 'NoAutoUpdate'
     $reboot = Read-RegistryValue -Path $updatePolicyKey -Name 'NoAutoRebootWithLoggedOnUsers'
     $screenSave = Read-RegistryValue -Path $desktopKey -Name 'ScreenSaveActive'
+    $testSigning = Read-BcdValue -Name 'testsigning'
+    $debugEntry = Read-BcdValue -Name 'debug'
+    $dumpMode = Read-RegistryValue -Path $crashControlKey -Name 'CrashDumpEnabled'
+    $hvci = Read-RegistryValue -Path $hvciKey -Name 'Enabled'
+    $vbs = Read-RegistryValue -Path $deviceGuardKey -Name 'EnableVirtualizationBasedSecurity'
     $secretPresent = $false
     try { $secretPresent = $null -ne [HvmcpLsa]::Get($autologonSecretName) } catch { $secretPresent = $false }
     $sessions = @()
@@ -401,6 +480,15 @@ function Get-LiveConfig {
             console_lock = Get-PowerSetting -Subgroup 'SUB_NONE' -Setting 'CONSOLELOCK'
         }
         interactive_sessions = $sessions
+        driver_ready = @{
+            test_signing = ($testSigning.value -eq 'on')
+            kernel_debug = ($debugEntry.value -eq 'on')
+            crash_dump_enabled = $dumpMode.value
+            crash_dump_mode = Convert-DumpMode -Value $dumpMode.value
+            hvci_enabled = ($hvci.value -eq 1)
+            vbs_enabled = ($vbs.value -eq 1)
+            dump_support = Get-DumpSupport
+        }
     }
 }
 
@@ -529,6 +617,60 @@ function Set-WindowsUpdatePolicy {
     $Record.applied = @{ no_auto_update = 1; no_auto_reboot_with_logged_on_users = 1 }
 }
 
+# -- driver-lab entries ---------------------------------------------------
+
+
+function Set-TestSigning {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([hashtable]$Record)
+    if (-not $PSCmdlet.ShouldProcess('bcdedit testsigning', 'Enable test signing')) { return }
+    Add-PreviousBcd -Record $Record -Name 'testsigning'
+    Set-BcdValue -Name 'testsigning' -Value 'on'
+    $Record.applied = @{ testsigning = 'on' }
+}
+
+function Set-KernelDebug {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([hashtable]$Record)
+    if (-not $PSCmdlet.ShouldProcess('bcdedit debug', 'Enable kernel debugging')) { return }
+    # The transport (serial or KDNET) is configured separately; this only turns
+    # the boot entry on.
+    Add-PreviousBcd -Record $Record -Name 'debug'
+    Set-BcdValue -Name 'debug' -Value 'on'
+    $Record.applied = @{ kernel_debug = 'on' }
+}
+
+function Set-CrashDump {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([hashtable]$Record, [string]$Mode)
+    if (-not $PSCmdlet.ShouldProcess('CrashControl', "Set the dump mode to $Mode")) { return }
+    foreach ($name in @('CrashDumpEnabled', 'AutoReboot', 'Overwrite', 'AlwaysKeepMemoryDump')) {
+        Add-PreviousValue -Record $Record -Path $crashControlKey -Name $name
+    }
+    $enabled = switch ($Mode) {
+        'none' { 0 }
+        'complete' { 1 }
+        'kernel' { 2 }
+        default { throw "Unsupported crash dump mode: $Mode" }
+    }
+    Set-RegistryValue -Path $crashControlKey -Name 'CrashDumpEnabled' -Value $enabled -Kind 'DWord'
+    Set-RegistryValue -Path $crashControlKey -Name 'AutoReboot' -Value 1 -Kind 'DWord'
+    Set-RegistryValue -Path $crashControlKey -Name 'Overwrite' -Value 1 -Kind 'DWord'
+    Set-RegistryValue -Path $crashControlKey -Name 'AlwaysKeepMemoryDump' -Value 1 -Kind 'DWord'
+    $Record.applied = @{ crash_dump = $Mode; crash_dump_enabled = $enabled }
+}
+
+function Set-HvciOff {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([hashtable]$Record)
+    if (-not $PSCmdlet.ShouldProcess('Device Guard', 'Disable HVCI and VBS')) { return }
+    Add-PreviousValue -Record $Record -Path $deviceGuardKey -Name 'EnableVirtualizationBasedSecurity'
+    Add-PreviousValue -Record $Record -Path $hvciKey -Name 'Enabled'
+    Set-RegistryValue -Path $deviceGuardKey -Name 'EnableVirtualizationBasedSecurity' -Value 0 -Kind 'DWord'
+    Set-RegistryValue -Path $hvciKey -Name 'Enabled' -Value 0 -Kind 'DWord'
+    $Record.applied = @{ hvci_enabled = 0; vbs_enabled = 0 }
+}
+
 # One independent toggle: true applies it, false puts back what it replaced,
 # and an omitted (null) value leaves the setting alone.
 function Invoke-ToggleEntry {
@@ -590,6 +732,31 @@ function Invoke-Apply {
     $outcome = Invoke-ToggleEntry -State $state -Name 'windows_update' -Setting $settings.windows_update `
         -Apply { param($record) Set-WindowsUpdatePolicy -Record $record }
     if ($outcome) { $changed += $outcome }
+    $outcome = Invoke-ToggleEntry -State $state -Name 'testsigning' -Setting $settings.testsigning `
+        -Apply { param($record) Set-TestSigning -Record $record }
+    if ($outcome) { $changed += $outcome }
+    $outcome = Invoke-ToggleEntry -State $state -Name 'kernel_debug' -Setting $settings.kernel_debug `
+        -Apply { param($record) Set-KernelDebug -Record $record }
+    if ($outcome) { $changed += $outcome }
+    $outcome = Invoke-ToggleEntry -State $state -Name 'hvci' -Setting $settings.hvci `
+        -Apply { param($record) Set-HvciOff -Record $record }
+    if ($outcome) { $changed += $outcome }
+
+    # crash_dump is a mode, not a toggle: false restores the previous mode and a
+    # string applies kernel, complete, or none.
+    if ($null -ne $settings.crash_dump) {
+        if ($settings.crash_dump -eq $false) {
+            if ($state.entries.ContainsKey('crash_dump')) {
+                [void](Restore-Entry -Record $state.entries['crash_dump'])
+                $state.entries.Remove('crash_dump')
+            }
+            $changed += 'crash_dump:off'
+        } else {
+            $record = Get-EntryRecord -State $state -Entry 'crash_dump'
+            Set-CrashDump -Record $record -Mode ([string]$settings.crash_dump)
+            $changed += "crash_dump:$($settings.crash_dump)"
+        }
+    }
 
     if ($changed.Count -gt 0) {
         Save-ConfigState -State $state
@@ -623,6 +790,14 @@ function Restore-Entry {
             Set-PowerSetting -Subgroup $item.subgroup -Setting $item.setting -Value ([int]$item.previous)
             $restored += $item.setting
         }
+    }
+    foreach ($item in $Record.bcd) {
+        if ($item.existed) {
+            Set-BcdValue -Name $item.name -Value ([string]$item.previous)
+        } else {
+            Remove-BcdValue -Name $item.name
+        }
+        $restored += $item.name
     }
     return $restored
 }

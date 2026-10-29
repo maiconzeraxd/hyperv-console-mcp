@@ -436,6 +436,45 @@ function Invoke-BridgeOperation {
                 started_at = $status.started_at
             }
         }
+        'vm_firmware' {
+            $vm = Get-ExactVm -Name $request.vm
+            $secureBootSupported = $false
+            $secureBoot = $null
+            $preferredBoot = $null
+            if ($vm.Generation -eq 2) {
+                $firmware = Get-VMFirmware -VM $vm
+                $secureBootSupported = $true
+                $secureBoot = $firmware.SecureBoot.ToString()
+                $preferredBoot = $firmware.PreferredBootDevice
+            }
+            $result = @{
+                vm = $vm.Name
+                generation = [int]$vm.Generation
+                state = $vm.State.ToString()
+                secure_boot_supported = $secureBootSupported
+                secure_boot = $secureBoot
+                preferred_boot_device = $preferredBoot
+            }
+        }
+        'vm_secure_boot' {
+            $vm = Get-ExactVm -Name $request.vm
+            if ($vm.Generation -ne 2) {
+                throw 'Secure Boot applies only to generation 2 VMs.'
+            }
+            if ($vm.State -ne [Microsoft.HyperV.PowerShell.VMState]::Off) {
+                throw 'The VM must be Off before Secure Boot can be changed. The server will not stop it.'
+            }
+            if ([bool]$request.enable) {
+                Set-VMFirmware -VM $vm -EnableSecureBoot On -Confirm:$false | Out-Null
+            } else {
+                Set-VMFirmware -VM $vm -EnableSecureBoot Off -Confirm:$false | Out-Null
+            }
+            $result = @{
+                vm = $vm.Name
+                secure_boot = (Get-VMFirmware -VM $vm).SecureBoot.ToString()
+                enabled = [bool]$request.enable
+            }
+        }
         'vm_inject_nmi' {
             $vm = Get-ExactVm -Name $request.vm
             if ($vm.State -ne [Microsoft.HyperV.PowerShell.VMState]::Running) {

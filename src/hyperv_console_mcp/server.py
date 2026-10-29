@@ -391,6 +391,26 @@ def create_server(
         )
 
     @tool(
+        "lab_guest_configure", annotations=MUTATION,
+        description="Prepare the guest for driver work: test signing, kernel debugging, crash dump mode and HVCI/VBS off, each recorded in guest-config.json and revertible with guest_config_revert. Toggles are tri-state. Secure Boot is checked first; secure_boot_off=true only works while the VM is Off. Requires confirm_vm.",
+    )
+    async def lab_guest_configure(
+        vm_name: str,
+        confirm_vm: str,
+        testsigning: bool | None = None,
+        kernel_debug: bool | None = None,
+        crash_dump: str | None = None,
+        disable_hvci: bool | None = None,
+        secure_boot_off: bool = False,
+        restart: bool = False,
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.lab_guest_configure, vm_name, confirm_vm,
+            testsigning=testsigning, kernel_debug=kernel_debug, crash_dump=crash_dump,
+            disable_hvci=disable_hvci, secure_boot_off=secure_boot_off, restart=restart,
+        )
+
+    @tool(
         "vm_inject_nmi", annotations=MUTATION,
         description="Inject a non-maskable interrupt into a Running VM so a hung guest bugchecks into the debugger. Requires confirm_vm and HYPERV_MCP_ALLOW_DEBUGGER.",
     )

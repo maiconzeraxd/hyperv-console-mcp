@@ -195,3 +195,30 @@ def test_the_guest_script_is_the_one_shipped_with_the_package() -> None:
     assert "ConsentPromptBehaviorAdmin" in text
     assert "NoLockScreen" in text
     assert "DisableCAD" in text
+    # Driver-lab entries: boot values go through bcdedit, the rest through the
+    # same recorded registry path so guest_config_revert can undo them.
+    assert "bcdedit.exe /set" in text
+    assert "'testsigning'" in text
+    assert "CrashDumpEnabled" in text
+    assert "HypervisorEnforcedCodeIntegrity" in text
+    assert "EnableVirtualizationBasedSecurity" in text
+
+
+def test_lab_apply_sends_only_the_driver_entries(tmp_path: Path) -> None:
+    transport = FakeTransport(output=marker({"mode": "Apply", "changed": ["testsigning:on"]}))
+    service = FakeService(transport, settings(tmp_path))
+
+    result = guest_config.lab_apply(
+        service, VM, testsigning=True, kernel_debug=None, crash_dump="kernel", hvci=False
+    )
+
+    assert result["changed"] == ["testsigning:on"]
+    assert document(transport) == {
+        "testsigning": True,
+        "kernel_debug": None,
+        "crash_dump": "kernel",
+        "hvci": False,
+    }
+    # The autologon section is absent, so no password is shipped with a lab change.
+    assert "autologon" not in document(transport)
+    assert SECRET not in transport.commands[0]

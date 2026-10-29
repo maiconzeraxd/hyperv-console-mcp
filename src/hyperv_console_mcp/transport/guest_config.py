@@ -82,18 +82,43 @@ def apply(
     Each toggle is tri-state: ``True`` applies it, ``False`` restores the value
     it replaced, and ``None`` leaves that setting alone.
     """
-    transport = service._transport(vm)
-    transport.health(vm)  # Fail before uploading anything if the guest is unreachable.
-    _upload_script(transport, vm)
-
-    document = {
+    return _apply_document(service, vm, {
         "autologon": autologon,
         "lock_screen": lock_screen,
         "disable_cad": disable_cad,
         "power": power,
         "uac": uac,
         "windows_update": windows_update,
-    }
+    })
+
+
+def lab_apply(
+    service: Any,
+    vm: str,
+    *,
+    testsigning: bool | None,
+    kernel_debug: bool | None,
+    crash_dump: str | bool | None,
+    hvci: bool | None,
+) -> dict[str, Any]:
+    """Driver-lab boot entries; the same tri-state rules as the automation toggles.
+
+    ``crash_dump`` is a mode rather than a toggle: ``kernel``, ``complete`` or
+    ``none`` applies it and ``False`` restores the mode it replaced.
+    """
+    return _apply_document(service, vm, {
+        "testsigning": testsigning,
+        "kernel_debug": kernel_debug,
+        "crash_dump": crash_dump,
+        "hvci": hvci,
+    })
+
+
+def _apply_document(service: Any, vm: str, document: dict[str, Any]) -> dict[str, Any]:
+    transport = service._transport(vm)
+    transport.health(vm)  # Fail before uploading anything if the guest is unreachable.
+    _upload_script(transport, vm)
+
     guest_settings = f"{GUEST_SETTINGS_ROOT}\\guest-config-{uuid.uuid4().hex}.json"
     directory = Path(tempfile.mkdtemp(prefix="hvmcp-guest-config-"))
     local = directory / "settings.json"
@@ -135,5 +160,5 @@ def revert(service: Any, vm: str) -> dict[str, Any]:
 
 __all__ = [
     "GUEST_SCRIPT", "GUEST_SETTINGS_ROOT", "GUEST_STATE_PATH",
-    "apply", "revert", "status",
+    "apply", "lab_apply", "revert", "status",
 ]

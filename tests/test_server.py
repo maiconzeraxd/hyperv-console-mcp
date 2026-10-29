@@ -30,7 +30,7 @@ def server() -> tuple[object, FakeBackend]:
 def test_all_tools_are_discoverable(server) -> None:
     mcp, _ = server
     tools = {tool.name: tool for tool in anyio.run(mcp.list_tools)}
-    assert len(tools) == 59
+    assert len(tools) == 60
     assert tools["vm_list"].input_schema["type"] == "object"
     assert tools["vm_list"].input_schema.get("required", []) == []
     assert "password" not in tools["guest_exec"].input_schema["properties"]
@@ -45,6 +45,7 @@ def test_all_tools_are_discoverable(server) -> None:
     assert tools["lab_cycle"].annotations.destructive_hint is True
     assert tools["lab_verify"].annotations.read_only_hint is True
     assert "ApproveExecution" not in str(tools["lab_run"].input_schema["properties"])
+    assert tools["lab_guest_configure"].input_schema["properties"]["crash_dump"]["default"] is None
     assert tools["checkpoint_restore"].annotations.destructive_hint is True
     assert set(tools["vm_power"].input_schema["properties"]["action"]["enum"]) == {
         "start", "shutdown", "save", "pause", "resume", "turn_off", "reset"

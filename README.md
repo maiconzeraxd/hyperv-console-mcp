@@ -2,11 +2,11 @@
 
 A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/) server for **Hyper-V on Windows**. It combines VM management, checkpoints, PowerShell Direct diagnostics, synthetic keyboard/mouse input, experimental VMConnect capture, installation media, serial consoles, and serial WinDbg preparation in one stdio server.
 
-**Alpha status:** 227 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. An earlier elevated read-only MCP diagnostic succeeded against `NORTH-Test` for host, VM, console, serial status, media, and checkpoint queries. Live mutations, PowerShell Direct guest operations and SSH provisioning were not exercised in this delivery. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled or executed by this project.
+**Alpha status:** 233 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. An earlier elevated read-only MCP diagnostic succeeded against `NORTH-Test` for host, VM, console, serial status, media, and checkpoint queries. Live mutations, PowerShell Direct guest operations and SSH provisioning were not exercised in this delivery. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
 
 ## Highlights
 
-- **59 MCP tools** with read-only/destructive annotations and structured results.
+- **60 MCP tools** with read-only/destructive annotations and structured results.
 - Inventory, pause/resume, bounded state waiting, power, checkpoints, and bounded guest file transfer.
 - Guest OS health, processes, services, and recent event logs through PowerShell Direct.
 - Hyper-V `Msvm_Keyboard` and `Msvm_SyntheticMouse`, explicit key/button states, and ordered console batches: works without guest networking.
@@ -68,7 +68,7 @@ See [client configuration](docs/SETUP.md) for a stdio JSON example. All mutation
 | SSH (optional) | `guest_ssh_provision`, `guest_ssh_status`, `guest_ssh_deprovision` |
 | Guest credentials | `guest_credential_status`, `guest_password_rotate`, `guest_credential_forget` |
 | Guest automation | `guest_autologon_configure`, `guest_config_status`, `guest_config_revert` |
-| Driver lab | `lab_init`, `lab_diagnostics`, `lab_stage`, `lab_verify`, `lab_collect` |
+| Driver lab | `lab_init`, `lab_diagnostics`, `lab_stage`, `lab_verify`, `lab_collect`, `lab_guest_configure` |
 | Driver lab (lab profile) | `lab_run`, `lab_cycle` |
 | Activity | `events_snapshot` |
 
