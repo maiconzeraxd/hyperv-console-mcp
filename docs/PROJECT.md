@@ -160,3 +160,8 @@ An independent, local Model Context Protocol server for Hyper-V on Windows. It c
 - The MCP server and the dashboard now construct `GuestSplitBackend`, and `select_transport` still receives the same backend object, so PowerShell Direct guest traffic is routed to the guest worker without any transport change.
 - Local validation: 171 passing tests (3 new: guest/host routing, a blocked guest call that does not delay a host call, and close closing both), clean Ruff.
 - Not yet validated live: the split has only been exercised against recording fakes. Two real workers holding a PowerShell Direct session to the same VM, and the bridge's per-process session dictionary on each of them, still need a disposable VM.
+
+### 2026-10-29 — v0.2 phase 2: live SSH check script
+
+- `tests/live_ssh.py` provisions SSH on a disposable VM named by `HYPERV_MCP_LIVE_TEST_VM`, runs `guest_exec` and `guest_status` over the new transport, prints the status before and after, and can deprovision at the end. It refuses to run without a VM name, reads the guest password only from the environment, and is not collected by pytest.
+- Not yet validated live: the script has not been run. It is the checklist for the first disposable VM, not evidence that provisioning works.
