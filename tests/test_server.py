@@ -30,10 +30,13 @@ def server() -> tuple[object, FakeBackend]:
 def test_all_tools_are_discoverable(server) -> None:
     mcp, _ = server
     tools = {tool.name: tool for tool in anyio.run(mcp.list_tools)}
-    assert len(tools) == 50
+    assert len(tools) == 53
     assert tools["vm_list"].input_schema["type"] == "object"
     assert tools["vm_list"].input_schema.get("required", []) == []
     assert "password" not in tools["guest_exec"].input_schema["properties"]
+    # Credential tools never accept a secret: rotation generates one on the host.
+    assert "password" not in tools["guest_password_rotate"].input_schema["properties"]
+    assert tools["guest_credential_status"].annotations.read_only_hint is True
     assert tools["vm_list"].annotations.read_only_hint is True
     assert tools["operation_status"].annotations.read_only_hint is True
     assert tools["checkpoint_restore"].annotations.destructive_hint is True

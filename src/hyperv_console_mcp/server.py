@@ -266,6 +266,27 @@ def create_server(
         return await _invoke(service.guest_ssh_deprovision, vm_name, confirm_vm)
 
     @tool(
+        "guest_credential_status", annotations=READ_ONLY,
+        description="Report where the guest credential comes from (Credential Manager or environment), the account name, and whether PowerShell Direct and SSH accept it. Never returns the password.",
+    )
+    async def guest_credential_status(vm_name: str) -> dict[str, Any]:
+        return await _invoke(service.guest_credential_status, vm_name)
+
+    @tool(
+        "guest_password_rotate", annotations=MUTATION,
+        description="Generate a new random guest password, set it over PowerShell Direct, prove a fresh session accepts it, and only then store it in the Windows Credential Manager. Restores the previous password if the new one fails. Requires confirm_vm.",
+    )
+    async def guest_password_rotate(vm_name: str, confirm_vm: str) -> dict[str, Any]:
+        return await _invoke(service.guest_password_rotate, vm_name, confirm_vm)
+
+    @tool(
+        "guest_credential_forget", annotations=MUTATION,
+        description="Delete the stored guest credential from the Windows Credential Manager. Does not change the guest password. Requires confirm_vm.",
+    )
+    async def guest_credential_forget(vm_name: str, confirm_vm: str) -> dict[str, Any]:
+        return await _invoke(service.guest_credential_forget, vm_name, confirm_vm)
+
+    @tool(
         "lab_init", annotations=MUTATION,
         description="Install or verify fixed lab tools in C:\\DriverLab and create package/run/evidence directories. Never executes a payload. Requires confirm_vm.",
     )

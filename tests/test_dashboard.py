@@ -47,7 +47,7 @@ def test_dashboard_pages_render_with_fake_backend(tmp_path, monkeypatch) -> None
             time.sleep(0.01)
         assert app.busy == 0
         assert "NORTH-Test" in app.state_card.get()
-        for page in ("Activity", "Driver lab", "Console", "Recovery", "Media", "Debugger", "Overview"):
+        for page in ("Activity", "Driver lab", "Guest access", "Console", "Recovery", "Media", "Debugger", "Overview"):
             app.show(page)
             app.update()
         capture = os.environ.get("HYPERV_TEST_SCREENSHOT")

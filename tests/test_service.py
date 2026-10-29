@@ -461,3 +461,63 @@ def test_local_serial_mutation_uses_the_dashboard_approval_gate(
     assert backend.calls == []
     # Typed text may be a password, so the dialog only learns its size.
     assert requests == [("serial_send", "NORTH-Test", {"characters": 14, "append_newline": True})]
+
+def test_password_rotation_stores_only_after_the_guest_accepts_it(
+    enabled: HyperVService, backend: FakeBackend, monkeypatch
+) -> None:
+    from hyperv_console_mcp import credentials
+
+    stored: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(credentials, "_read", lambda target: None)
+    monkeypatch.setattr(
+        credentials, "_write", lambda target, user, password: stored.append((target, user, password))
+    )
+    backend.responses["guest_auth_check"] = {"ok": True}
+
+    result = enabled.guest_password_rotate("NORTH-Test", "NORTH-Test")
+
+    assert result["verified"] is True
+    assert result["previous_source"] == "environment"
+    changes = [payload for operation, payload in backend.calls if operation == "guest_set_password"]
+    assert changes[0]["password"] == "secret"          # authenticated with the old secret
+    assert changes[0]["new_password"] != "secret"
+    assert stored == [("HyperVConsoleMCP/NORTH-Test", "Administrator", changes[0]["new_password"])]
+    # The secret never reaches the audit log or the tool result.
+    assert "new_password" not in result and "secret" not in repr(result)
+
+
+def test_a_rejected_password_restores_the_previous_one(
+    enabled: HyperVService, backend: FakeBackend, monkeypatch
+) -> None:
+    from hyperv_console_mcp import credentials
+
+    stored: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(credentials, "_read", lambda target: None)
+    monkeypatch.setattr(
+        credentials, "_write", lambda target, user, password: stored.append((target, user, password))
+    )
+    backend.responses["guest_auth_check"] = {"ok": False, "message": "logon failure"}
+
+    with pytest.raises(BackendError) as caught:
+        enabled.guest_password_rotate("NORTH-Test", "NORTH-Test")
+
+    assert caught.value.code == "password_rotation_failed"
+    changes = [payload for operation, payload in backend.calls if operation == "guest_set_password"]
+    assert len(changes) == 2
+    assert changes[1]["password"] == changes[0]["new_password"]
+    assert changes[1]["new_password"] == "secret"
+    assert stored == []
+
+
+def test_rotation_refuses_a_vm_without_a_credential(
+    enabled: HyperVService, backend: FakeBackend, monkeypatch
+) -> None:
+    from hyperv_console_mcp import credentials
+
+    monkeypatch.setattr(credentials, "_read", lambda target: None)
+    service = HyperVService(
+        backend, replace(enabled.settings, guest_password=None), enabled.audit
+    )
+    with pytest.raises(PolicyError, match="to rotate"):
+        service.guest_password_rotate("NORTH-Test", "NORTH-Test")
+    assert backend.calls == []

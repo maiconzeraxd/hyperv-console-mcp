@@ -129,6 +129,67 @@ class _ApprovalDialog(tk.Toplevel):
         self.destroy()
 
 
+class _CredentialDialog(tk.Toplevel):
+    """Modal entry for a guest credential. The secret stays in this process."""
+
+    def __init__(self, master: tk.Misc, default_user: str = "") -> None:
+        super().__init__(master)
+        self.result: tuple[str, str] | None = None
+        self.title("Set guest credential")
+        self.configure(bg=COLORS["background"])
+        self.transient(master)
+        self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.bind("<Escape>", lambda _event: self._cancel())
+
+        frame = ttk.Frame(self, padding=16)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(
+            frame, text="Stored in the Windows Credential Manager for this user",
+            font=("Segoe UI Semibold", 12),
+        ).pack(anchor="w")
+        ttk.Label(
+            frame, wraplength=520,
+            text=(
+                "The password is written straight into the current user's vault and is "
+                "never sent to the AI, the audit log or an event."
+            ),
+        ).pack(anchor="w", pady=(6, 12))
+
+        self.username = tk.StringVar(value=default_user)
+        self.password = tk.StringVar()
+        for row, (label, variable, secret) in enumerate((
+            ("Account", self.username, False), ("Password", self.password, True),
+        )):
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=6)
+            entry = ttk.Entry(frame, textvariable=variable, width=38, show="•" if secret else "")
+            entry.grid(row=row, column=1, sticky="ew", padx=10, pady=6)
+            if secret:
+                entry.focus_set()
+        frame.columnconfigure(1, weight=1)
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        ttk.Button(buttons, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(buttons, text="Store credential", command=self._accept).pack(
+            side="right", padx=(0, 8)
+        )
+        self.update_idletasks()
+        self.grab_set()
+
+    def _accept(self) -> None:
+        username, password = self.username.get().strip(), self.password.get()
+        if not username or not password:
+            messagebox.showwarning("Incomplete", "Both fields are required.", parent=self)
+            return
+        self.result = (username, password)
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self.result = None
+        self.destroy()
+
+
 class Dashboard(tk.Tk):
     def __init__(self, vm_name: str) -> None:
         super().__init__()
@@ -200,7 +261,10 @@ class Dashboard(tk.Tk):
         ttk.Label(nav, textvariable=tk.StringVar(value=self.vm_name), foreground=COLORS["blue"]).pack(anchor="w", pady=(0, 24))
         self.content = ttk.Frame(self, padding=26)
         self.content.pack(side="right", fill="both", expand=True)
-        for page in ("Overview", "Activity", "Driver lab", "Console", "Recovery", "Media", "Debugger"):
+        for page in (
+            "Overview", "Activity", "Driver lab", "Guest access", "Console", "Recovery",
+            "Media", "Debugger",
+        ):
             ttk.Button(nav, text=page, style="Nav.TButton", command=lambda p=page: self.show(p)).pack(fill="x", pady=3)
         ttk.Frame(nav, height=1, style="Panel.TFrame").pack(fill="x", pady=20)
         flags = []
@@ -225,6 +289,7 @@ class Dashboard(tk.Tk):
             "Overview": ("Laboratory at a glance", "Live host, virtual machine, security and recovery state."),
             "Activity": ("What the AI is doing", "Cross-process operation history, progress and local approval requests."),
             "Driver lab": ("Packages, runs and evidence", "Reproducible staging with integrity checks. Staging never executes a payload."),
+            "Guest access": ("Host-managed guest credential", "Vault-backed password, rotation and access checks. The secret never reaches the AI."),
             "Console": ("Interactive guest console", "Real synthetic input to the guest. Confirm every action."),
             "Recovery": ("Checkpoints and recovery", "Inspect checkpoints. Restore and delete require a separate local confirmation."),
             "Media": ("Installation media", "Mount or eject an ISO on an existing DVD drive while the VM is Off."),
@@ -338,6 +403,79 @@ class Dashboard(tk.Tk):
         frame, self.lab_output = self._text(self.content, 18)
         frame.pack(fill="both", expand=True, pady=14)
         self._write_text(self.lab_output, "No payload is executed by initialization, staging, verification or collection.\nThe manual runner requires an elevated guest operator and an exact approval phrase.")
+
+    def _page_guest_access(self) -> None:
+        form = ttk.LabelFrame(self.content, text="Host-managed guest credential")
+        form.pack(fill="x")
+        self.credential_summary = tk.StringVar(value="Not queried")
+        ttk.Label(
+            form, textvariable=self.credential_summary, style="Panel.TLabel",
+            wraplength=980, justify="left",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 10))
+        buttons = ttk.Frame(form, style="Panel.TFrame")
+        buttons.grid(row=1, column=0, sticky="ew")
+        for text, command in (
+            ("Refresh status", self._refresh_credentials),
+            ("Definir credencial", self._set_credential),
+            ("Rotacionar senha", self._rotate_password),
+            ("Testar acesso (PS Direct / SSH)", self._refresh_credentials),
+            ("Esquecer credencial", self._forget_credential),
+        ):
+            ttk.Button(buttons, text=text, command=command).pack(side="left", padx=(0, 6))
+        frame, self.guest_access_text = self._text(self.content, 18)
+        frame.pack(fill="both", expand=True, pady=14)
+        self._write_text(
+            self.guest_access_text,
+            "The credential lives in the Windows Credential Manager under "
+            "HyperVConsoleMCP/<vm>. Environment variables remain a fallback only.\n"
+            "Rotating writes a new random password in the guest, proves a fresh session "
+            "accepts it, and restores the previous one if it does not.",
+        )
+        # No automatic query on page load: reading the status needs the guest
+        # capability, and a disabled capability should not open an error dialog
+        # just because the page was opened.
+
+    def _refresh_credentials(self) -> None:
+        def done(result: Any) -> None:
+            if hasattr(self, "guest_access_text") and self.guest_access_text.winfo_exists():
+                self._write_text(self.guest_access_text, _safe_json(result))
+            if hasattr(self, "credential_summary"):
+                self.credential_summary.set(
+                    f"Source: {result.get('source')} · account: "
+                    f"{result.get('username') or 'unknown'}"
+                )
+        self.submit(
+            "guest.credentials",
+            lambda: self.service.guest_credential_status(self.vm_name),
+            done,
+        )
+
+    def _set_credential(self) -> None:
+        dialog = _CredentialDialog(self, self.settings.guest_username or "")
+        self.wait_window(dialog)
+        if not dialog.result:
+            return
+        username, password = dialog.result
+        self.submit(
+            "guest.credential_set",
+            lambda: self.service.guest_credential_set(self.vm_name, username, password),
+            lambda _result: self._refresh_credentials(),
+        )
+
+    def _rotate_password(self) -> None:
+        self.mutate(
+            "Generate a new guest password, set it, verify it and store it?\n\n"
+            "The previous password is restored if the guest rejects the new one.",
+            lambda: self.service.guest_password_rotate(self.vm_name, self.vm_name),
+            lambda _result: self._refresh_credentials(),
+        )
+
+    def _forget_credential(self) -> None:
+        self.mutate(
+            "Delete the stored guest credential?\n\nThis does not change the guest password.",
+            lambda: self.service.guest_credential_forget(self.vm_name, self.vm_name),
+            lambda _result: self._refresh_credentials(),
+        )
 
     def _page_console(self) -> None:
         row = ttk.Frame(self.content)

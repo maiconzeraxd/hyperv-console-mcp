@@ -691,3 +691,44 @@ function Get-VMNetworkAdapter {
     )
     assert result["removed"] == ["connection"]
     assert _read_log(tmp_path) == ["Disconnect-VMNetworkAdapter:HyperV-MCP-Lab"]
+
+PASSWORD_PAYLOAD = {
+    "vm": "NORTH-Test", "username": "test-user", "password": "test-password",
+    "new_password": "N3w-Passw0rd!Value",
+}
+
+def test_guest_set_password_never_puts_the_secret_in_a_command(tmp_path: Path) -> None:
+    mocks = LOCAL_REMOTING + """
+$global:HvmcpSeen = @{}
+function Set-LocalUser {
+    param($Name, $Password)
+    $global:HvmcpSeen.Name = $Name
+    $global:HvmcpSeen.PlainLength = $Password.Length
+}
+function Enable-LocalUser { param($Name) $global:HvmcpSeen.Enabled = $Name }
+function Get-LocalUser {
+    param($Name)
+    [pscustomobject]@{ Name = $Name; Enabled = $true; PasswordLastSet = [datetime]'2026-10-29T00:00:00Z' }
+}
+"""
+    result = invoke_with_mocks(tmp_path, mocks, "guest_set_password", PASSWORD_PAYLOAD)
+    account = result["account"]
+    assert account["account"] == "test-user"
+    assert account["enabled"] is True
+    # The secret reached the guest as a script-block argument, so nothing in the
+    # result echoes it and no command string was built.
+    assert "new_password" not in result
+    assert "N3w-Passw0rd" not in str(result)
+
+def test_guest_auth_check_reports_a_rejected_password(tmp_path: Path) -> None:
+    mocks = LOCAL_REMOTING + """
+function New-PSSession { param($VMName, $Credential) throw 'The user name or password is incorrect.' }
+"""
+    result = invoke_with_mocks(tmp_path, mocks, "guest_auth_check", PASSWORD_PAYLOAD)
+    assert result["ok"] is False
+    assert "incorrect" in result["message"]
+
+def test_guest_auth_check_reports_a_working_password(tmp_path: Path) -> None:
+    result = invoke_with_mocks(tmp_path, LOCAL_REMOTING, "guest_auth_check", PASSWORD_PAYLOAD)
+    assert result["ok"] is True
+    assert result["message"] == ""

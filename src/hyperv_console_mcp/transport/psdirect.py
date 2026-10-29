@@ -5,7 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..errors import PolicyError, ValidationError
+from .. import credentials
+from ..errors import ValidationError
 from .base import ExecResult, FileResult
 
 # Structured guest operations that run the same guest-side PowerShell over any
@@ -27,16 +28,8 @@ class PowerShellDirectTransport:
         self.settings = settings
 
     def _credentials(self, vm: str) -> dict[str, str]:
-        if not self.settings.guest_username or not self.settings.guest_password:
-            raise PolicyError(
-                "PowerShell Direct requires HYPERV_MCP_GUEST_USERNAME and "
-                "HYPERV_MCP_GUEST_PASSWORD in the server environment."
-            )
-        return {
-            "vm": vm,
-            "username": self.settings.guest_username,
-            "password": self.settings.guest_password,
-        }
+        username, password = credentials.resolve(self.settings, vm)
+        return {"vm": vm, "username": username, "password": password}
 
     def _invoke(self, operation: str, payload: dict[str, Any], *, timeout: float | None = None):
         return self.backend.invoke(operation, payload, timeout=timeout or self.settings.timeout_seconds)

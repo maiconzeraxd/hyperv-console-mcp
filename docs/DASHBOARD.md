@@ -17,6 +17,7 @@ After installation, `hyperv-dashboard --vm NORTH-Test` is equivalent. Use the sa
 - **Overview:** host and VM state, capability indicators, guest diagnostics and explicit power/checkpoint actions.
 - **Activity:** operation actor, phase, progress and error code. Events from MCP and dashboard processes are read from the local event directory.
 - **Driver lab:** fixed-tool initialization, package staging, hash verification and evidence collection.
+- **Guest access:** the credential the host keeps in the Windows Credential Manager for this user, with buttons to set it locally, rotate it, test PowerShell Direct and SSH, and forget it. The password is typed into the dashboard, written straight into the vault, and never reaches the AI, the event log or the audit record.
 - **Console:** confirmed synthetic keyboard and mouse input.
 - **Recovery:** checkpoint inspection, creation, restore and deletion.
 - **Media:** host ISO selection and mount/eject on an existing DVD drive; the VM must already be Off.

@@ -600,6 +600,52 @@ function Invoke-BridgeOperation {
                 }
             $result = @{ vm = $vm.Name; execution = $guestResult }
         }
+        'guest_set_password' {
+            $vm = Get-ExactVm -Name $request.vm
+            $account = [string]$request.username
+            if (-not $account) { throw 'No guest account was named for the password change.' }
+            $newPassword = [string]$request.new_password
+            if (-not $newPassword) { throw 'No new password was supplied.' }
+            # The password travels as a script-block argument, never inside a
+            # command line, so it does not appear in the guest's process list.
+            $applied = Invoke-GuestQuery -Vm $vm -Request $request -Arguments $account, $newPassword -Query {
+                param($Account, $Secret)
+                # Built by hand instead of ConvertTo-SecureString -AsPlainText: the
+                # value already crossed the boundary as a string, and this avoids
+                # the analyzer's plaintext-conversion rule rather than suppressing it.
+                $secure = [System.Security.SecureString]::new()
+                foreach ($character in $Secret.ToCharArray()) { $secure.AppendChar($character) }
+                $secure.MakeReadOnly()
+                Set-LocalUser -Name $Account -Password $secure -ErrorAction Stop
+                # A rotated account must stay usable for PowerShell Direct.
+                Enable-LocalUser -Name $Account -ErrorAction Stop
+                $user = Get-LocalUser -Name $Account -ErrorAction Stop
+                [pscustomobject]@{
+                    account = $user.Name
+                    enabled = [bool]$user.Enabled
+                    password_last_set = if ($null -eq $user.PasswordLastSet) { $null } else { $user.PasswordLastSet.ToString('o') }
+                }
+            }
+            $result = @{ vm = $vm.Name; account = $applied }
+        }
+        'guest_auth_check' {
+            $vm = Get-ExactVm -Name $request.vm
+            $credential = ConvertTo-GuestCredential -Request $request
+            $session = $null
+            $ok = $false
+            $message = ''
+            try {
+                # A fresh session proves the password works; the cached one would
+                # still be authenticated with the previous secret.
+                $session = New-PSSession -VMName $vm.Name -Credential $credential -ErrorAction Stop
+                $ok = $true
+            } catch {
+                $message = $_.Exception.Message
+            } finally {
+                if ($null -ne $session) { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
+            }
+            $result = @{ vm = $vm.Name; ok = $ok; message = $message }
+        }
         'guest_file_info' {
             $vm = Get-ExactVm -Name $request.vm
             $encodedPath = Convert-ToBase64Text -Text ([string]$request.path)

@@ -21,6 +21,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from .. import credentials
 from ..errors import BackendError, PolicyError, ValidationError
 from .base import ExecResult, FileResult
 
@@ -158,10 +159,17 @@ class SshTransport:
 
     # -- connection ---------------------------------------------------------
 
-    def _username(self) -> str:
+    def _username(self, vm: str) -> str:
+        try:
+            stored = credentials.CredentialStore().read(vm)
+        except PolicyError:
+            stored = None
+        if stored and stored[0]:
+            return stored[0]
         if not self.settings.guest_username:
             raise PolicyError(
-                "SSH requires HYPERV_MCP_GUEST_USERNAME in the server environment."
+                "SSH needs a guest account name. Set one with guest_credential_set or "
+                "HYPERV_MCP_GUEST_USERNAME."
             )
         return str(self.settings.guest_username)
 
@@ -189,7 +197,7 @@ class SshTransport:
         paramiko = _paramiko()
         host = str(state["host"])
         port = int(state.get("port") or 22)
-        username = self._username()
+        username = self._username(vm)
         key_path = self._key_path(vm)
         cache_key = (host, port, username, str(key_path))
         with _CLIENTS_LOCK:
