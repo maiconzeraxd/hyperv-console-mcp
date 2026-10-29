@@ -146,6 +146,7 @@ Live checks that do mutate a VM exist as separate scripts and never run in the p
 | `tests/live_guest_automation.py` | autologon + toggles, thumbnail screenshot, revert |
 | `tests/live_kd.py` | KDNET or serial attach → break → stack → detach |
 | `tests/live_cycle.py` | `lab_cycle` end to end with a harmless package |
+| `tests/live_large_payload.py` | a ~100 KB `guest_exec` and file transfer over both transports |
 
 ## License
 
