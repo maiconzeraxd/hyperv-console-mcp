@@ -11,8 +11,8 @@ from typing import Any
 import pytest
 
 from hyperv_console_mcp.errors import ValidationError
+from hyperv_console_mcp.lab.publish import entry_path, validate_manifest
 from hyperv_console_mcp.lab.transfer import (
-    DriverLabTransfer,
     build_manifest,
     canonical_json,
     manifest_hash,
@@ -104,9 +104,9 @@ def test_powershell_path_validation_matches_python(tmp_path: Path) -> None:
     assert completed.stdout.strip() == "0|0"
     for value in rejected:
         with pytest.raises(ValidationError):
-            DriverLabTransfer._entry_path({"path": value})
+            entry_path({"path": value})
     for value in accepted:
-        assert DriverLabTransfer._entry_path({"path": value}) == value
+        assert entry_path({"path": value}) == value
 
 
 @pytest.mark.parametrize(
@@ -115,7 +115,7 @@ def test_powershell_path_validation_matches_python(tmp_path: Path) -> None:
 )
 def test_manifest_rejects_nonportable_windows_paths(name: str) -> None:
     with pytest.raises(ValidationError):
-        DriverLabTransfer._entry_path({"path": name})
+        entry_path({"path": name})
 
 
 def test_case_insensitive_manifest_duplicates_are_rejected(tmp_path: Path) -> None:
@@ -124,7 +124,7 @@ def test_case_insensitive_manifest_duplicates_are_rejected(tmp_path: Path) -> No
         {"path": "driver.sys", **entry}, {"path": "DRIVER.SYS", **entry},
     ]}
     with pytest.raises(ValidationError, match="duplicate"):
-        DriverLabTransfer._validate_manifest(manifest)
+        validate_manifest(manifest)
 
 
 PACKAGE_SCRIPT = MODULE.parent / "Test-DriverLabPackage.ps1"

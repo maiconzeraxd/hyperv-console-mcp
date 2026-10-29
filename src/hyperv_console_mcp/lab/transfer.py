@@ -14,28 +14,18 @@ from typing import Any
 
 from ..errors import ValidationError
 from ..events import EVENTS, ProgressReporter
+from .publish import (
+    MAX_MANIFEST_BYTES,
+    MAX_PACKAGE_BYTES,
+    MAX_PACKAGE_FILES,
+    entry_path,
+    identifier,
+    validate_manifest,
+)
 
-MAX_MANIFEST_BYTES = 4 * 1024 * 1024
-MAX_PACKAGE_BYTES = 2 * 1024 * 1024 * 1024
-MAX_PACKAGE_FILES = 512
 CHUNK_BYTES = 4 * 1024 * 1024
 MAX_ERROR_CHARS = 600
 GUEST_ROOT = r"C:\DriverLab"
-_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,63}")
-# Package paths must stay portable ASCII so the Python and PowerShell canonical
-# serializers can agree byte for byte.
-_PATH_SEGMENT = re.compile(r"[A-Za-z0-9._-]+")
-_RESERVED_NAMES = frozenset({
-    "CON", "PRN", "AUX", "NUL",
-    *(f"COM{number}" for number in range(1, 10)),
-    *(f"LPT{number}" for number in range(1, 10)),
-})
-
-
-def identifier(value: str, label: str) -> str:
-    if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
-        raise ValidationError(f"{label} must be 1-64 letters, digits, dots, or hyphens.")
-    return value
 
 
 def guest_script(path: str, *arguments: str) -> str:
@@ -94,7 +84,7 @@ def build_manifest(source: Path, package_id: str | None = None) -> dict[str, Any
                 raise ValidationError(f"Symbolic links are not accepted in a lab package: {path}")
             continue
         relative = PurePosixPath(path.relative_to(source).as_posix())
-        DriverLabTransfer._entry_path({"path": relative.as_posix()})
+        entry_path({"path": relative.as_posix()})
         if relative.as_posix().casefold() in seen_paths:
             raise ValidationError(f"Package paths must be unique on Windows: {relative}")
         seen_paths.add(relative.as_posix().casefold())
@@ -129,49 +119,10 @@ class DriverLabTransfer:
     def guest_package_path(package_id: str) -> str:
         return rf"{GUEST_ROOT}\Packages\{identifier(package_id, 'package_id')}"
 
-    @staticmethod
-    def _entry_path(entry: dict[str, Any]) -> str:
-        relative = PurePosixPath(entry.get("path", ""))
-        text = relative.as_posix()
-        if (
-            not relative.parts or relative.is_absolute() or ".." in relative.parts
-            or text != entry.get("path") or len(text) > 240
-        ):
-            raise ValidationError("The manifest contains an unsafe or non-portable relative path.")
-        for part in relative.parts:
-            if (
-                part in {".", ".."} or _PATH_SEGMENT.fullmatch(part) is None
-                or part.endswith(".")
-                or part.split(".", 1)[0].upper() in _RESERVED_NAMES
-            ):
-                raise ValidationError("The manifest contains an unsafe or non-portable relative path.")
-        return text
-
-    @staticmethod
-    def _validate_manifest(manifest: dict[str, Any]) -> None:
-        if manifest.get("schema") != 1 or not isinstance(manifest.get("files"), list):
-            raise ValidationError("Unsupported or incomplete lab manifest.")
-        identifier(manifest.get("package_id", ""), "package_id")
-        if not 1 <= len(manifest["files"]) <= MAX_PACKAGE_FILES:
-            raise ValidationError("The manifest file count is outside its limits.")
-        paths = set()
-        total = 0
-        for entry in manifest["files"]:
-            path = DriverLabTransfer._entry_path(entry)
-            size = entry.get("size")
-            if not isinstance(size, int) or isinstance(size, bool) or path.casefold() in paths or size < 0 or len(entry.get("sha256", "")) != 64:
-                raise ValidationError("The manifest contains a duplicate or invalid file entry.")
-            if not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]):
-                raise ValidationError("The manifest contains an invalid SHA-256.")
-            paths.add(path.casefold())
-            total += entry["size"]
-        if total > MAX_PACKAGE_BYTES:
-            raise ValidationError("The manifest exceeds the 2 GiB package limit.")
-
     def stage(
         self, vm_name: str, source: Path, manifest: dict[str, Any], *, chunk_bytes: int = CHUNK_BYTES
     ) -> dict[str, Any]:
-        self._validate_manifest(manifest)
+        validate_manifest(manifest)
         if not 1024 * 1024 <= chunk_bytes <= 8 * 1024 * 1024:
             raise ValidationError("chunk_bytes must be between 1 MiB and 8 MiB.")
         source = source.resolve()
@@ -187,7 +138,7 @@ class DriverLabTransfer:
         completed = 0
         reporter.update(0, f"Preparing {len(manifest['files'])} verified package files.")
         for entry in manifest["files"]:
-            relative = self._entry_path(entry)
+            relative = entry_path(entry)
             local = source.joinpath(*PurePosixPath(relative).parts)
             if not local.is_file() or local.is_symlink() or local.stat().st_size != entry["size"]:
                 raise ValidationError(f"Package file is missing or changed size: {relative}")
@@ -198,7 +149,7 @@ class DriverLabTransfer:
             if digest.hexdigest() != entry["sha256"]:
                 raise ValidationError(f"Package file changed after manifest creation: {relative}")
         for index, entry in enumerate(manifest["files"]):
-            relative = self._entry_path(entry)
+            relative = entry_path(entry)
             local = source.joinpath(*PurePosixPath(relative).parts)
             remote = staging + "\\" + "\\".join(PurePosixPath(relative).parts)
             if entry["size"] <= chunk_bytes:
@@ -302,7 +253,7 @@ class DriverLabTransfer:
         destination.mkdir(parents=True, exist_ok=False)
         receipts = []
         for entry in index["files"]:
-            relative = self._entry_path(entry)
+            relative = entry_path(entry)
             size = entry.get("size")
             if not isinstance(size, int) or isinstance(size, bool) or not 0 <= size <= MAX_PACKAGE_BYTES:
                 raise ValidationError("Guest evidence file size is invalid.")
