@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,12 @@ EVIDENCE_FAILURE = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_settle_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The classifier waits for a reboot to show up; tests do not need the clock."""
+    monkeypatch.setattr(lab_run, "SETTLE_POLL_SECONDS", 0)
+
+
 class FakeLabService:
     """Just enough of HyperVService for the run/cycle orchestration."""
 
@@ -27,12 +34,14 @@ class FakeLabService:
         self,
         *,
         state: str = "Running",
-        uptime: int = 500,
+        uptime: float = 500,
         after: dict[str, Any] | None = None,
+        after_sequence: list[dict[str, Any]] | None = None,
         verification: bool = True,
         run_result: dict[str, Any] | None = None,
         run_error: Exception | None = None,
         events: list[dict[str, Any]] | None = None,
+        host_events: list[dict[str, Any]] | None = None,
         evidence: bool = True,
         kd_event: dict[str, Any] | None = None,
         manifest: dict[str, Any] | None = None,
@@ -41,10 +50,12 @@ class FakeLabService:
         self.state = state
         self.uptime = uptime
         self.after = after
+        self.after_sequence = after_sequence
         self.verification = verification
         self.run_result = run_result
         self.run_error = run_error
         self.events = events
+        self.host_events = host_events
         self.evidence = evidence
         self.kd_event = kd_event or {"event": "break", "module": None}
         self.manifest = manifest
@@ -57,7 +68,12 @@ class FakeLabService:
     # -- host side ---------------------------------------------------------
     def get_vm(self, vm_name: str) -> dict[str, Any]:
         self.calls.append(("vm_get", vm_name))
-        if self.calls.count(("vm_get", vm_name)) > 1 and self.after is not None:
+        seen = self.calls.count(("vm_get", vm_name))
+        if seen > 1 and self.after is not None:
+            if self.after_sequence is not None:
+                # Successive reads model a VM that is still finishing a dump.
+                index = min(seen - 2, len(self.after_sequence) - 1)
+                return {"vm": self.after_sequence[index]}
             return {"vm": self.after}
         return {"vm": {"name": vm_name, "state": self.state, "uptime_seconds": self.uptime}}
 
@@ -84,6 +100,21 @@ class FakeLabService:
         if self.events is None:
             raise BackendError("the guest is gone", code="bridge_transport")
         return {"events": self.events}
+
+    def host_crash_events(
+        self, vm_name: str, hours: int = 2, max_events: int = 20
+    ) -> dict[str, Any]:
+        self.calls.append(("host_crash_events", vm_name))
+        if self.host_events is None:
+            raise BackendError("the host log is not readable", code="access_denied")
+        events = []
+        for event in self.host_events:
+            stamped = dict(event)
+            # An event without a time is one the host writes right now, which is
+            # what a crash during the run looks like.
+            stamped.setdefault("time", datetime.now(timezone.utc).isoformat())
+            events.append(stamped)
+        return {"events": events}
 
     # -- guest side --------------------------------------------------------
     def guest_exec(
@@ -201,6 +232,88 @@ def test_run_classifies_a_reboot_as_a_bugcheck() -> None:
     assert "rebooted" in report["detail"]
     assert report["bugcheck"] == [{"id": 1001, "message": "The computer has rebooted from a bugcheck."}]
     assert report["payload_executed"] is True
+
+
+def test_run_classifies_a_reboot_as_a_bugcheck_when_uptime_is_a_float() -> None:
+    """Regression: the bridge rounds uptime, so it always arrives as a float.
+
+    `vm_get` reports `[Math]::Round($Vm.Uptime.TotalSeconds, 3)`. The baseline and
+    the classification both tested `isinstance(uptime, int)`, which never matched:
+    the baseline stayed at 0 and a crash+reboot came back as a hang.
+    """
+    service = FakeLabService(
+        uptime=500.0,
+        run_error=BackendError("the guest session dropped", code="bridge_transport"),
+        after={"state": "Running", "uptime_seconds": 20.5},
+    )
+    report = _run(service)
+
+    assert report["outcome"] == "bugcheck"
+    assert "20.5" in report["detail"]
+
+
+def test_run_classifies_a_host_recorded_crash_as_a_bugcheck() -> None:
+    """A guest writing its dump still looks like a running VM with a high uptime.
+
+    Hyper-V writes event 18590 the moment the guest crashes, with the bugcheck
+    code as a numeric field. That record decides the outcome; the uptime does not
+    have to move first.
+    """
+    service = FakeLabService(
+        run_error=BackendError("the guest session dropped", code="bridge_transport"),
+        after={"state": "Running", "uptime_seconds": 900.0},
+        host_events=[{
+            "id": 18590,
+            "vm_name": "NORTH-Test",
+            "bugcheck_code": "0xd1",
+            "parameters": ["0x1", "0x2", "0x3", "0x4"],
+        }],
+    )
+    report = _run(service)
+
+    assert report["outcome"] == "bugcheck"
+    assert "0xd1" in report["detail"]
+    assert report["bugcheck_source"] == "host"
+    assert report["bugcheck"][0]["bugcheck_code"] == "0xd1"
+
+
+def test_a_crash_from_before_the_run_does_not_classify_it() -> None:
+    """The host log is a time window, so an older crash must not be claimed."""
+    service = FakeLabService(
+        run_error=BackendError("the guest session dropped", code="bridge_transport"),
+        after={"state": "Running", "uptime_seconds": 500.0},
+        host_events=[{
+            "id": 18590,
+            "time": "2020-01-01T00:00:00+00:00",
+            "vm_name": "NORTH-Test",
+            "bugcheck_code": "0x9f",
+        }],
+    )
+    report = _run(service)
+
+    assert report["outcome"] == "hang"
+    assert report["bugcheck"] is None
+
+
+def test_the_classifier_waits_for_a_reboot_that_arrives_late() -> None:
+    """The reboot lands a moment after the guest call fails.
+
+    Reading the state once called that a hang. The classifier polls briefly, so
+    the reboot that follows the dump is still seen.
+    """
+    service = FakeLabService(
+        uptime=500.0,
+        run_error=BackendError("the guest session dropped", code="bridge_transport"),
+        after={"state": "Running", "uptime_seconds": 900.0},
+        after_sequence=[
+            {"state": "Running", "uptime_seconds": 900.0},
+            {"state": "Running", "uptime_seconds": 12.0},
+        ],
+    )
+    report = _run(service)
+
+    assert report["outcome"] == "bugcheck"
+    assert service.calls.count(("vm_get", "NORTH-Test")) >= 3
 
 
 def test_run_classifies_an_unreachable_but_running_guest_as_a_hang() -> None:

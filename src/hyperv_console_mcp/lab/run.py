@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import json
+import numbers
 import re
 import time
 from datetime import datetime, timezone
@@ -24,6 +25,11 @@ MAX_RESULT_BYTES = 1024 * 1024
 # A reboot moves the guest's uptime back to the time since it restarted, so a
 # lower uptime than the pre-run baseline is the reliable bugcheck signal.
 REBOOT_GRACE_SECONDS = 30
+# A guest that bugchecked can spend several seconds writing its dump while the
+# VM still reports Running and a high uptime. Classifying on the first sample
+# called that a hang, so the state is re-read a few times before deciding.
+SETTLE_POLL_SECONDS = 1.5
+SETTLE_POLL_ATTEMPTS = 4
 OUTCOMES = ("ok", "failed", "not_verified", "bugcheck", "hang", "timeout")
 _HASH = re.compile(r"[0-9a-fA-F]{64}")
 
@@ -59,6 +65,19 @@ def run_command(package_id: str, run_id: str, digest: str) -> str:
     )
 
 
+def _seconds(value: Any) -> float | None:
+    """Read an uptime the bridge rounded to a float.
+
+    `vm_get` reports `uptime_seconds` as `[Math]::Round($Vm.Uptime.TotalSeconds, 3)`,
+    which always arrives as a float. An earlier `isinstance(value, int)` test
+    therefore never matched, so the baseline stayed at 0 and every crash+reboot
+    was classified as a hang. Any real number counts; bool is not a number here.
+    """
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        return None
+    return float(value)
+
+
 def _read_result(service: Any, vm_name: str, run_id: str) -> dict[str, Any] | None:
     try:
         fetched = service.guest_read_file(vm_name, result_path(run_id), max_bytes=MAX_RESULT_BYTES)
@@ -79,15 +98,67 @@ def _vm_state(service: Any, vm_name: str) -> dict[str, Any] | None:
         return None
 
 
+def _settle_state(
+    service: Any, vm_name: str, baseline_uptime: float, after: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Give the VM a moment to finish what a crash started.
+
+    While a dump is being written the guest is unreachable but the VM still
+    reports Running with a high uptime, which looks exactly like a hang. Polling
+    briefly catches the reboot (or the power-off) that follows.
+    """
+    for _ in range(SETTLE_POLL_ATTEMPTS - 1):
+        if after is None:
+            break
+        uptime = _seconds(after.get("uptime_seconds"))
+        rebooted = uptime is not None and uptime < baseline_uptime
+        running = str(after.get("state", "")).casefold() == "running"
+        if rebooted or not running:
+            break
+        time.sleep(SETTLE_POLL_SECONDS)
+        after = _vm_state(service, vm_name)
+    return after
+
+
+def _parse_time(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _crashes_since(
+    events: list[dict[str, Any]] | None, started_utc: str | None
+) -> list[dict[str, Any]]:
+    """The host-recorded crashes that happened during this run, oldest first."""
+    start = _parse_time(started_utc)
+    if not events or start is None:
+        return []
+    found: list[tuple[datetime, dict[str, Any]]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        when = _parse_time(event.get("time"))
+        if when is None or when < start:
+            continue
+        found.append((when, event))
+    found.sort(key=lambda item: item[0])
+    return [event for _, event in found]
+
+
 def _classify(
     *,
     execution: dict[str, Any] | None,
     record: dict[str, Any] | None,
     error: HyperVError | None,
     after: dict[str, Any] | None,
-    baseline_uptime: int,
+    baseline_uptime: float,
     elapsed: float,
     timeout: int,
+    crash: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     if record is not None:
         if record.get("success"):
@@ -98,17 +169,22 @@ def _classify(
         # The guest answered, so the VM is alive; the runner simply did not
         # leave a result file behind.
         return "failed", "the guest answered but wrote no result file"
+    if crash is not None:
+        # The host saw the crash as it happened, which beats inferring one from
+        # uptime after the fact.
+        code = crash.get("bugcheck_code") or "an unknown code"
+        return "bugcheck", f"the host recorded a guest crash during the run (bugcheck {code})"
     if after is None:
         return "hang", "the guest is unreachable and the host could not read the VM state"
     state = str(after.get("state", ""))
-    uptime = after.get("uptime_seconds")
-    if isinstance(uptime, int) and not isinstance(uptime, bool):
+    uptime = _seconds(after.get("uptime_seconds"))
+    if uptime is not None:
         expected = baseline_uptime + int(elapsed)
         if uptime < baseline_uptime or uptime + REBOOT_GRACE_SECONDS < expected:
             return (
                 "bugcheck",
                 f"the guest stopped answering and the VM rebooted "
-                f"(uptime {uptime}s against {expected}s before the run)",
+                f"(uptime {uptime:g}s against {expected}s before the run)",
             )
     if state.casefold() != "running":
         return "hang", f"the guest stopped answering and the VM is {state or 'in an unknown state'}"
@@ -118,7 +194,17 @@ def _classify(
     return "hang", f"the guest stopped answering while the VM kept running ({code or 'no detail'})"
 
 
-def _bugcheck_events(service: Any, vm_name: str) -> list[dict[str, Any]] | None:
+def _host_crashes(service: Any, vm_name: str) -> list[dict[str, Any]] | None:
+    """Hyper-V's crash record for this VM, read on the host."""
+    try:
+        result = service.host_crash_events(vm_name, hours=2, max_events=20)
+    except HyperVError:
+        return None
+    events = result.get("events")
+    return events if isinstance(events, list) else None
+
+
+def _guest_bugcheck_events(service: Any, vm_name: str) -> list[dict[str, Any]] | None:
     """Best effort: the guest may be gone, so a failure here is not an error."""
     try:
         result = service.guest_events(
@@ -128,6 +214,25 @@ def _bugcheck_events(service: Any, vm_name: str) -> list[dict[str, Any]] | None:
         return None
     events = result.get("events")
     return events if isinstance(events, list) else None
+
+
+def _bugcheck_events(
+    service: Any, vm_name: str, host_events: list[dict[str, Any]] | None,
+    started_utc: str | None,
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """The crash evidence to report, and where it came from.
+
+    The host writes the crash the moment it happens; the guest's event 1001 only
+    appears after it has rebooted and logged far enough to write it, so it is the
+    fallback rather than the primary source.
+    """
+    recent = _crashes_since(host_events, started_utc)
+    if recent:
+        return recent, "host"
+    guest_events = _guest_bugcheck_events(service, vm_name)
+    if guest_events:
+        return guest_events, "guest"
+    return None, None
 
 
 def _report(
@@ -147,6 +252,7 @@ def _report(
     after: dict[str, Any] | None,
     bugcheck: list[dict[str, Any]] | None,
     payload_executed: bool,
+    bugcheck_source: str | None = None,
 ) -> dict[str, Any]:
     return {
         "vm": vm_name,
@@ -165,6 +271,7 @@ def _report(
         "result": record,
         "vm_after": after,
         "bugcheck": bugcheck,
+        "bugcheck_source": bugcheck_source,
         "payload_executed": payload_executed,
     }
 
@@ -193,8 +300,8 @@ def run(
             f"lab_run needs the VM Running; it is {state or 'unknown'}. "
             "The run never changes power state on its own."
         )
-    uptime = before.get("uptime_seconds")
-    baseline_uptime = uptime if isinstance(uptime, int) and not isinstance(uptime, bool) else 0
+    uptime = _seconds(before.get("uptime_seconds"))
+    baseline_uptime = uptime if uptime is not None else 0.0
 
     checkpoint: dict[str, Any] | None = None
     if checkpoint_before:
@@ -231,17 +338,32 @@ def run(
 
     record = _read_result(service, vm_name, run_identifier) if execution is not None else None
     after = _vm_state(service, vm_name)
+    host_events: list[dict[str, Any]] | None = None
+    crash: dict[str, Any] | None = None
+    if execution is None and record is None:
+        # The guest stopped answering. Give the VM a moment to finish a dump and
+        # reboot, then ask the host whether it recorded a crash: that is a
+        # definite answer, where uptime arithmetic is only an inference.
+        after = _settle_state(service, vm_name, baseline_uptime, after)
+        host_events = _host_crashes(service, vm_name)
+        crashes = _crashes_since(host_events, started_utc)
+        crash = crashes[-1] if crashes else None
     outcome, detail = _classify(
         execution=execution, record=record, error=error, after=after,
-        baseline_uptime=baseline_uptime, elapsed=elapsed, timeout=timeout,
+        baseline_uptime=baseline_uptime, elapsed=elapsed, timeout=timeout, crash=crash,
     )
-    bugcheck = _bugcheck_events(service, vm_name) if outcome == "bugcheck" else None
+    bugcheck: list[dict[str, Any]] | None = None
+    bugcheck_source: str | None = None
+    if outcome == "bugcheck":
+        bugcheck, bugcheck_source = _bugcheck_events(
+            service, vm_name, host_events, started_utc
+        )
     return _report(
         vm_name, package, run_identifier,
         outcome=outcome, detail=detail, started_utc=started_utc, elapsed=elapsed,
         timeout=timeout, checkpoint=checkpoint, verification=verification,
         execution=execution, record=record, after=after, bugcheck=bugcheck,
-        payload_executed=True,
+        payload_executed=True, bugcheck_source=bugcheck_source,
     )
 
 

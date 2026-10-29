@@ -1592,6 +1592,47 @@ function Invoke-BridgeOperation {
             }
             $result = @{ vm = $vm.Name; rule_name = $ruleName; removed = $removed }
         }
+        'host_crash_events' {
+            $vm = Get-ExactVm -Name $request.vm
+            $hours = [int]$request.hours
+            $maximum = [int]$request.max_events
+            # Hyper-V's worker writes one event per guest crash to this channel. The
+            # channel and the id are the same on every host; only the message text is
+            # translated, and nothing below reads it. The bugcheck code and its four
+            # parameters are named hexadecimal fields of the event template, so they
+            # come out as numbers whatever the display language is.
+            $filter = @{
+                LogName = 'Microsoft-Windows-Hyper-V-Worker-Admin'
+                Id = 18590
+                StartTime = (Get-Date).AddHours(-$hours)
+            }
+            $crashes = @()
+            try {
+                foreach ($entry in @(Get-WinEvent -FilterHashtable $filter -MaxEvents $maximum -ErrorAction Stop)) {
+                    $values = @($entry.Properties | ForEach-Object { $_.Value })
+                    $name = if ($values.Count -ge 1) { [string]$values[0] } else { '' }
+                    if ($name -and $name -ne $vm.Name) { continue }
+                    $codes = @()
+                    if ($values.Count -ge 7) {
+                        $codes = @($values[2..6] | ForEach-Object { '0x{0:x}' -f [uint64]$_ })
+                    }
+                    $crashes += [pscustomobject]@{
+                        record_id = $entry.RecordId
+                        time = $entry.TimeCreated.ToString('o')
+                        id = $entry.Id
+                        vm_name = $name
+                        vm_id = if ($values.Count -ge 2) { [string]$values[1] } else { '' }
+                        bugcheck_code = if ($codes.Count -ge 1) { $codes[0] } else { $null }
+                        parameters = if ($codes.Count -ge 5) { @($codes[1..4]) } else { @() }
+                    }
+                }
+            } catch {
+                # A host without the channel (or a caller that cannot read it) simply
+                # has no crash record to offer; the guest-side fallback still runs.
+                if ($_.FullyQualifiedErrorId -notmatch 'NoMatchingEventsFound') { throw }
+            }
+            $result = @{ vm = $vm.Name; events = @($crashes); log_name = 'Microsoft-Windows-Hyper-V-Worker-Admin' }
+        }
         default {
             throw ([System.ArgumentException]::new("Unsupported bridge operation '$Operation'."))
         }

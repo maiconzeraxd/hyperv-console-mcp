@@ -467,6 +467,28 @@ class HyperVService:
             payload["level"] = _integer(level, "level", 1, 5)
         return self._guest_call("guest_events", vm_name, payload)
 
+    def host_crash_events(
+        self, vm_name: str, hours: int = 2, max_events: int = 20
+    ) -> dict[str, Any]:
+        """Hyper-V's own record of a guest crash, read on the host.
+
+        The guest's event 1001 is only written once it has rebooted far enough to
+        log it, so it cannot classify a crash that is still writing its dump. The
+        host records the crash the moment it happens, with the bugcheck code and
+        its parameters as numbers.
+        """
+        name = self._vm(vm_name)
+        return self._run(
+            "host_crash_events",
+            "host_crash_events",
+            {
+                "vm": name,
+                "hours": _integer(hours, "hours", 1, 24 * 365),
+                "max_events": _integer(max_events, "max_events", 1, 200),
+            },
+            vm_name=name,
+        )
+
     def guest_read_file(
         self, vm_name: str, guest_path: str, max_bytes: int = 65_536
     ) -> dict[str, Any]:
