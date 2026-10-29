@@ -532,3 +532,22 @@ the fallback to the bridge (a checkpoint named `wmi-delete-probe`), and `checkpo
 removed it from WMI with the count going 12 → 13 → 12. Not exercised live: `checkpoint_restore`,
 which would revert the guest to a checkpoint, and the create path through WMI, which is not
 served.
+
+### 2026-10-29 — v0.3 phase 4: the console thumbnail from the provider
+
+- **`GetVirtualSystemThumbnailImage` on the management service, not the bridge.**
+  `thumbnail.py` asks for the caller's width and height, base64-encodes the `ImageData` byte
+  array and infers the row stride from the payload length the way the bridge does — the
+  provider can pad rows, and 640×480 came back as 614,404 bytes rather than 614,400, so
+  `len // height` is the honest stride. A payload shorter than `width × height × 2` is an
+  error rather than a silently cropped image, and a size outside 1..16384 is refused before
+  the call, with the bridge's wording.
+- **The provider's own return code is kept in the message.** The bridge's text
+  (`GetVirtualSystemThumbnailImage returned 4 for 'NORTH-Test'.`) is reproduced exactly, so
+  a caller that already parses it keeps working.
+
+Live validation (elevated, `NORTH-Test` on this host): with the VM paused so both paths saw
+the same frame, the WMI thumbnail and the bridge's were compared — `vm`, `state`, `width`,
+`height`, `format`, `byte_length`, `stride_bytes` all equal, and the **decoded payloads were
+byte-for-byte identical** (614,404 bytes). The VM was resumed afterwards and confirmed
+`Running`. Not validated live: a thumbnail from a stopped VM, which no tool asks for.
