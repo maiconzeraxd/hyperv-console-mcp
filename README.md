@@ -2,7 +2,7 @@
 
 A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/) server for **Hyper-V on Windows**. It combines VM management, checkpoints, PowerShell Direct diagnostics, synthetic keyboard/mouse input, console screenshots without VMConnect, installation media, serial consoles, and serial WinDbg preparation and a live kd.exe kernel-debugging session in one stdio server.
 
-**Alpha status:** 595 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
+**Alpha status:** 632 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
 
 ## Highlights
 
@@ -157,7 +157,7 @@ Live checks that do mutate a VM exist as separate scripts and never run in the p
 | `tests/live_readonly.py` | host, VM, console and debugger status, no changes |
 | `tests/live_mcp_readonly.py` | the same through a real MCP stdio client |
 | `tests/live_ssh.py` | SSH provisioning, transport round trip, deprovision |
-| `tests/live_lab_publish.py` | atomic package staging and the publish refusal |
+| `tests/live_lab_publish.py` | atomic package staging, host-side verification and the publish refusal |
 | `tests/live_guest_automation.py` | autologon + toggles, thumbnail screenshot, revert |
 | `tests/live_kd.py` | KDNET or serial attach → break → stack → detach |
 | `tests/live_cycle.py` | `lab_cycle` end to end with a harmless package |

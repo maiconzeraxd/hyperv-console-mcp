@@ -993,3 +993,36 @@ Live, read-only on `NORTH-Test`: `guest_config_status` returned `crash_dump_enab
 `dump_support {memory 4 293 791 744, pagefile 1 476 395 008, sufficient: false}` — the derived view
 matching the raw facts the guest sent. Tests: 632 passing, 1 skipped.
 
+## Phase 4 report
+
+**What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,
+firmware and Secure Boot, media, console input, thumbnails, serial preparation, host crash events,
+job status), each with its own module and tests; anything not in `HANDLERS` falls back to the
+PowerShell worker with `wmi_unsupported`, so the migration stayed incremental. The bridge keeps the
+PowerShell Direct work: one reused `New-PSSession` per VM (`Get-GuestSession`, dropped when the
+uptime says the guest rebooted) and `Copy-Item -ToSession`/`-FromSession` in both directions with a
+SHA-256 check. `GuestSplitBackend` runs guest operations on a second worker, so a long guest command
+no longer blocks `vm_get`, the console or the dashboard. On the guest side, `lab/publish.py` owns
+every package decision (`guest_package_inspect`/`guest_package_list` return facts only),
+`DriverLab.Common.psm1` lost its canonical-JSON implementation, `Test-DriverLabPackage.ps1` hashes
+the manifest file, and `guest_config.ps1` reports raw registry/BCD/memory facts with
+`transport/guest_config.py::derive_live` computing the view.
+
+**Tests added across the phase.** WMI handler tests with a fake COM connection, the publish/verify
+split (including a re-indented manifest being refused), the SSH provisioning upload of
+`guest_operations.ps1` and the per-process execution-policy bypass, the session-reuse and
+`Copy-Item` round trips, and the live-view derivation. Suite: 632 passing, 1 skipped.
+
+**Validated live on `NORTH-Test`.** WMI power/checkpoint/firmware paths; the guest session being
+reused, a reboot opening a new one, and the second worker holding; a 100 KB `guest_exec` and a
+100 KB file over both transports; package staging, host-side verification, a tampered file being
+named, and the publish refusal over PowerShell Direct and SSH; `guest_config_status` with the
+derived view.
+
+**Still pending, and why.** `ssh_network_prepare`/`ssh_network_remove` remain in the bridge: they mix
+Hyper-V objects (the internal switch, the adapter) with host network-stack calls that are not WMI,
+so they cannot move as one operation without splitting the command in two. `HyperVBridge.ps1` is
+still 1 776 lines, most of it the guest operations PowerShell Direct requires. The crash classifier
+(`bugcheck` versus `hang` without a debugger) is still covered only by unit tests: inducing a
+bugcheck means running a payload, which stays a separate operator decision.
+
