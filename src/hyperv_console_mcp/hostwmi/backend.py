@@ -19,7 +19,7 @@ from ..backend import (
     PowerShellBackend,
 )
 from ..errors import BackendError
-from . import checkpoint, console, host, media, power, thumbnail, vm
+from . import checkpoint, console, host, media, power, serial, thumbnail, vm
 from .connection import ComConnection, Connection, WmiFailure
 
 UNSUPPORTED = "wmi_unsupported"
@@ -49,6 +49,7 @@ HANDLERS: dict[str, Handler] = {
     "console_mouse_buttons": console.console_mouse_buttons,
     "console_scroll": console.console_scroll,
     "console_batch": console.console_batch,
+    "debug_serial_status": serial.debug_serial_status,
 }
 
 

@@ -649,3 +649,23 @@ dictionaries and **were equal**; `console_scroll` (+120), `console_click` at 5,5
 left button, a press-and-release of the left button, and a five-action batch (move, wait,
 `shift` down, `shift` up, buttons released) all returned `0` and reported every action. Not
 validated live: a click that lands on a guest window, and a drag (which no tool offers).
+
+### 2026-10-29 — v0.3 phase 4: the COM ports and the debugger tools
+
+- **A serial port is an `Msvm_SerialPortSettingData` of resource type 21**, named
+  `Microsoft:<vm>\<controller>\<index>` where the index is zero-based — the tool's COM number
+  is that index plus one. The pipe or device is `Connection[0]`, and `DebuggerMode` is the
+  flag `Get-VMComPort` shows as On or Off.
+- **The class holds every VM's ports and every checkpoint's copy**, so the query is scoped by
+  the VM's InstanceID prefix; the port order is imposed here because a WQL query has none.
+- **An unconnected port reports `''`, not `None`.** The bridge's `$Port.Path` is the empty
+  string and the live comparison caught the difference — a caller that compares the two
+  answers would have seen it.
+- **The tool probe is not WMI.** `windbgx` and `kdnet_installed` are two paths on the host,
+  answered here instead of costing a worker round trip.
+
+Live validation (elevated, `NORTH-Test` on this host, VM running): `debug_serial_status`
+through WMI and through the bridge were compared as whole dictionaries — `vm`, `state`, both
+COM ports (`COM 1` on `\.\pipe\north-test-kd` in debugger mode, `COM 2` unconnected) and the
+three tool flags — and **the answers were equal**. Not validated live: a VM whose ports are
+not in debugger mode on COM 1, which this VM's are.
