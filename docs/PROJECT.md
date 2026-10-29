@@ -1380,3 +1380,40 @@ still 1 776 lines, most of it the guest operations PowerShell Direct requires. T
 (`bugcheck` versus `hang` without a debugger) is still covered only by unit tests: inducing a
 bugcheck means running a payload, which stays a separate operator decision.
 
+
+## Phase 5 report
+
+**What changed.** Zero-config discovery: `hostwmi/kvp.py` reads the guest's computer name, OS and IPs
+from `Msvm_KvpExchangeComponent` with no credential, and `vm_get`/`vm_list` carry it as
+`guest_facts`; the VM list, generation, Secure Boot, COM ports and DVD drives come from
+`root\virtualization\v2`; `kd/discovery.py` finds the SDK debugger and `host_status` reports whether
+this process can administer Hyper-V at all; `%LOCALAPPDATA%\HyperVConsoleMCP\` is created on demand.
+One level per VM (`access.py`, `hyperv-access`) replaced the seven `HYPERV_MCP_ALLOW_*` variables as
+the way to say what a VM may do, and the shipped defaults `--vm NORTH-Test` / `north-kd` are gone —
+a test fails if either name comes back. A refusal now carries `fix` (`{tool, args}` or
+`{operator}`), so a missing credential, a stopped SSH service or a running VM names the call that
+closes the gap. `service/host.py` puts the service in one background process over a hardened named
+pipe and `service/remote.py` gives the MCP server and both windows one envelope to reach it, with
+`open_service` as the single factory. The window is a WebView2 page (`webui/`), and `install.py`
+writes a client's MCP configuration and a Start Menu shortcut.
+
+**Tests added across the phase.** KVP parsing and its no-guest case, the level-to-capability map and
+its precedence over the flags, the fix contract with source sweeps that every named tool exists and
+every argument matches its schema, the pipe's framing and its refusals, the proxy and dispatch
+envelope, the page's API surface and the page's own constraints (no `http://`, no remote asset), and
+`hyperv-install`'s create/merge/refuse/unchanged paths. Suite: 762 passing, 1 skipped.
+
+**Validated live on this host and `NORTH-Test`.** KVP `guest_facts` (`DESKTOP-AA9PSTJ`, its OS and
+IPs) through the WMI backend; the single service holding one worker across processes, with a client
+that finds a host joining it instead of starting a second; the level file read by a running service
+after `hyperv-access` wrote it; `hyperv-install` in a throwaway `USERPROFILE` against the real console
+script, including a refused invalid file and a real `.lnk`; and the window itself — eight pages
+rendering, the VM chooser, an approval card answered from the page, and a level change greying out
+guest and debugger.
+
+**Still pending, and why.** The window has not been driven against a *live* guest: this shell is
+unelevated, so Hyper-V reads return `access_denied` and the capture path needs an elevated session;
+the pages were rendered over a fake service and the real one, but no screenshot of `NORTH-Test` has
+been drawn in it. A real MCP mutation held open while an operator clicks *Approve once* in the
+window also waits on a human. `uvx hyperv-console-mcp` was not exercised as a launch path — the
+console scripts from a real install were, which is the same entry point.
