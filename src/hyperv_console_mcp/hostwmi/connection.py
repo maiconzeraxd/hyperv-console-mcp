@@ -102,12 +102,23 @@ class ComConnection:
             target = service.Get(path)
             in_parameters = target.Methods_(method).InParameters.SpawnInstance_()
             for name, value in parameters.items():
-                setattr(in_parameters, name, value)
-            return _as_dict(service.ExecMethod_(path, method, in_parameters))
+                _set_property(in_parameters, name, value)
+            return _as_dict(service.ExecMethod(path, method, in_parameters))
         except WmiFailure:
             raise
         except Exception as exc:
             raise WmiFailure(f"WMI method {method} failed: {exc}") from exc
+
+
+def _set_property(obj: Any, name: str, value: Any) -> None:
+    """Write one property of a WMI instance through its property set.
+
+    ``setattr`` is not an option here: pywin32's gen_py wrapper resolves
+    attribute writes against the type library, and a parameter object from
+    ``SpawnInstance_()`` carries no such entries, so it raises ``KeyError``
+    before the value ever reaches the provider.
+    """
+    obj.Properties_.Item(name).Value = value
 
 
 def _as_dict(obj: Any) -> dict[str, Any]:

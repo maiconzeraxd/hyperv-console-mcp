@@ -459,5 +459,41 @@ localized status text, the DVD media paths, the switch name and the guest IP add
 same call through `HyperVService` (allowlist and audit included) returned the same object in
 190 ms. `host_status` over CIM also works unelevated, where the bridge needs elevation.
 
-Not validated live: any power action, checkpoint operation, DVD/COM change, synthetic
-keyboard or thumbnail through WMI — those are still on the bridge, which is the next slice.
+Not validated live in this slice: any checkpoint operation, DVD/COM change, synthetic
+keyboard or thumbnail through WMI — those are still on the bridge.
+
+### 2026-10-29 — v0.3 phase 4: power through RequestStateChange
+
+- **`power.py` sends one `RequestStateChange` and then waits on the job.** The provider
+  answers `0` when the transition finished inside the call and `4096` with an
+  `Msvm_ConcreteJob` path when it did not; `await_job` polls that job to `JobState 7` and
+  turns `8`/`9`/`10` into a `WmiFailure` carrying the provider's own `ErrorDescription`.
+  `shutdown` and `save` stay on the bridge: they need a job that outlives the MCP call, and
+  that registry has not moved yet, so they raise `wmi_unsupported` and the fallback takes
+  them.
+- **Two numbers were wrong until the live provider corrected them.** The first cut sent
+  `32777` for `resume`, reading it off `EnabledState`; as a `RequestedState` the provider
+  refuses it with `32775`. The method's `ValueMap` qualifier is the CIM set only — 2, 3, 4,
+  6..11 — so resuming is the same request as starting (`2`), and the two actions differ in
+  name only. The refusal table was wrong in the same way: the provider's codes are the
+  documented 32768-32778 block, where `32774` is "the VM is in use", `32775` is "the VM is
+  not in a state that allows this transition", `32776` is the data-type error and `32777` is
+  "the VM is not available". Both corrections are pinned by tests.
+- **Writing a WMI in-parameter takes the property set, not `setattr`.** pywin32's `gen_py`
+  wrapper resolves attribute writes against the type library, and a parameter object from
+  `SpawnInstance_()` has no such entries, so `setattr(in_parameters, "RequestedState", 9)`
+  raises `KeyError` before anything reaches the provider. `connection.call` now writes
+  `Properties_.Item(name).Value`, and the method is invoked as `ExecMethod` (no trailing
+  underscore — that is a scripting name, not a Python-keyword escape).
+
+Live validation (elevated, `NORTH-Test` on this host): `pause` returned `completed` with the
+VM at `Paused` (9) and `resume` returned `completed` with it back at `Running` (2) — both
+took the `4096` + job path and both were confirmed by a fresh `vm_get` afterwards. A resume
+on a running VM answered `32775` and came out of the backend as `invalid_state` with the
+provider's wording, and `shutdown`/`save` came out as `wmi_unsupported`, which is the
+fallback trigger. Not exercised live: `turn_off`, `reset` and `start` from `Off`, which
+would have restarted the guest for no extra coverage of the mapping.
+
+Local validation: 449 passing tests, 1 skipped, clean Ruff, 11 PowerShell files parse,
+PSScriptAnalyzer reports nothing on `src`, and the stdio smoke still reports 29 tools on the
+safe profile and 53 with `HYPERV_MCP_TOOLSETS=all`.

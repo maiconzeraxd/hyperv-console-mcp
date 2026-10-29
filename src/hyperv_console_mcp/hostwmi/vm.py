@@ -53,19 +53,22 @@ _SETTING_FIELDS = (
 
 def vm_list(connection: Connection, payload: dict[str, Any]) -> dict[str, Any]:
     computers = _computers(connection)
-    vms = [_convert(connection, row) for row in computers]
+    vms = [describe(connection, row) for row in computers]
     return {"vms": vms, "count": len(vms)}
 
 
 def vm_get(connection: Connection, payload: dict[str, Any]) -> dict[str, Any]:
-    name = str(payload.get("vm") or "")
-    computers = _computers(connection)
-    matches = [row for row in computers if row.get("ElementName") == name]
+    return {"vm": describe(connection, find_vm(connection, str(payload.get("vm") or "")))}
+
+
+def find_vm(connection: Connection, name: str) -> dict[str, Any]:
+    """One VM instance by the name its owner gave it."""
+    matches = [row for row in _computers(connection) if row.get("ElementName") == name]
     if len(matches) != 1:
         raise WmiFailure(
             f"Expected exactly one VM named '{name}'; found {len(matches)}.", code="not_found"
         )
-    return {"vm": _convert(connection, matches[0])}
+    return matches[0]
 
 
 def _computers(connection: Connection) -> list[dict[str, Any]]:
@@ -91,7 +94,8 @@ def _computers(connection: Connection) -> list[dict[str, Any]]:
     return rows
 
 
-def _convert(connection: Connection, computer: dict[str, Any]) -> dict[str, Any]:
+def describe(connection: Connection, computer: dict[str, Any]) -> dict[str, Any]:
+    """The Get-VM shape for one computer instance."""
     identifier = str(computer.get("Name") or "")
     settings = _settings(connection, identifier)
     components = _components(connection, identifier)
