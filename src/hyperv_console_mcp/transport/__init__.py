@@ -17,8 +17,12 @@ HEALTH_CACHE_SECONDS = 30.0
 _HEALTH: dict[tuple[str, str], tuple[float, bool]] = {}
 
 
+def _health_key(settings: Any, vm_name: str) -> tuple[str, str]:
+    return (str(settings.ssh_root), vm_name.casefold())
+
+
 def _ssh_healthy(transport: SshTransport, vm_name: str) -> bool:
-    key = (str(transport.settings.ssh_root), vm_name.casefold())
+    key = _health_key(transport.settings, vm_name)
     now = time.monotonic()
     cached = _HEALTH.get(key)
     if cached is not None and now - cached[0] < HEALTH_CACHE_SECONDS:
@@ -26,6 +30,21 @@ def _ssh_healthy(transport: SshTransport, vm_name: str) -> bool:
     healthy = transport.available(vm_name)
     _HEALTH[key] = (now, healthy)
     return healthy
+
+
+def invalidate_health(settings: Any, vm_name: str) -> None:
+    """Forget the cached SSH health result for one VM."""
+    _HEALTH.pop(_health_key(settings, vm_name), None)
+
+
+def note_ssh_down(settings: Any, vm_name: str) -> None:
+    """Record that SSH just failed, so the following calls stop trying it.
+
+    Dropping the entry instead would make every call re-probe, and each probe
+    waits out the connect timeout; a guest that has only just rebooted stays
+    unreachable for longer than one probe anyway. The entry expires by itself.
+    """
+    _HEALTH[_health_key(settings, vm_name)] = (time.monotonic(), False)
 
 
 def select_transport(settings: Any, backend: Any, vm_name: str) -> GuestTransport:
@@ -47,5 +66,6 @@ def select_transport(settings: Any, backend: Any, vm_name: str) -> GuestTranspor
 
 __all__ = [
     "ExecResult", "FileResult", "GuestTransport", "PowerShellDirectTransport",
-    "SshTransport", "TRANSPORTS", "select_transport",
+    "SshTransport", "TRANSPORTS", "invalidate_health", "note_ssh_down",
+    "select_transport",
 ]

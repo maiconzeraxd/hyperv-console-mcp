@@ -372,6 +372,47 @@ class HyperVService:
         from .transport import select_transport
         return select_transport(self.settings, self.backend, vm_name)
 
+    def _on_guest(self, name: str, action: Callable[[Any], T]) -> tuple[T, str]:
+        """Run one guest operation, repeating it over PowerShell Direct if SSH died.
+
+        `auto` caches an SSH health result for half a minute. A guest that
+        reboots in the middle of a lab cycle keeps that cache, so the calls that
+        follow are still sent to SSH and fail until it expires. A connection
+        failure means the command never reached the guest, which is what makes
+        it safe to send it again — and PowerShell Direct does not need the
+        network the guest is still bringing up.
+        """
+        transport = self._transport(name)
+        try:
+            return action(transport), transport.name
+        except BackendError as exc:
+            fallback = self._fallback_transport(name, transport, exc)
+            if fallback is None:
+                raise
+            return action(fallback), fallback.name
+
+    def _fallback_transport(self, name: str, transport: Any, exc: BackendError) -> Any | None:
+        from .transport import note_ssh_down
+        from .transport.psdirect import PowerShellDirectTransport
+        from .transport.ssh import SshTransport
+
+        if not isinstance(transport, SshTransport):
+            return None
+        # A cached session over a guest that has gone away fails at the first
+        # channel operation, before the command is sent, but the transport
+        # cannot tell that apart from a drop in the middle of one. Both are
+        # retried once: the operations `auto` carries are reads, verified
+        # transfers, and the operator's own command.
+        if exc.code not in {"ssh_unavailable", "ssh_error"}:
+            return None
+        if self.settings.guest_transport_for(name) != "auto":
+            # An explicit `ssh` is a promise to use SSH, not a preference to
+            # second-guess; its failures belong to the caller.
+            return None
+        note_ssh_down(self.settings, name)
+        self.audit.record("guest_transport", name, "fallback", exc.code or "ssh_error")
+        return PowerShellDirectTransport(self.backend, self.settings)
+
     def _guest_call(
         self,
         operation: str,
@@ -382,18 +423,22 @@ class HyperVService:
     ) -> dict[str, Any]:
         """Run one structured guest operation through the configured transport."""
         name = self._guest_vm(vm_name)
-        transport = self._transport(name)
         request = dict(payload or {})
+        used: list[str] = []
 
         def run() -> dict[str, Any]:
-            return transport.call(name, operation, request)
+            result, transport_name = self._on_guest(
+                name, lambda transport: transport.call(name, operation, request)
+            )
+            used.append(transport_name)
+            return result
 
         if summary is None:
             result = self._call(operation, name, run)
         else:
             with self._approve(operation, name, summary):
                 result = self._call(operation, name, run)
-        return {**result, "vm": result.get("vm", name), "transport": transport.name}
+        return {**result, "vm": result.get("vm", name), "transport": used[-1]}
 
     def guest_exec(
         self, vm_name: str, command: str, *, timeout_seconds: int | None = None
@@ -404,25 +449,28 @@ class HyperVService:
             self.settings.timeout_seconds if timeout_seconds is None
             else _integer(timeout_seconds, "timeout_seconds", 10, 3600)
         )
-        transport = self._transport(name)
         with self._approve("guest_exec", name, _command_summary(text)):
-            execution = self._call(
+            execution, _ = self._call(
                 "guest_exec",
                 name,
-                lambda: transport.exec(
+                lambda: self._on_guest(
                     name,
-                    text,
-                    timeout=timeout,
-                    max_output=self.settings.max_output_chars,
+                    lambda transport: transport.exec(
+                        name,
+                        text,
+                        timeout=timeout,
+                        max_output=self.settings.max_output_chars,
+                    ),
                 ),
             )
         return {"vm": name, "execution": execution.as_dict()}
 
     def guest_status(self, vm_name: str) -> dict[str, Any]:
         name = self._guest_vm(vm_name)
-        transport = self._transport(name)
-        guest = self._call("guest_status", name, lambda: transport.health(name))
-        return {"vm": name, "transport": transport.name, "guest": guest}
+        guest, transport = self._call(
+            "guest_status", name, lambda: self._on_guest(name, lambda t: t.health(name))
+        )
+        return {"vm": name, "transport": transport, "guest": guest}
 
     def guest_processes(self, vm_name: str, name_contains: str = "") -> dict[str, Any]:
         return self._guest_call(
@@ -617,7 +665,6 @@ class HyperVService:
             self._confirm(confirm_path or "", remote, "confirm_path")
         data = source.read_bytes()
         name = self._guest_vm(vm_name)
-        transport = self._transport(name)
         with self._approve(
             "guest_put_file",
             name,
@@ -627,10 +674,13 @@ class HyperVService:
                 "overwrite": overwrite,
             },
         ):
-            written = self._call(
+            written, _ = self._call(
                 "guest_put_file",
                 name,
-                lambda: transport.put_file(name, source, remote, overwrite=overwrite),
+                lambda: self._on_guest(
+                    name,
+                    lambda t: t.put_file(name, source, remote, overwrite=overwrite),
+                ),
             )
         return {"vm": name, "file": written.as_dict()}
 
@@ -655,14 +705,13 @@ class HyperVService:
         if overwrite:
             self._confirm(confirm_path or "", str(target), "confirm_path")
         name = self._guest_vm(vm_name)
-        transport = self._transport(name)
         with self._approve(
             "guest_get_file", name, {"guest_path": remote, "local_path": str(target)}
         ):
-            fetched = self._call(
+            fetched, _ = self._call(
                 "guest_get_file",
                 name,
-                lambda: transport.get_file(name, remote, target),
+                lambda: self._on_guest(name, lambda t: t.get_file(name, remote, target)),
             )
         return {"vm": name, "file": fetched.as_dict()}
 
@@ -819,8 +868,8 @@ class HyperVService:
     ) -> dict[str, Any]:
         from . import credentials
 
-        transport = self._transport(name)
-        transport.health(name)  # Fail before changing anything if the guest is unreachable.
+        # Fail before changing anything if the guest is unreachable.
+        self._on_guest(name, lambda transport: transport.health(name))
         new_password = credentials.generate_password()
         self._run(
             "guest_password_rotate", "guest_set_password",
@@ -980,7 +1029,7 @@ class HyperVService:
 
     def _restart_and_verify(self, name: str) -> dict[str, Any]:
         """Restart only when asked, then prove an interactive session came back."""
-        from .transport import select_transport
+        from .transport import invalidate_health, select_transport
 
         self._run(
             "guest_autologon_configure", "vm_power", {"vm": name, "action": "shutdown"},
@@ -1000,9 +1049,11 @@ class HyperVService:
         started = self.vm_wait(name, ["Running"], timeout_seconds=240)
         if not started.get("matched"):
             raise BackendError("The VM did not start again.", code="restart_timeout")
+        # The VM was stopped and started again, so whatever the health cache
+        # says about SSH is about the machine that no longer exists.
+        invalidate_health(self.settings, name)
         transport = select_transport(self.settings, self.backend, name)
         return {"restarted": True, "interactive_session": self._await_session(transport, name)}
-
     @staticmethod
     def _await_session(transport: Any, name: str, timeout_seconds: int = 180) -> dict[str, Any]:
         """Wait for an interactive logon, which is what autologon is supposed to produce."""

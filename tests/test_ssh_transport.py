@@ -170,6 +170,8 @@ class FakeSSHClient:
     preload_files: dict[str, bytes] = {}
     raw_output: tuple[str, int] | None = None
     reject_file_run = False
+    refuse_exec = False
+    refuse_connect = False
     exec_handler = _default_exec
     guest_handler = _default_guest
 
@@ -196,6 +198,8 @@ class FakeSSHClient:
     def connect(self, **kwargs: Any) -> None:
         if FakeSSHClient.reject_host_key:
             raise FakeSSHException("Server host key not found in known_hosts")
+        if FakeSSHClient.refuse_connect:
+            raise OSError("Connection refused")
         self.connect_kwargs = kwargs
 
     def get_transport(self) -> FakeTransportChannel:
@@ -211,6 +215,10 @@ class FakeSSHClient:
 
     def exec_command(self, command: str, timeout: float | None = None):
         self.commands.append(command)
+        if FakeSSHClient.refuse_exec:
+            # What a cached session over a rebooted guest does: the channel
+            # cannot open, so the command never leaves the host.
+            raise FakeSSHException("SSH session not active")
         if FakeSSHClient.raw_output is not None:
             text, status = FakeSSHClient.raw_output
             return FakeStream(), FakeStream(text, status), FakeStream()
@@ -295,6 +303,8 @@ def fake_paramiko(monkeypatch: pytest.MonkeyPatch):
     FakeSSHClient.preload_files = {}
     FakeSSHClient.raw_output = None
     FakeSSHClient.reject_file_run = False
+    FakeSSHClient.refuse_exec = False
+    FakeSSHClient.refuse_connect = False
     FakeSSHClient.exec_handler = _default_exec
     FakeSSHClient.guest_handler = _default_guest
     ssh_module._CLIENTS.clear()
@@ -602,3 +612,78 @@ def test_missing_paramiko_is_a_policy_error_with_the_install_hint(
 def test_the_state_directory_is_filesystem_safe() -> None:
     assert vm_key("LAB-Test") == "lab-test"
     assert vm_key("lab/../x") == "lab_.._x"
+
+
+class FakeBridge:
+    """Enough of the host bridge to serve the PowerShell Direct side of a fallback."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def invoke(self, operation: str, payload: dict[str, Any], *, timeout: Any = None):
+        self.calls.append((operation, dict(payload)))
+        return {"vm": payload["vm"], "execution": {
+            "success": True, "exit_code": 0, "output": "psdirect\r\n",
+            "had_errors": False, "error_records": [], "output_truncated": False,
+        }}
+
+
+def _auto_service(tmp_path: Path, bridge: FakeBridge, choice: str = "auto") -> Any:
+    from hyperv_console_mcp.service import HyperVService
+
+    return HyperVService(
+        bridge,
+        settings(tmp_path, guest_transport=choice, guest_password="secret",
+                 transfer_root=tmp_path / "transfers"),
+    )
+
+
+def test_auto_recovers_over_powershell_direct_when_the_ssh_session_dies(
+    tmp_path: Path,
+) -> None:
+    """Regression: the health cache outlived the session it vouched for.
+
+    `auto` caches "SSH answers" for 30 seconds. When the guest rebooted in the
+    middle of a lab cycle the cache still said yes, so the calls that followed
+    went to a dead session and failed instead of falling back to PowerShell
+    Direct, which does not need the guest's network at all.
+    """
+    provision(tmp_path)
+    bridge = FakeBridge()
+    service = _auto_service(tmp_path, bridge)
+    assert service.guest_exec(VM, "hostname")["execution"]["transport"] == "ssh"
+
+    FakeSSHClient.refuse_exec = True
+    recovered = service.guest_exec(VM, "hostname")
+
+    assert recovered["execution"]["transport"] == "psdirect"
+    assert recovered["execution"]["output"] == "psdirect\r\n"
+    assert bridge.calls[-1][0] == "guest_exec"
+    # And the dead session is not tried again for the rest of the cache window.
+    created = len(FakeSSHClient.instances)
+    assert service.guest_exec(VM, "hostname")["execution"]["transport"] == "psdirect"
+    assert len(FakeSSHClient.instances) == created
+
+
+def test_auto_recovers_when_the_ssh_port_stops_accepting_connections(tmp_path: Path) -> None:
+    provision(tmp_path)
+    bridge = FakeBridge()
+    service = _auto_service(tmp_path, bridge)
+    service.guest_exec(VM, "hostname")
+
+    ssh_module._CLIENTS.clear()  # the session was dropped underneath us
+    FakeSSHClient.refuse_connect = True
+
+    assert service.guest_exec(VM, "hostname")["execution"]["transport"] == "psdirect"
+
+
+def test_an_explicit_ssh_never_falls_back(tmp_path: Path) -> None:
+    provision(tmp_path)
+    bridge = FakeBridge()
+    service = _auto_service(tmp_path, bridge, choice="ssh")
+    service.guest_exec(VM, "hostname")
+
+    FakeSSHClient.refuse_exec = True
+    with pytest.raises(BackendError, match="SSH session"):
+        service.guest_exec(VM, "hostname")
+    assert bridge.calls == []
