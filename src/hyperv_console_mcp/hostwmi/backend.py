@@ -19,7 +19,7 @@ from ..backend import (
     PowerShellBackend,
 )
 from ..errors import BackendError
-from . import host
+from . import host, vm
 from .connection import ComConnection, Connection, WmiFailure
 
 UNSUPPORTED = "wmi_unsupported"
@@ -29,6 +29,8 @@ Handler = Callable[[Connection, dict[str, Any]], dict[str, Any]]
 
 HANDLERS: dict[str, Handler] = {
     "host_status": host.host_status,
+    "vm_list": vm.vm_list,
+    "vm_get": vm.vm_get,
 }
 
 

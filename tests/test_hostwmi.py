@@ -107,7 +107,7 @@ def test_a_migrated_operation_reaches_the_handler() -> None:
 def test_an_unmigrated_operation_is_refused_as_unsupported() -> None:
     backend = WmiBackend(connect=lambda: _connection())
     with pytest.raises(BackendError) as caught:
-        backend.invoke("vm_get", {"vm": "NORTH-Test"})
+        backend.invoke("checkpoint_list", {"vm": "NORTH-Test"})
     assert caught.value.code == "wmi_unsupported"
 
 
@@ -117,7 +117,7 @@ def test_constructing_the_backend_never_touches_com() -> None:
 
     backend = WmiBackend(connect=explode)
     with pytest.raises(BackendError) as caught:
-        backend.invoke("vm_get", {})
+        backend.invoke("checkpoint_list", {})
     assert caught.value.code == "wmi_unsupported"
 
 

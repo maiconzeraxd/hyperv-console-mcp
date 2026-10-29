@@ -111,15 +111,23 @@ class ComConnection:
 
 
 def _as_dict(obj: Any) -> dict[str, Any]:
-    """Flatten a Wbem object into a dict, keeping its path under ``__PATH``."""
+    """Flatten a Wbem object into a dict, keeping its path and class.
+
+    ``__CLASS`` matters because an association query answers with objects of
+    several classes at once, and the mapping code needs to tell a processor
+    setting from a disk one.
+    """
     values: dict[str, Any] = {}
     for prop in obj.Properties_:
         name = str(prop.Name)
         if not name.startswith("__"):
             values[name] = prop.Value
-    path = getattr(getattr(obj, "Path_", None), "Path", None)
-    if path:
-        values["__PATH"] = path
+    path = getattr(obj, "Path_", None)
+    if path is not None:
+        if path.Path:
+            values["__PATH"] = path.Path
+        if path.Class:
+            values["__CLASS"] = path.Class
     return values
 
 

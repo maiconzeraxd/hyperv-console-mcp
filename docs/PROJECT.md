@@ -419,3 +419,45 @@ Ruff, all 10 PowerShell files parse, PSScriptAnalyzer reports no errors or warni
 and the stdio smoke still reports 29 tools on the safe profile and 53 with
 `HYPERV_MCP_TOOLSETS=all`. Not validated live: this phase moved code without changing what it
 does, so nothing new was exercised against `NORTH-Test`.
+
+### 2026-10-29 — v0.3 phase 4: the host reads answer from WMI
+
+- **`hostwmi/` is the Python path to the Hyper-V provider.** `connection.py` is the only
+  module that imports `win32com`: it opens the locator per thread, connects to
+  `root\virtualization\v2`, impersonates the caller, and flattens every object to a plain
+  dict carrying `__PATH` and `__CLASS`. `host.py` and `vm.py` map those dicts; a fake
+  connection exercises them without a hypervisor.
+- **Migration is per operation, with the worker still answering the rest.** `WmiBackend`
+  raises `wmi_unsupported` for anything not in `HANDLERS`, and the new `FallbackBackend`
+  sends exactly that (and `wmi_unavailable`) to `PowerShellBackend`. So `host_status`,
+  `vm_list` and `vm_get` now answer from CIM, and the other ~45 host operations keep going
+  through the bridge untouched.
+- **Nothing is matched by a display name.** The VM instances are the rows whose `Name` is a
+  GUID (the host instance is named after the computer); `Caption` says "Máquina Virtual" on
+  this pt-BR host, and the component classes call a disk "Disco Rígido". Disks, DVD drives
+  and adapters are identified by `ResourceType`, `ResourceSubType` and the `InstanceID`
+  segments; every enum (`EnabledState`, `UserSnapshotType`, `AutomaticStartupAction`, …) is
+  translated from its number.
+- **A permission-filtered host is not an empty host.** Without Hyper-V Administrator rights
+  the provider returns no VM rows instead of failing. When the VM list comes back empty,
+  `vm_list`/`vm_get` ask for `Msvm_VirtualSystemManagementService`; if that is empty too the
+  answer is `wmi_unavailable`, so the fallback produces the same access-denied error the
+  bridge gives today instead of a wrong "no VMs".
+- **Queries name their properties.** The provider charges per property read: the
+  `Msvm_VirtualSystemSettingDataComponent` association answered all 26 components with all
+  70 properties and cost 144 ms, while six narrow `SELECT`s with an `InstanceID LIKE` filter
+  cost about the same for a fraction of the data. `vm_get` went from 372 ms to ~190 ms that
+  way. That is still slower than a *warm* PowerShell worker (45 ms), which is compiled and
+  does the same WMI calls; the win is one less process, no localized parsing, and no 1.5 s
+  cold start.
+
+Live validation (elevated, `NORTH-Test` on this host): the WMI `vm_get` and `Get-VM` were
+compared field by field — id, name, state, state_code, status, generation, version,
+processor_count, memory figures, checkpoint_type, both automatic actions, checkpoint_count,
+hard disks, DVD drives and network adapters — and **every field matched**, including the
+localized status text, the DVD media paths, the switch name and the guest IP addresses. The
+same call through `HyperVService` (allowlist and audit included) returned the same object in
+190 ms. `host_status` over CIM also works unelevated, where the bridge needs elevation.
+
+Not validated live: any power action, checkpoint operation, DVD/COM change, synthetic
+keyboard or thumbnail through WMI — those are still on the bridge, which is the next slice.
