@@ -601,3 +601,29 @@ mounted `virtio-win.iso` at 0/2 (read back as the drive's path), `media_eject` e
 (`path: null`), `media_mount` restored `NorthTestPackage.iso`, and the VM was started again
 and confirmed `Running` with 0/1 and 0/2 back on their original media. Not validated live: a
 `boot_first` request, which goes to the bridge, and a generation-1 VM.
+
+### 2026-10-29 — v0.3 phase 4: the keyboard and the guest display size
+
+- **One query per device, keyed by the VM's own GUID.** `Msvm_Keyboard`,
+  `Msvm_SyntheticMouse` and `Msvm_VideoHead` each carry the VM's GUID in `SystemName`, so
+  the device lookup is `SELECT * FROM <class> WHERE SystemName = '<guid>'`. The bridge walks
+  the `Msvm_SystemDevice` association instead; on this host that query is refused outright
+  (`Consulta inválida`) when `Antecedent` is compared to a path literal, and `SystemName`
+  makes the walk unnecessary.
+- **The keyboard methods answer directly.** `TypeText`, `TypeKey`, `PressKey`, `ReleaseKey`
+  and `TypeCtrlAltDel` return a code instead of starting a job, so a non-zero answer is the
+  failure — with the bridge's wording (`Hyper-V WMI method <name> returned <code>.`) so a
+  caller that already parses it keeps working.
+- **A chord releases what it pressed, even when a press fails.** Keys go down in order and up
+  in reverse inside `finally`; a press that failed is not recorded, which matches the bridge
+  and is correct — a refused press never put the key down.
+- **`console_info` no longer costs a worker round trip**, which matters because every
+  screenshot and every `console_wait_for_change` reads the display size first.
+
+Live validation (elevated, `NORTH-Test` on this host, VM running): `console_info` through WMI
+and through the bridge were compared as whole dictionaries — `vm`, `state` and the
+`1024x768` video head — and **the answers were equal**. `console_key_state` down and up on
+`shift`, `console_press_keys` with `shift`, and `console_type_text` with a five-character
+string all returned `0` and reported what they sent. Not validated live:
+`console_ctrl_alt_delete`, which would put the guest on its security screen, and a VM whose
+keyboard device does not exist.

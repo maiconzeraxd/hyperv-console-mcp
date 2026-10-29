@@ -19,7 +19,7 @@ from ..backend import (
     PowerShellBackend,
 )
 from ..errors import BackendError
-from . import checkpoint, host, media, power, thumbnail, vm
+from . import checkpoint, console, host, media, power, thumbnail, vm
 from .connection import ComConnection, Connection, WmiFailure
 
 UNSUPPORTED = "wmi_unsupported"
@@ -39,6 +39,11 @@ HANDLERS: dict[str, Handler] = {
     "media_list": media.media_list,
     "media_mount": media.media_mount,
     "media_eject": media.media_eject,
+    "console_info": console.console_info,
+    "console_type_text": console.console_type_text,
+    "console_press_keys": console.console_press_keys,
+    "console_key_state": console.console_key_state,
+    "console_ctrl_alt_delete": console.console_ctrl_alt_delete,
 }
 
 
