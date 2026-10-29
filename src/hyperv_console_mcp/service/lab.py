@@ -138,6 +138,36 @@ class LabService(ServiceBase):
                 debugger=debugger,
             )
 
+    def lab_verifier(
+        self,
+        vm_name: str,
+        action: str,
+        confirm_vm: str,
+        drivers: list[str] | None = None,
+        flags: str | None = None,
+    ) -> dict[str, Any]:
+        """Turn the verifier on, off, or back to what this tool replaced.
+
+        The setting is a boot setting: it takes effect on the next restart, and
+        this tool never restarts the guest.
+        """
+        from ..transport import guest_verifier
+        name = self._guest_vm(vm_name)
+        self._confirm(confirm_vm, name, "confirm_vm")
+        # Validate before the approval card is drawn, so the summary is exactly
+        # what the guest will be told.
+        names = guest_verifier.normalise_drivers(drivers)
+        mask = guest_verifier.normalise_flags(flags) if action == "enable" else None
+        summary = {
+            "action": action,
+            "drivers": names,
+            "flags": mask,
+            "state_file": guest_verifier.GUEST_STATE_PATH,
+            "reboots": False,
+        }
+        with self._approve("lab_verifier", name, summary):
+            return guest_verifier.apply(self, name, action, drivers=names, flags=mask)
+
     def lab_guest_configure(
         self,
         vm_name: str,

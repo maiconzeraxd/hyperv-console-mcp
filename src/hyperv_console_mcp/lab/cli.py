@@ -85,7 +85,29 @@ def diagnostics(service: HyperVService, vm_name: str) -> dict[str, Any]:
     facts = parse_report(str(execution.get("output") or ""))
     if facts is None:
         return result
-    return {**result, "diagnostics": derive_diagnostics(facts)}
+    return {
+        **result,
+        "diagnostics": derive_diagnostics(facts),
+        "verifier": _verifier_facts(service, vm_name),
+    }
+
+
+def _verifier_facts(service: HyperVService, vm_name: str) -> dict[str, Any]:
+    """Driver Verifier's setting, read beside the boot configuration.
+
+    This is the same reading `lab_verifier` reports after a change, so it exists
+    once, in the verifier's own guest program. A guest that cannot answer leaves
+    its error in this field instead of failing the whole report: the boot and
+    dump facts beside it are still worth having.
+    """
+    from ..transport import guest_verifier
+
+    try:
+        return guest_verifier.status(service, vm_name)
+    except HyperVError as exc:
+        return {"error": exc.code, "message": str(exc)}
+    except Exception as exc:  # noqa: BLE001 — one failed section must not hide the rest
+        return {"error": "unexpected_error", "message": f"{type(exc).__name__}: {exc}"}
 
 
 def _parser() -> argparse.ArgumentParser:

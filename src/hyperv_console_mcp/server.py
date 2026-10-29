@@ -466,7 +466,7 @@ def create_server(
     async def lab_init(vm_name: str, confirm_vm: str) -> dict[str, Any]:
         return await _invoke(service.lab_init, vm_name, confirm_vm)
 
-    @tool("lab_diagnostics", annotations=READ_ONLY, description="Read guest boot, Secure Boot, VBS/HVCI, test-signing, debugger, disk, and crash-dump configuration.")
+    @tool("lab_diagnostics", annotations=READ_ONLY, description="Read guest boot, Secure Boot, VBS/HVCI, test-signing, debugger, disk, crash-dump and Driver Verifier configuration. The verifier numbers come from the registry, so the answer does not depend on the guest's language.")
     async def lab_diagnostics(vm_name: str) -> dict[str, Any]:
         return await _invoke(service.lab_diagnostics, vm_name)
 
@@ -528,6 +528,25 @@ def create_server(
             service.lab_cycle, vm_name, package_id, run_id, expected_manifest_sha256,
             timeout_seconds, checkpoint_before, revert_after, include_kernel_dump,
             debugger,
+        )
+
+    @tool(
+        "lab_verifier", annotations=MUTATION,
+        description="Lab profile only. Turn Driver Verifier on for named test drivers (or for every "
+        "driver), turn it off, or restore the setting this tool replaced. flags is 'standard', 'all', "
+        "or a numeric mask; drivers are module names such as mydriver.sys, never paths. Every change "
+        "is recorded in the guest's verifier.json and revertible, takes effect on the next restart, "
+        "and this tool never restarts the VM. Requires confirm_vm.",
+    )
+    async def lab_verifier(
+        vm_name: str,
+        action: Literal["enable", "disable", "revert"],
+        confirm_vm: str,
+        drivers: list[str] | None = None,
+        flags: str = "standard",
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.lab_verifier, vm_name, action, confirm_vm, drivers, flags
         )
 
     @tool(

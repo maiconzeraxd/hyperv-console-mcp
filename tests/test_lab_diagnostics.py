@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import base64
 import json
+from types import SimpleNamespace
 from typing import Any
 
 from hyperv_console_mcp.bcd import bcd_boolean
+from hyperv_console_mcp.config import Settings
+from hyperv_console_mcp.errors import BackendError
 from hyperv_console_mcp.lab.cli import diagnostics
 from hyperv_console_mcp.lab.diagnostics import derive_diagnostics, parse_report
+from hyperv_console_mcp.transport.ssh import JSON_MARKER
 
 VM = "NORTH-Test"
 
@@ -113,3 +118,64 @@ def test_a_report_the_host_cannot_read_is_returned_untouched() -> None:
 def test_a_warning_ahead_of_the_report_does_not_hide_it() -> None:
     report = "WARNING: the module could not be loaded\n" + json.dumps(GUEST_REPORT)
     assert parse_report(report) == GUEST_REPORT
+
+
+class VerifierStubService(StubService):
+    """The same service, plus the transport the verifier's own program needs."""
+
+    def __init__(self, execution: dict[str, Any], *, verifier_error: Exception | None = None) -> None:
+        super().__init__(execution)
+        self.settings = Settings(allowed_vms=frozenset({VM}), allow_guest=True)
+        self.verifier_error = verifier_error
+        self.transport_calls: list[str] = []
+
+    def _transport(self, vm_name: str) -> "VerifierStubService":
+        return self
+
+    def health(self, vm_name: str) -> dict[str, Any]:
+        return {"ok": True}
+
+    def put_file(self, vm_name: str, local: Any, remote: str, *, overwrite: bool) -> Any:
+        self.transport_calls.append(remote)
+        return SimpleNamespace(path=remote, size=0, sha256="0" * 64)
+
+    def exec(self, vm_name: str, command: str, *, timeout: float, max_output: int) -> Any:
+        if self.verifier_error is not None:
+            raise self.verifier_error
+        payload = {
+            "mode": "Status",
+            "live": {"flags_mask": 1, "drivers": [], "drivers_raw": None, "boot_utc": "2026-10-29T00:00:00Z"},
+        }
+        body = json.dumps(payload).encode("utf-8")
+        output = JSON_MARKER + base64.b64encode(body).decode("ascii")
+        return SimpleNamespace(output=output, success=True, exit_code=0)
+
+
+def test_the_verifier_setting_is_read_beside_the_boot_configuration() -> None:
+    """One read tool answers for the whole driver-testing configuration.
+
+    The verifier's own guest program produces the facts, so the flags are read
+    in exactly one place and the diagnostics report carries them beside the
+    boot entries instead of a second listing tool existing for them.
+    """
+    service = VerifierStubService(_execution(json.dumps(GUEST_REPORT)))
+
+    result = diagnostics(service, VM)  # type: ignore[arg-type]
+
+    assert result["diagnostics"]["test_signing"] is True
+    assert result["verifier"]["enabled"] is True
+    assert result["verifier"]["live"]["flags_named"] == ["special_pool"]
+    assert service.transport_calls[-1].endswith("guest_verifier.ps1")
+
+
+def test_a_verifier_that_cannot_answer_keeps_its_error_and_the_rest_of_the_report() -> None:
+    """A guest with no verifier must not cost the boot and dump facts beside it."""
+    service = VerifierStubService(
+        _execution(json.dumps(GUEST_REPORT)),
+        verifier_error=BackendError("verifier is not available", code="guest_verifier_failed"),
+    )
+
+    result = diagnostics(service, VM)  # type: ignore[arg-type]
+
+    assert result["diagnostics"]["test_signing"] is True
+    assert result["verifier"]["error"] == "guest_verifier_failed"
