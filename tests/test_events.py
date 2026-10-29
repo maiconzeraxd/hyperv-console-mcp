@@ -23,7 +23,13 @@ class FakeBackend:
 
     def invoke(self, operation, payload, *, timeout=None):
         self.calls.append((operation, payload))
-        return {"ok": True}
+        # Mirror the bridge's guest_exec envelope so the transport can map it.
+        if operation == "guest_exec":
+            return {"vm": payload.get("vm"), "execution": {
+                "success": True, "exit_code": 0, "output": "ok", "had_errors": False,
+                "error_records": [], "output_truncated": False,
+            }}
+        return {"vm": payload.get("vm"), "ok": True}
 
 
 class RecordingApproval:
@@ -221,15 +227,20 @@ def test_every_mutating_mcp_tool_is_gated_and_read_only_lab_tools_are_not() -> N
     assert mutating == set(GATED_TOOLS)
     assert {"lab_verify", "lab_diagnostics"}.isdisjoint(GATED_TOOLS)
 
-    gated = {
-        node.args[0].value
-        for node in ast.walk(ast.parse((SOURCE / "service.py").read_text(encoding="utf-8")))
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "_approve"
-        and node.args
-        and isinstance(node.args[0], ast.Constant)
-    }
+    # `_approve` gates directly; `_guest_call` gates when it is given a summary,
+    # which is how the guest file tools reach the transport.
+    gated = set()
+    for node in ast.walk(ast.parse((SOURCE / "service.py").read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Constant):
+            continue
+        if node.func.attr == "_approve":
+            gated.add(node.args[0].value)
+        elif node.func.attr == "_guest_call" and any(
+            keyword.arg == "summary" for keyword in node.keywords
+        ):
+            gated.add(node.args[0].value)
     assert set(GATED_TOOLS) <= gated
 
 

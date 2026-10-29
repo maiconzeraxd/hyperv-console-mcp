@@ -282,6 +282,28 @@ def test_a_missing_guest_file_is_reported_as_not_found(tmp_path: Path) -> None:
     assert error.value.code == "not_found"
 
 
+def test_guest_file_info_reports_the_size_of_an_existing_file(tmp_path: Path) -> None:
+    payload = tmp_path / "probe.bin"
+    payload.write_bytes(b"0123456789")
+    result = invoke_with_mocks(
+        tmp_path, LOCAL_REMOTING, "guest_file_info",
+        {**GUEST_PAYLOAD, "path": str(payload)},
+    )
+    assert result["file"]["status"] == "ok"
+    assert result["file"]["size"] == 10
+    assert result["file"]["path"] == str(payload)
+
+
+def test_guest_file_info_reports_absence_as_not_found(tmp_path: Path) -> None:
+    missing = tmp_path / "hvmcp-missing-4d1a.bin"
+    with pytest.raises(BackendError, match="Guest file not found") as error:
+        invoke_with_mocks(
+            tmp_path, LOCAL_REMOTING, "guest_file_info",
+            {**GUEST_PAYLOAD, "path": str(missing)},
+        )
+    assert error.value.code == "not_found"
+
+
 def test_a_generic_guest_failure_is_not_mistaken_for_a_missing_file(tmp_path: Path) -> None:
     mocks = """
 function Invoke-Command {

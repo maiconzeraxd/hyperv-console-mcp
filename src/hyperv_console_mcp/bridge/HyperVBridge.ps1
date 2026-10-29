@@ -509,6 +509,29 @@ function Invoke-BridgeOperation {
                 }
             $result = @{ vm = $vm.Name; execution = $guestResult }
         }
+        'guest_file_info' {
+            $vm = Get-ExactVm -Name $request.vm
+            $encodedPath = Convert-ToBase64Text -Text ([string]$request.path)
+            $guestResult = Invoke-GuestQuery -Vm $vm -Request $request -Arguments $encodedPath -Query {
+                param($EncodedPath)
+                $path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedPath))
+                if (-not [IO.Path]::IsPathRooted($path)) { throw 'The guest path must be absolute.' }
+                $info = [IO.FileInfo]::new($path)
+                # Absence is data, for the same reason guest_read_file reports it that way.
+                if (-not $info.Exists) { return [pscustomobject]@{ path = $path; status = 'not_found' } }
+                [pscustomobject]@{
+                    path = $info.FullName; size = $info.Length
+                    last_write_utc = $info.LastWriteTimeUtc.ToString('o'); status = 'ok'
+                }
+            }
+            if ($null -ne $guestResult.PSObject.Properties['status'] -and
+                $guestResult.status -eq 'not_found') {
+                throw [IO.FileNotFoundException]::new(
+                    "Guest file not found: $($guestResult.path)", [string]$guestResult.path
+                )
+            }
+            $result = @{ vm = $vm.Name; file = $guestResult }
+        }
         'guest_read_file' {
             $vm = Get-ExactVm -Name $request.vm
             $encodedPath = Convert-ToBase64Text -Text ([string]$request.path)

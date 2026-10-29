@@ -31,6 +31,12 @@ class FakeBackend:
             raise self.failure
         if operation == "vm_list":
             return {"vms": [{"name": "NORTH-Test"}, {"name": "Other"}]}
+        if operation == "guest_exec":
+            # Mirror the bridge's guest_exec envelope so the transport can map it.
+            return {"vm": payload.get("vm"), "execution": {
+                "success": True, "exit_code": 0, "output": "ok", "had_errors": False,
+                "error_records": [], "output_truncated": False,
+            }}
         return self.responses.get(operation, {"operation": operation})
 
 

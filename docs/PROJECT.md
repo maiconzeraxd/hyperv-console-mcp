@@ -107,3 +107,12 @@ An independent, local Model Context Protocol server for Hyper-V on Windows. It c
 - Windows-only tests are marked: real named-pipe approval in `tests/test_events.py` and the drive-letter media tests in `tests/test_service.py`; `tests/test_dashboard.py` uses `pytest.importorskip("tkinter")`.
 - Local validation: 113 passing tests, clean Ruff.
 - Not yet validated: the JSONL log and the offset reader have not been exercised by two processes writing at once outside the unit tests.
+
+### 2026-10-29 — v0.2 phase 2: guest transport abstraction
+
+- Guest access now goes through `src/hyperv_console_mcp/transport/`: a `GuestTransport` protocol (`exec`, `put_file`, `get_file`, `health`, `call`, `close`) with `PowerShellDirectTransport` as the only implementation, and `select_transport` choosing per VM from `HYPERV_MCP_GUEST_TRANSPORT` (`auto`/`psdirect`/`ssh`) or a `HYPERV_MCP_GUEST_TRANSPORT_<VMNAME>` override. `auto` and `psdirect` both resolve to PowerShell Direct; an explicit `ssh` raises a policy error rather than falling back silently, because SSH provisioning does not exist yet.
+- Every guest tool result now names its transport. `guest_exec` returns the mapped `ExecResult` (`success`, `exit_code`, `output`, `had_errors`, `error_records`, `output_truncated`, `transport`).
+- New `guest_put_file`/`guest_get_file` copy whole files between the guest and a host path under `HYPERV_MCP_TRANSFER_ROOT` (`HYPERV_MCP_TRANSFER_ROOT`, default `%LOCALAPPDATA%\HyperVConsoleMCP\transfers`), verifying SHA-256 on both sides. `guest_get_file` downloads in 4 MiB chunks into a `.part` file, checks each chunk, then renames; a corrupt chunk leaves nothing behind. Both are gated and their approval summaries name the paths, size and digest.
+- Added the `guest_file_info` bridge operation (size and last-write time, or `not_found` reported as data) so a download can size itself before reading.
+- Local validation: 128 passing tests, clean Ruff, valid PowerShell syntax.
+- Not yet validated live: the transport has only been exercised against a fake bridge. The persistent `New-PSSession -VMName` session, `Copy-Item -ToSession`, reconnect-on-reboot and the second worker are **not implemented yet** — the transport still calls the existing per-request `Invoke-Command` path, so `put_file` is bounded by the 8 MiB inline limit and `get_file` reads in 4 MiB chunks. SSH, `guest_ssh_provision` and the transport benchmark are likewise still pending.

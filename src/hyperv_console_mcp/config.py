@@ -9,6 +9,8 @@ from typing import Mapping
 
 from .errors import ValidationError
 
+PER_VM_TRANSPORT_PREFIX = "HYPERV_MCP_GUEST_TRANSPORT_"
+
 
 def _boolean(values: Mapping[str, str], name: str) -> bool:
     value = values.get(name, "false").strip().casefold()
@@ -51,6 +53,13 @@ def _absolute_path(values: Mapping[str, str], name: str, default: Path) -> Path:
     return path
 
 
+def _transport(values: Mapping[str, str], name: str) -> str:
+    value = values.get(name, "auto").strip().casefold() or "auto"
+    if value not in {"auto", "psdirect", "ssh"}:
+        raise ValidationError(f"{name} must be auto, psdirect, or ssh.")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     allowed_vms: frozenset[str] = frozenset()
@@ -63,11 +72,14 @@ class Settings:
     allow_media: bool = False
     guest_username: str | None = None
     guest_password: str | None = field(default=None, repr=False)
+    guest_transport: str = "auto"
+    guest_transport_overrides: Mapping[str, str] = field(default_factory=dict)
     timeout_seconds: float = 90.0
     max_output_chars: int = 65_536
     audit_log: Path | None = None
     serial_log_root: Path = field(default_factory=lambda: _local_root("serial"))
     iso_root: Path = field(default_factory=lambda: _local_root("media"))
+    transfer_root: Path = field(default_factory=lambda: _local_root("transfers"))
     lab_root: Path = field(default_factory=lambda: _local_root("lab") / "packages")
     evidence_root: Path = field(default_factory=lambda: _local_root("evidence"))
     event_directory: Path = field(default_factory=lambda: _local_root("events"))
@@ -83,6 +95,11 @@ class Settings:
             if any(ord(character) < 32 for character in name) or len(name) > 256:
                 raise ValidationError("HYPERV_MCP_ALLOWED_VMS contains an invalid VM name.")
         audit_path = env.get("HYPERV_MCP_AUDIT_LOG", "").strip()
+        overrides = {
+            key[len(PER_VM_TRANSPORT_PREFIX):].casefold().replace("_", "-"): _transport(env, key)
+            for key in env
+            if key.startswith(PER_VM_TRANSPORT_PREFIX) and len(key) > len(PER_VM_TRANSPORT_PREFIX)
+        }
         return cls(
             allowed_vms=names,
             allow_power=_boolean(env, "HYPERV_MCP_ALLOW_POWER"),
@@ -94,6 +111,8 @@ class Settings:
             allow_media=_boolean(env, "HYPERV_MCP_ALLOW_MEDIA"),
             guest_username=env.get("HYPERV_MCP_GUEST_USERNAME") or None,
             guest_password=env.get("HYPERV_MCP_GUEST_PASSWORD") or None,
+            guest_transport=_transport(env, "HYPERV_MCP_GUEST_TRANSPORT"),
+            guest_transport_overrides=overrides,
             timeout_seconds=float(
                 _integer(env, "HYPERV_MCP_TIMEOUT_SECONDS", 90, 1, 900)
             ),
@@ -105,6 +124,9 @@ class Settings:
                 env, "HYPERV_MCP_SERIAL_LOG_ROOT", _local_root("serial", env)
             ),
             iso_root=_path(env, "HYPERV_MCP_ISO_ROOT", _local_root("media", env)),
+            transfer_root=_absolute_path(
+                env, "HYPERV_MCP_TRANSFER_ROOT", _local_root("transfers", env)
+            ),
             lab_root=_absolute_path(
                 env, "HYPERV_MCP_LAB_ROOT", _local_root("lab", env) / "packages"
             ),
@@ -121,3 +143,8 @@ class Settings:
 
     def is_allowed(self, vm_name: str) -> bool:
         return any(name.casefold() == vm_name.casefold() for name in self.allowed_vms)
+
+    def guest_transport_for(self, vm_name: str) -> str:
+        """Per-VM override from HYPERV_MCP_GUEST_TRANSPORT_<VMNAME>, else the default."""
+        key = vm_name.casefold().replace("_", "-")
+        return self.guest_transport_overrides.get(key, self.guest_transport)

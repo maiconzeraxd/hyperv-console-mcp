@@ -6,7 +6,7 @@ A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/)
 
 ## Highlights
 
-- **45 MCP tools** with read-only/destructive annotations and structured results.
+- **47 MCP tools** with read-only/destructive annotations and structured results.
 - Inventory, pause/resume, bounded state waiting, power, checkpoints, and bounded guest file transfer.
 - Guest OS health, processes, services, and recent event logs through PowerShell Direct.
 - Hyper-V `Msvm_Keyboard` and `Msvm_SyntheticMouse`, explicit key/button states, and ordered console batches: works without guest networking.
@@ -60,7 +60,7 @@ See [client configuration](docs/SETUP.md) for a stdio JSON example. All mutation
 |---|---|
 | Host/VM | `hyperv_host_status`, `vm_list`, `vm_get`, `vm_wait`, `vm_power` |
 | Checkpoints | `checkpoint_list`, `checkpoint_create`, `checkpoint_restore`, `checkpoint_delete` |
-| PowerShell Direct | `guest_status`, `guest_processes`, `guest_services`, `guest_events`, `guest_exec`, `guest_read_file`, `guest_write_file` |
+| PowerShell Direct | `guest_status`, `guest_processes`, `guest_services`, `guest_events`, `guest_exec`, `guest_read_file`, `guest_write_file`, `guest_put_file`, `guest_get_file` |
 | Console | `console_info`, `console_type_text`, `console_press_keys`, `console_key_state`, `console_mouse_buttons`, `console_batch`, `console_ctrl_alt_delete`, `console_mouse_move`, `console_click`, `console_scroll`, `console_screenshot` |
 | Media/boot | `media_list`, `media_mount`, `media_eject` |
 | Serial console | `serial_status`, `serial_connect`, `serial_read`, `serial_send`, `serial_disconnect` |
@@ -70,6 +70,8 @@ See [client configuration](docs/SETUP.md) for a stdio JSON example. All mutation
 | Activity | `events_snapshot` |
 
 Power actions are `start`, `shutdown`, `save`, `pause`, `resume`, `turn_off`, and `reset`. Forced power needs `confirm_vm` equal to `vm_name`. Restore/delete need the VM name and exact checkpoint GUID confirmed. Overwriting an existing guest file needs `overwrite=true` and an exact `confirm_path`.
+
+`guest_read_file`/`guest_write_file` move small content inline (≤ 8 MiB of base64 in one request). `guest_put_file`/`guest_get_file` copy whole files between the guest and a host path under `HYPERV_MCP_TRANSFER_ROOT`, verifying SHA-256 on both sides; they are the right choice for drivers, dumps and anything else measured in tens of MiB. Every guest result carries `transport`, which is `psdirect` today.
 
 Media operations use an existing DVD drive and require the VM to be Off. `media_mount(..., boot_first=true)` changes firmware/BIOS boot priority; it does not start the VM. Serial attachment requires an already configured COM1 named pipe and a Running VM. It is not a WinDbg replacement and cannot be combined with a debugger that already owns that pipe.
 

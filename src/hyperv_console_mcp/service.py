@@ -24,7 +24,7 @@ COMMAND_PREVIEW_LINES = 20
 # Every MCP tool annotated MUTATION must request approval here, once per call.
 GATED_TOOLS = frozenset({
     "vm_power", "checkpoint_create", "checkpoint_restore", "checkpoint_delete",
-    "guest_exec", "guest_write_file",
+    "guest_exec", "guest_write_file", "guest_put_file", "guest_get_file",
     "lab_init", "lab_stage", "lab_collect",
     "console_type_text", "console_press_keys", "console_key_state",
     "console_mouse_buttons", "console_batch", "console_ctrl_alt_delete",
@@ -124,6 +124,18 @@ class HyperVService:
         if actual != expected:
             raise PolicyError(f"{label} must exactly match {expected!r}.")
 
+    def _call(self, operation: str, vm_name: str | None, action: Callable[[], T]) -> T:
+        try:
+            result = action()
+        except HyperVError as exc:
+            self.audit.record(operation, vm_name, "error", exc.code)
+            raise
+        except Exception:
+            self.audit.record(operation, vm_name, "error", "unexpected_error")
+            raise
+        self.audit.record(operation, vm_name, "success")
+        return result
+
     def _run(
         self,
         operation: str,
@@ -133,21 +145,14 @@ class HyperVService:
         vm_name: str | None = None,
         audit: bool = True,
     ) -> dict[str, Any]:
-        try:
-            result = self.backend.invoke(
+        def invoke() -> dict[str, Any]:
+            return self.backend.invoke(
                 bridge_operation, payload or {}, timeout=self.settings.timeout_seconds
             )
-        except HyperVError as exc:
-            if audit:
-                self.audit.record(operation, vm_name, "error", exc.code)
-            raise
-        except Exception:
-            if audit:
-                self.audit.record(operation, vm_name, "error", "unexpected_error")
-            raise
+
         if audit:
-            self.audit.record(operation, vm_name, "success")
-        return result
+            return self._call(operation, vm_name, invoke)
+        return invoke()
 
     def _approve(
         self, operation: str, vm_name: str, summary: dict[str, Any] | None = None
@@ -320,49 +325,79 @@ class HyperVService:
                 {"vm": vm, "snapshot_id": snapshot}, vm_name=vm,
             )
 
-    def _guest(self, vm_name: str) -> dict[str, str]:
-        vm = self._write(vm_name, self.settings.allow_guest, "HYPERV_MCP_ALLOW_GUEST")
-        if not self.settings.guest_username or not self.settings.guest_password:
-            raise PolicyError(
-                "PowerShell Direct requires HYPERV_MCP_GUEST_USERNAME and "
-                "HYPERV_MCP_GUEST_PASSWORD in the server environment."
-            )
-        return {
-            "vm": vm,
-            "username": self.settings.guest_username,
-            "password": self.settings.guest_password,
-        }
+    def _guest_vm(self, vm_name: str) -> str:
+        return self._write(vm_name, self.settings.allow_guest, "HYPERV_MCP_ALLOW_GUEST")
+
+    def _transport(self, vm_name: str) -> Any:
+        from .transport import select_transport
+        return select_transport(self.settings, self.backend, vm_name)
+
+    def _guest_call(
+        self,
+        operation: str,
+        vm_name: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        summary: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run one structured guest operation through the configured transport."""
+        name = self._guest_vm(vm_name)
+        transport = self._transport(name)
+        request = dict(payload or {})
+
+        def run() -> dict[str, Any]:
+            return transport.call(name, operation, request)
+
+        if summary is None:
+            result = self._call(operation, name, run)
+        else:
+            with self._approve(operation, name, summary):
+                result = self._call(operation, name, run)
+        return {**result, "vm": result.get("vm", name), "transport": transport.name}
 
     def guest_exec(self, vm_name: str, command: str) -> dict[str, Any]:
-        payload = self._guest(vm_name)
-        payload["command"] = _text(command, "command", 131_072)
-        payload["max_output_chars"] = self.settings.max_output_chars
-        with self._approve("guest_exec", payload["vm"], _command_summary(payload["command"])):
-            return self._run("guest_exec", "guest_exec", payload, vm_name=payload["vm"])
+        text = _text(command, "command", 131_072)
+        name = self._guest_vm(vm_name)
+        transport = self._transport(name)
+        with self._approve("guest_exec", name, _command_summary(text)):
+            execution = self._call(
+                "guest_exec",
+                name,
+                lambda: transport.exec(
+                    name,
+                    text,
+                    timeout=self.settings.timeout_seconds,
+                    max_output=self.settings.max_output_chars,
+                ),
+            )
+        return {"vm": name, "execution": execution.as_dict()}
 
     def guest_status(self, vm_name: str) -> dict[str, Any]:
-        return self._run(
-            "guest_status", "guest_status", self._guest(vm_name), vm_name=vm_name
-        )
+        name = self._guest_vm(vm_name)
+        transport = self._transport(name)
+        guest = self._call("guest_status", name, lambda: transport.health(name))
+        return {"vm": name, "transport": transport.name, "guest": guest}
 
     def guest_processes(self, vm_name: str, name_contains: str = "") -> dict[str, Any]:
-        payload = self._guest(vm_name)
-        payload["name_contains"] = _text(
-            name_contains, "name_contains", 256, allow_empty=True
+        return self._guest_call(
+            "guest_processes",
+            vm_name,
+            {"name_contains": _text(name_contains, "name_contains", 256, allow_empty=True)},
         )
-        return self._run("guest_processes", "guest_processes", payload, vm_name=vm_name)
 
     def guest_services(
         self, vm_name: str, name_contains: str = "", include_stopped: bool = False
     ) -> dict[str, Any]:
-        payload = self._guest(vm_name)
-        payload["name_contains"] = _text(
-            name_contains, "name_contains", 256, allow_empty=True
-        )
         if not isinstance(include_stopped, bool):
             raise ValidationError("include_stopped must be a boolean value.")
-        payload["include_stopped"] = include_stopped
-        return self._run("guest_services", "guest_services", payload, vm_name=vm_name)
+        return self._guest_call(
+            "guest_services",
+            vm_name,
+            {
+                "name_contains": _text(name_contains, "name_contains", 256, allow_empty=True),
+                "include_stopped": include_stopped,
+            },
+        )
 
     def guest_events(
         self,
@@ -373,36 +408,43 @@ class HyperVService:
         level: int | None = None,
         hours: int = 72,
     ) -> dict[str, Any]:
-        payload = self._guest(vm_name)
         if log_name not in {"System", "Application", "Security", "Setup"}:
             raise ValidationError("log_name must be System, Application, Security, or Setup.")
-        payload.update(
-            log_name=log_name,
-            max_events=_integer(max_events, "max_events", 1, 200),
-            hours=_integer(hours, "hours", 1, 24 * 365),
-        )
+        payload: dict[str, Any] = {
+            "log_name": log_name,
+            "max_events": _integer(max_events, "max_events", 1, 200),
+            "hours": _integer(hours, "hours", 1, 24 * 365),
+        }
         if event_id is not None:
             payload["event_id"] = _integer(event_id, "event_id", 0, 65_535)
         if level is not None:
             payload["level"] = _integer(level, "level", 1, 5)
-        return self._run("guest_events", "guest_events", payload, vm_name=vm_name)
+        return self._guest_call("guest_events", vm_name, payload)
 
     def guest_read_file(
         self, vm_name: str, guest_path: str, max_bytes: int = 65_536
     ) -> dict[str, Any]:
-        payload = self._guest(vm_name)
-        payload["path"] = _text(guest_path, "guest_path", 32_768)
-        payload["max_bytes"] = _integer(max_bytes, "max_bytes", 1, MAX_GUEST_FILE_BYTES)
-        return self._run("guest_read_file", "guest_read_file", payload, vm_name=vm_name)
+        return self._guest_call(
+            "guest_read_file",
+            vm_name,
+            {
+                "path": _text(guest_path, "guest_path", 32_768),
+                "max_bytes": _integer(max_bytes, "max_bytes", 1, MAX_GUEST_FILE_BYTES),
+            },
+        )
 
     def guest_read_chunk(
         self, vm_name: str, guest_path: str, offset: int, count: int
     ) -> dict[str, Any]:
-        payload = self._guest(vm_name)
-        payload["path"] = _text(guest_path, "guest_path", 32_768)
-        payload["offset"] = _integer(offset, "offset", 0, MAX_GUEST_FILE_BYTES * 256)
-        payload["count"] = _integer(count, "count", 1, MAX_GUEST_FILE_BYTES)
-        return self._run("guest_read_chunk", "guest_read_chunk", payload, vm_name=vm_name)
+        return self._guest_call(
+            "guest_read_chunk",
+            vm_name,
+            {
+                "path": _text(guest_path, "guest_path", 32_768),
+                "offset": _integer(offset, "offset", 0, MAX_GUEST_FILE_BYTES * 256),
+                "count": _integer(count, "count", 1, MAX_GUEST_FILE_BYTES),
+            },
+        )
 
     def guest_assemble_file(
         self,
@@ -413,35 +455,42 @@ class HyperVService:
         expected_size: int,
         expected_sha256: str,
     ) -> dict[str, Any]:
-        payload = self._guest(vm_name)
-        payload.update(
-            path=_text(guest_path, "guest_path", 32_768),
-            parts_directory=_text(parts_directory, "parts_directory", 32_768),
-            part_count=_integer(part_count, "part_count", 1, 2048),
-            expected_size=_integer(expected_size, "expected_size", 0, MAX_GUEST_FILE_BYTES * 256),
-            expected_sha256=_text(expected_sha256, "expected_sha256", 64),
-        )
-        if not re.fullmatch(r"[0-9a-f]{64}", payload["expected_sha256"]):
+        digest = _text(expected_sha256, "expected_sha256", 64)
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ValidationError("expected_sha256 must be a lowercase SHA-256 hexadecimal string.")
-        return self._run("guest_assemble_file", "guest_assemble_file", payload, vm_name=vm_name)
+        return self._guest_call(
+            "guest_assemble_file",
+            vm_name,
+            {
+                "path": _text(guest_path, "guest_path", 32_768),
+                "parts_directory": _text(parts_directory, "parts_directory", 32_768),
+                "part_count": _integer(part_count, "part_count", 1, 2048),
+                "expected_size": _integer(
+                    expected_size, "expected_size", 0, MAX_GUEST_FILE_BYTES * 256
+                ),
+                "expected_sha256": digest,
+            },
+        )
 
     def guest_publish_package(
         self, vm_name: str, package_id: str, transfer_id: str, manifest_sha256: str
     ) -> dict[str, Any]:
         """Verify a staged package inside the guest and move it into Packages atomically."""
-        payload = self._guest(vm_name)
-        payload.update(
-            package_id=_text(package_id, "package_id", 64),
-            transfer_id=_text(transfer_id, "transfer_id", 32),
-            manifest_sha256=_text(manifest_sha256, "manifest_sha256", 64),
-        )
-        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,63}", payload["package_id"]) is None:
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,63}", package_id) is None:
             raise ValidationError("package_id must be 1-64 letters, digits, dots, or hyphens.")
-        if re.fullmatch(r"[0-9a-f]{32}", payload["transfer_id"]) is None:
+        if re.fullmatch(r"[0-9a-f]{32}", transfer_id) is None:
             raise ValidationError("transfer_id must be a 32-character lowercase hexadecimal id.")
-        if re.fullmatch(r"[0-9a-f]{64}", payload["manifest_sha256"]) is None:
+        if re.fullmatch(r"[0-9a-f]{64}", manifest_sha256) is None:
             raise ValidationError("manifest_sha256 must be a lowercase SHA-256 hexadecimal string.")
-        return self._run("guest_publish_package", "guest_publish_package", payload, vm_name=vm_name)
+        return self._guest_call(
+            "guest_publish_package",
+            vm_name,
+            {
+                "package_id": package_id,
+                "transfer_id": transfer_id,
+                "manifest_sha256": manifest_sha256,
+            },
+        )
 
     def guest_write_file(
         self,
@@ -453,7 +502,6 @@ class HyperVService:
         confirm_path: str | None = None,
         create_parent: bool = False,
     ) -> dict[str, Any]:
-        payload = self._guest(vm_name)
         path = _text(guest_path, "guest_path", 32_768)
         _text(content_base64, "content_base64", 14_000_000, allow_empty=True)
         try:
@@ -466,22 +514,93 @@ class HyperVService:
             raise ValidationError("overwrite and create_parent must be boolean values.")
         if overwrite:
             self._confirm(confirm_path or "", path, "confirm_path")
-        payload.update(
-            path=path,
-            content_base64=content_base64,
-            overwrite=overwrite,
-            create_parent=create_parent,
+        return self._guest_call(
+            "guest_write_file",
+            vm_name,
+            {
+                "path": path,
+                "content_base64": content_base64,
+                "overwrite": overwrite,
+                "create_parent": create_parent,
+            },
+            summary={
+                "path": path, "bytes": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(), "overwrite": overwrite,
+            },
         )
-        summary = {
-            "path": path, "bytes": len(content),
-            "sha256": hashlib.sha256(content).hexdigest(), "overwrite": overwrite,
-        }
-        with self._approve("guest_write_file", payload["vm"], summary):
-            return self._run("guest_write_file", "guest_write_file", payload, vm_name=payload["vm"])
+
+    def guest_put_file(
+        self,
+        vm_name: str,
+        local_path: str,
+        guest_path: str,
+        *,
+        overwrite: bool = False,
+        confirm_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Copy a host file under HYPERV_MCP_TRANSFER_ROOT into the guest."""
+        if not isinstance(overwrite, bool):
+            raise ValidationError("overwrite must be a boolean value.")
+        source = Path(_confined_path(local_path, "local_path", self.settings.transfer_root, ""))
+        if not source.is_file():
+            raise ValidationError(f"local_path is not a file: {source}")
+        remote = _text(guest_path, "guest_path", 32_768)
+        if overwrite:
+            self._confirm(confirm_path or "", remote, "confirm_path")
+        data = source.read_bytes()
+        name = self._guest_vm(vm_name)
+        transport = self._transport(name)
+        with self._approve(
+            "guest_put_file",
+            name,
+            {
+                "local_path": str(source), "guest_path": remote,
+                "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                "overwrite": overwrite,
+            },
+        ):
+            written = self._call(
+                "guest_put_file",
+                name,
+                lambda: transport.put_file(name, source, remote, overwrite=overwrite),
+            )
+        return {"vm": name, "file": written.as_dict()}
+
+    def guest_get_file(
+        self,
+        vm_name: str,
+        guest_path: str,
+        local_path: str,
+        *,
+        overwrite: bool = False,
+        confirm_path: str | None = None,
+    ) -> dict[str, Any]:
+        """Copy a guest file to a host path under HYPERV_MCP_TRANSFER_ROOT."""
+        if not isinstance(overwrite, bool):
+            raise ValidationError("overwrite must be a boolean value.")
+        remote = _text(guest_path, "guest_path", 32_768)
+        target = Path(_confined_path(local_path, "local_path", self.settings.transfer_root, ""))
+        if target.exists() and not overwrite:
+            raise ValidationError(
+                f"local_path already exists: {target}. Pass overwrite=true and confirm_path."
+            )
+        if overwrite:
+            self._confirm(confirm_path or "", str(target), "confirm_path")
+        name = self._guest_vm(vm_name)
+        transport = self._transport(name)
+        with self._approve(
+            "guest_get_file", name, {"guest_path": remote, "local_path": str(target)}
+        ):
+            fetched = self._call(
+                "guest_get_file",
+                name,
+                lambda: transport.get_file(name, remote, target),
+            )
+        return {"vm": name, "file": fetched.as_dict()}
 
     def lab_init(self, vm_name: str, confirm_vm: str) -> dict[str, Any]:
         from .lab.cli import initialize
-        name = self._guest(vm_name)["vm"]
+        name = self._guest_vm(vm_name)
         self._confirm(confirm_vm, name, "confirm_vm")
         with self._approve("lab_init", name, {"guest_root": r"C:\DriverLab", "installs_tools": True}):
             return initialize(self, name)
@@ -494,7 +613,7 @@ class HyperVService:
         from pathlib import Path
 
         from .lab.transfer import DriverLabTransfer, build_manifest, manifest_hash
-        name = self._guest(vm_name)["vm"]
+        name = self._guest_vm(vm_name)
         root = self.settings.lab_root.expanduser().resolve()
         source = Path(os.path.abspath(os.path.expandvars(os.path.expanduser(
             _text(source_directory, "source_directory", 32_768)
@@ -523,7 +642,7 @@ class HyperVService:
         include_kernel_dump: bool = False,
     ) -> dict[str, Any]:
         from .lab.transfer import DriverLabTransfer
-        name = self._guest(vm_name)["vm"]
+        name = self._guest_vm(vm_name)
         output = self.settings.evidence_root.expanduser().resolve()
         summary = {
             "package_id": package_id, "run_id": run_id,

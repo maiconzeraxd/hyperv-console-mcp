@@ -208,6 +208,38 @@ def create_server(
         )
 
     @tool(
+        "guest_put_file", annotations=MUTATION,
+        description="Copy a host file under HYPERV_MCP_TRANSFER_ROOT into the guest and verify its SHA-256. Use this instead of base64 for anything larger than a few KiB.",
+    )
+    async def guest_put_file(
+        vm_name: str,
+        local_path: str,
+        guest_path: str,
+        overwrite: bool = False,
+        confirm_path: str | None = None,
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.guest_put_file, vm_name, local_path, guest_path,
+            overwrite=overwrite, confirm_path=confirm_path,
+        )
+
+    @tool(
+        "guest_get_file", annotations=MUTATION,
+        description="Copy a guest file to a host path under HYPERV_MCP_TRANSFER_ROOT and verify its SHA-256.",
+    )
+    async def guest_get_file(
+        vm_name: str,
+        guest_path: str,
+        local_path: str,
+        overwrite: bool = False,
+        confirm_path: str | None = None,
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.guest_get_file, vm_name, guest_path, local_path,
+            overwrite=overwrite, confirm_path=confirm_path,
+        )
+
+    @tool(
         "lab_init", annotations=MUTATION,
         description="Install or verify fixed lab tools in C:\\DriverLab and create package/run/evidence directories. Never executes a payload. Requires confirm_vm.",
     )
