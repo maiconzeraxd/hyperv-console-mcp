@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -11,7 +12,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,10 +24,96 @@ _MAX_MESSAGE = 512
 _actor: ContextVar[str] = ContextVar("hyperv_event_actor", default="mcp")
 _operation_depth: ContextVar[int] = ContextVar("hyperv_event_operation_depth", default=0)
 _approval_granted: ContextVar[bool] = ContextVar("hyperv_approval_granted", default=False)
+_write_lock = threading.Lock()
+_pruned: set[str] = set()
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _day(stamp: str) -> str:
+    """Return the YYYYMMDD bucket of an ISO-8601 UTC timestamp."""
+    compact = stamp[:10].replace("-", "")
+    return compact if len(compact) == 8 and compact.isdigit() else datetime.now(timezone.utc).strftime("%Y%m%d")
+
+
+def _log_path(directory: Path, day: str) -> Path:
+    return directory / f"events-{day}.jsonl"
+
+
+def _append(directory: Path, day: str, record: str, retention_days: int) -> None:
+    """Append one JSON line under an exclusive lock shared by MCP and dashboard."""
+    directory = directory.expanduser()
+    directory.mkdir(parents=True, exist_ok=True)
+    with _write_lock:
+        with _log_path(directory, day).open("a", encoding="utf-8", newline="") as stream:
+            stream.write(record + "\n")
+        key = str(directory)
+        if key not in _pruned:
+            _pruned.add(key)
+            _prune(directory, retention_days)
+
+
+def _prune(directory: Path, retention_days: int) -> None:
+    # File names sort by day, so a string comparison is enough to find stale logs.
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=retention_days)).strftime("%Y%m%d")
+    for path in directory.glob("events-*.jsonl"):
+        if path.stem[len("events-"):] >= cutoff:
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+class EventLogReader:
+    """Reads the daily JSONL logs incrementally, resuming from a byte offset.
+
+    The dashboard polls every 1.5 s; re-reading and re-sorting every file each
+    time made that poll grow with the whole history.
+    """
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+        self._offsets: dict[Path, int] = {}
+
+    def read_new(self, limit: int = 1000) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        try:
+            paths = sorted(self.directory.expanduser().glob("events-*.jsonl"))
+        except OSError:
+            return records
+        for path in paths:
+            offset = self._offsets.get(path, 0)
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if size < offset:  # the log was rotated or truncated under us
+                offset = 0
+            if size == offset:
+                self._offsets[path] = offset
+                continue
+            try:
+                with path.open("rb") as stream:
+                    stream.seek(offset)
+                    data = stream.read()
+            except OSError:
+                continue
+            end = data.rfind(b"\n")
+            if end < 0:
+                continue  # only a partial line so far; wait for the next write
+            complete = data[: end + 1]
+            self._offsets[path] = offset + len(complete)
+            for line in complete.splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except ValueError:
+                    continue
+        return records[-limit:]
 
 
 def _text(value: Any, maximum: int = _MAX_MESSAGE) -> str:
@@ -93,12 +180,13 @@ class EventBus:
             self._events.append(event)
             self._condition.notify_all()
         try:
-            directory = self._directory or Settings.from_env().event_directory
-            directory = directory.expanduser()
-            directory.mkdir(parents=True, exist_ok=True)
-            record = directory / f"{event.started_utc.replace(':', '-')}-{event.sequence:012d}-{event.event_id}.json"
-            import json
-            record.write_text(json.dumps(asdict(event), ensure_ascii=False), encoding="utf-8")
+            settings = Settings.from_env()
+            directory = self._directory or settings.event_directory
+            _append(
+                directory, _day(event.started_utc),
+                json.dumps(asdict(event), ensure_ascii=False),
+                settings.event_retention_days,
+            )
         except (OSError, ValidationError):
             pass
         return event

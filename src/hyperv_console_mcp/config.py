@@ -71,6 +71,7 @@ class Settings:
     lab_root: Path = field(default_factory=lambda: _local_root("lab") / "packages")
     evidence_root: Path = field(default_factory=lambda: _local_root("evidence"))
     event_directory: Path = field(default_factory=lambda: _local_root("events"))
+    event_retention_days: int = 14
 
     @classmethod
     def from_env(cls, values: Mapping[str, str] | None = None) -> "Settings":
@@ -112,6 +113,9 @@ class Settings:
             ),
             event_directory=_absolute_path(
                 env, "HYPERV_MCP_EVENT_DIRECTORY", _local_root("events", env)
+            ),
+            event_retention_days=_integer(
+                env, "HYPERV_MCP_EVENT_RETENTION_DAYS", 14, 1, 3650
             ),
         )
 

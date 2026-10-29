@@ -18,7 +18,7 @@ from typing import Any, Callable
 from .backend import PowerShellBackend
 from .config import Settings
 from .errors import HyperVError
-from .events import EVENTS, EventSink
+from .events import EVENTS, EventLogReader, EventSink
 from .ipc import ApprovalBroker
 from .lab.cli import diagnostics, initialize
 from .lab.transfer import DriverLabTransfer, build_manifest
@@ -141,6 +141,7 @@ class Dashboard(tk.Tk):
         self.pending_lock = threading.Lock()
         self.seen_events: set[str] = set()
         self.events: deque[dict[str, Any]] = deque(maxlen=1000)
+        self.event_reader = EventLogReader(self.settings.event_directory)
         self.running = True
         self.busy = 0
         self.last_vm: dict[str, Any] = {}
@@ -696,13 +697,7 @@ class Dashboard(tk.Tk):
         if not self.running:
             return
         def read() -> None:
-            records = []
-            files = sorted(self.settings.event_directory.expanduser().glob("*.json"))
-            for path in files[-1000:]:
-                try:
-                    records.append(json.loads(path.read_text(encoding="utf-8")))
-                except (OSError, ValueError):
-                    continue
+            records = self.event_reader.read_new()
             records.extend(EVENTS.snapshot()["events"])
             self.queue.put(("events", records))
         threading.Thread(target=read, daemon=True, name="hvmcp-event-reader").start()

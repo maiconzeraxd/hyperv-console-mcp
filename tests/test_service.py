@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -11,6 +12,9 @@ from hyperv_console_mcp.audit import AuditLogger
 from hyperv_console_mcp.config import Settings
 from hyperv_console_mcp.errors import BackendError, PolicyError, ValidationError
 from hyperv_console_mcp.service import HyperVService
+
+# These fixtures use drive-letter roots, which only resolve on Windows.
+windows_paths = pytest.mark.skipif(os.name != "nt", reason="Windows path semantics")
 
 
 class FakeBackend:
@@ -301,6 +305,7 @@ def test_console_key_mouse_and_batch_validation(
         enabled.console_key_state("NORTH-Test", "shift", 1)
 
 
+@windows_paths
 def test_media_requires_confirmation_and_offline_safe_arguments(
     enabled: HyperVService, backend: FakeBackend
 ) -> None:
@@ -394,6 +399,7 @@ def test_keyboard_rejects_non_ascii_before_typing(
     assert backend.calls == []
 
 
+@windows_paths
 def test_host_paths_are_confined_to_their_configured_roots(
     enabled: HyperVService, backend: FakeBackend, tmp_path: Path
 ) -> None:

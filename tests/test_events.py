@@ -69,7 +69,53 @@ def test_event_lifecycle_contains_metadata_not_exception_details(tmp_path, monke
     assert events[0]["correlation_id"] == events[1]["correlation_id"]
     assert events[0]["actor"] == "mcp"
     assert "sensitive details" not in json.dumps(events)
-    assert len(list(tmp_path.glob("*.json"))) == 2
+    lines = _log_lines(tmp_path)
+    assert [json.loads(line)["phase"] for line in lines] == ["started", "failed"]
+
+
+def _log_lines(directory: Path) -> list[str]:
+    (path,) = sorted(directory.glob("events-*.jsonl"))
+    return [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_events_append_to_one_daily_jsonl_file(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("HYPERV_MCP_EVENT_DIRECTORY", str(tmp_path))
+    bus = EventBus()
+    for index in range(3):
+        with bus.operation(f"operation_{index}", "NORTH-Test"):
+            pass
+    assert len(list(tmp_path.glob("events-*.jsonl"))) == 1
+    assert len(_log_lines(tmp_path)) == 6
+
+
+def test_the_event_reader_resumes_from_its_offset(tmp_path, monkeypatch) -> None:
+    from hyperv_console_mcp.events import EventLogReader
+
+    monkeypatch.setenv("HYPERV_MCP_EVENT_DIRECTORY", str(tmp_path))
+    bus = EventBus()
+    reader = EventLogReader(tmp_path)
+    with bus.operation("first", "NORTH-Test"):
+        pass
+    assert [event["phase"] for event in reader.read_new()] == ["started", "completed"]
+    assert reader.read_new() == []
+    with bus.operation("second", "NORTH-Test"):
+        pass
+    assert [event["operation"] for event in reader.read_new()] == ["second", "second"]
+
+
+def test_old_event_logs_are_pruned_and_recent_ones_kept(tmp_path, monkeypatch) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.setenv("HYPERV_MCP_EVENT_DIRECTORY", str(tmp_path))
+    monkeypatch.setenv("HYPERV_MCP_EVENT_RETENTION_DAYS", "2")
+    stale = tmp_path / f"events-{(datetime.now(timezone.utc) - timedelta(days=9)):%Y%m%d}.jsonl"
+    stale.write_text("{}\n", encoding="utf-8")
+    fresh = tmp_path / f"events-{(datetime.now(timezone.utc) - timedelta(days=1)):%Y%m%d}.jsonl"
+    fresh.write_text("{}\n", encoding="utf-8")
+    with EventBus().operation("prune-check", "NORTH-Test"):
+        pass
+    assert not stale.exists()
+    assert fresh.exists()
 
 
 def test_nested_operations_share_only_the_outer_lifecycle(tmp_path, monkeypatch) -> None:

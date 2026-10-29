@@ -32,7 +32,9 @@ The default event directory is:
 %LOCALAPPDATA%\HyperVConsoleMCP\events
 ```
 
-Override it with `HYPERV_MCP_EVENT_DIRECTORY`. Both MCP and dashboard must use the same directory. Records contain operation metadata only; they exclude guest commands, typed text, credentials and file contents. Local event files may reveal VM names and operation history, so protect the profile directory normally.
+Override it with `HYPERV_MCP_EVENT_DIRECTORY`. Both MCP and dashboard must use the same directory. Events are appended as one JSON line per record to `events-YYYYMMDD.jsonl`, under a process lock so MCP and dashboard can write concurrently; the dashboard tails those files by byte offset instead of re-reading the whole history every poll. `HYPERV_MCP_EVENT_RETENTION_DAYS` (default 14) deletes older daily files the first time a process writes in a day.
+
+Records contain operation metadata only; they exclude guest commands, typed text, credentials and file contents. Local event files may reveal VM names and operation history, so protect the profile directory normally.
 
 ## Optional approval of AI mutations
 

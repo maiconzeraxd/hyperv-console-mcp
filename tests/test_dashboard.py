@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from hyperv_console_mcp.dashboard import Dashboard
+pytest.importorskip("tkinter", reason="the dashboard is a tkinter application")
+
+from hyperv_console_mcp.dashboard import Dashboard  # noqa: E402
 
 
 class UiBackend:

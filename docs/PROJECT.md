@@ -100,3 +100,10 @@ An independent, local Model Context Protocol server for Hyper-V on Windows. It c
 - Approval requests carry a secret-free summary built by the tool: power action, checkpoint name or ID, guest path with size and SHA-256, package ID with file count, byte total and manifest hash, media path and drive, or the first 20 lines of a `guest_exec` command plus the SHA-256 of the full command. Typed console and serial text is reported only by length. The broker scrubs credential-shaped keys and rejects oversized summaries as a backstop, and the dashboard renders the summary in a scrollable modal instead of pointing at the conversation.
 - Local validation: 110 passing tests, clean Ruff, valid PowerShell syntax.
 - Not yet validated live: the hardened broker has only been exercised by the Windows-only unit test in this session, not by a real MCP server and dashboard pair across processes.
+
+### 2026-10-29 — v0.2 phase 1: event log and cross-platform tests
+
+- Events are now appended to `events-YYYYMMDD.jsonl` (one JSON record per line) under a process lock instead of one file per event. `HYPERV_MCP_EVENT_RETENTION_DAYS` (default 14) prunes older daily files on the first write of a process, and `EventLogReader` tails the logs by byte offset so the dashboard's 1.5 s poll no longer re-reads and re-sorts the whole history.
+- Windows-only tests are marked: real named-pipe approval in `tests/test_events.py` and the drive-letter media tests in `tests/test_service.py`; `tests/test_dashboard.py` uses `pytest.importorskip("tkinter")`.
+- Local validation: 113 passing tests, clean Ruff.
+- Not yet validated: the JSONL log and the offset reader have not been exercised by two processes writing at once outside the unit tests.
