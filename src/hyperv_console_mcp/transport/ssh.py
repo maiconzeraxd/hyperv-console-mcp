@@ -65,7 +65,7 @@ def _encoded_command(script: str) -> str:
     return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
 
 
-def _ps_quote(value: str) -> str:
+def ps_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
@@ -332,8 +332,8 @@ class SshTransport:
         request = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
         command = (
             f"powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass "
-            f"-File {_ps_quote(GUEST_SCRIPT)} -Operation {_ps_quote(operation)} "
-            f"-Request {_ps_quote(request)}"
+            f"-File {ps_quote(GUEST_SCRIPT)} -Operation {ps_quote(operation)} "
+            f"-Request {ps_quote(request)}"
         )
         output, error, status = self._run(vm, command, timeout=self.settings.timeout_seconds)
         for line in output.splitlines():
@@ -365,9 +365,9 @@ class SshTransport:
 
     def _guest_sha256(self, vm: str, remote: str) -> str:
         command = (
-            f"if (-not (Test-Path -LiteralPath {_ps_quote(remote)} -PathType Leaf)) {{ "
+            f"if (-not (Test-Path -LiteralPath {ps_quote(remote)} -PathType Leaf)) {{ "
             "'HVMCP_HASH:not_found' } else { 'HVMCP_HASH:' + "
-            f"(Get-FileHash -LiteralPath {_ps_quote(remote)} -Algorithm SHA256).Hash.ToLowerInvariant() }}"
+            f"(Get-FileHash -LiteralPath {ps_quote(remote)} -Algorithm SHA256).Hash.ToLowerInvariant() }}"
         )
         output, _, _ = self._run(
             vm, f"powershell -NoProfile -NonInteractive -Command {command}",
@@ -468,4 +468,4 @@ class SshTransport:
                 self._close_client(_CLIENTS.pop(key))
 
 
-__all__ = ["GUEST_OPERATIONS", "GUEST_SCRIPT", "SshTransport", "vm_key"]
+__all__ = ["GUEST_OPERATIONS", "GUEST_SCRIPT", "SshTransport", "ps_quote", "vm_key"]

@@ -30,7 +30,7 @@ def server() -> tuple[object, FakeBackend]:
 def test_all_tools_are_discoverable(server) -> None:
     mcp, _ = server
     tools = {tool.name: tool for tool in anyio.run(mcp.list_tools)}
-    assert len(tools) == 47
+    assert len(tools) == 50
     assert tools["vm_list"].input_schema["type"] == "object"
     assert tools["vm_list"].input_schema.get("required", []) == []
     assert "password" not in tools["guest_exec"].input_schema["properties"]

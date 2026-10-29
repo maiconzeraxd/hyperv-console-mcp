@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -53,6 +54,27 @@ def _absolute_path(values: Mapping[str, str], name: str, default: Path) -> Path:
     return path
 
 
+def _optional_path(values: Mapping[str, str], name: str) -> Path | None:
+    value = values.get(name, "").strip()
+    if not value:
+        return None
+    path = Path(os.path.expandvars(value)).expanduser()
+    if not path.is_absolute():
+        raise ValidationError(f"{name} must be an absolute path.")
+    return path
+
+
+def _subnet(values: Mapping[str, str], name: str, default: str) -> str:
+    value = values.get(name, default).strip() or default
+    try:
+        network = ipaddress.ip_network(value, strict=False)
+    except ValueError as exc:
+        raise ValidationError(f"{name} must be an IPv4 network such as 10.77.0.0/24.") from exc
+    if network.version != 4 or network.prefixlen > 30:
+        raise ValidationError(f"{name} must be an IPv4 network with room for two hosts.")
+    return str(network)
+
+
 def _transport(values: Mapping[str, str], name: str) -> str:
     value = values.get(name, "auto").strip().casefold() or "auto"
     if value not in {"auto", "psdirect", "ssh"}:
@@ -81,6 +103,8 @@ class Settings:
     iso_root: Path = field(default_factory=lambda: _local_root("media"))
     transfer_root: Path = field(default_factory=lambda: _local_root("transfers"))
     ssh_root: Path = field(default_factory=lambda: _local_root("ssh"))
+    ssh_subnet: str = "10.77.0.0/24"
+    openssh_package: Path | None = None
     lab_root: Path = field(default_factory=lambda: _local_root("lab") / "packages")
     evidence_root: Path = field(default_factory=lambda: _local_root("evidence"))
     event_directory: Path = field(default_factory=lambda: _local_root("events"))
@@ -129,6 +153,8 @@ class Settings:
                 env, "HYPERV_MCP_TRANSFER_ROOT", _local_root("transfers", env)
             ),
             ssh_root=_absolute_path(env, "HYPERV_MCP_SSH_ROOT", _local_root("ssh", env)),
+            ssh_subnet=_subnet(env, "HYPERV_MCP_SSH_SUBNET", "10.77.0.0/24"),
+            openssh_package=_optional_path(env, "HYPERV_MCP_OPENSSH_PACKAGE"),
             lab_root=_absolute_path(
                 env, "HYPERV_MCP_LAB_ROOT", _local_root("lab", env) / "packages"
             ),

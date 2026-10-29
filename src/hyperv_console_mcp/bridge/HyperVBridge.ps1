@@ -65,6 +65,7 @@ function Convert-Vm {
                 name = $_.Name
                 switch_name = $_.SwitchName
                 status = $_.Status
+                mac_address = $_.MacAddress
                 ip_addresses = @($_.IPAddresses)
             }
         }
@@ -1098,6 +1099,92 @@ function Invoke-BridgeOperation {
                 vm = $vm.Name; drive = Convert-DvdDrive -Drive (Get-ExactDvdDrive -Vm $vm -ControllerNumber $number -ControllerLocation $location)
                 completed = $true
             }
+        }
+        # Host side of SSH provisioning: a dedicated internal switch only. An
+        # external switch would expose the disposable lab to the real network,
+        # so an existing switch with that name is refused unless it is Internal.
+        'ssh_network_prepare' {
+            $vm = Get-ExactVm -Name $request.vm
+            $switchName = [string]$request.switch_name
+            $hostIp = [string]$request.host_ip
+            $prefixLength = [int]$request.prefix_length
+            $adapterName = [string]$request.adapter_name
+            # Decide the adapter situation before creating any host resource, so a
+            # refused request leaves nothing behind.
+            $adapters = @(Get-VMNetworkAdapter -VM $vm)
+            $attached = @($adapters | Where-Object { $_.SwitchName -eq $switchName })
+            if ($attached.Count -eq 0 -and $adapters.Count -gt 0 -and
+                -not [bool]$request.use_existing_adapter) {
+                throw "The VM already has a network adapter; pass use_existing_adapter to attach '$switchName' to it."
+            }
+
+            $existingSwitch = @(Get-VMSwitch -Name $switchName -ErrorAction SilentlyContinue)
+            $switchCreated = $false
+            if ($existingSwitch.Count -eq 0) {
+                New-VMSwitch -Name $switchName -SwitchType Internal -ErrorAction Stop | Out-Null
+                $switchCreated = $true
+            } elseif ($existingSwitch[0].SwitchType -ne 'Internal') {
+                throw "The switch '$switchName' already exists and is not Internal; refusing to use it."
+            }
+
+            $adapterCreated = $false
+            if ($attached.Count -gt 0) {
+                $adapter = $attached[0]
+            } elseif ($adapters.Count -gt 0) {
+                $adapter = $adapters[0]
+                Connect-VMNetworkAdapter -VMNetworkAdapter $adapter -SwitchName $switchName -ErrorAction Stop
+            } else {
+                $adapter = Add-VMNetworkAdapter -VM $vm -Name $adapterName -SwitchName $switchName -ErrorAction Stop
+                $adapterCreated = $true
+            }
+
+            # The host end of the internal switch carries the lab address that the
+            # guest firewall rule is scoped to.
+            $hostAddressCreated = $false
+            $address = @(Get-NetIPAddress -IPAddress $hostIp -ErrorAction SilentlyContinue)
+            if ($address.Count -eq 0) {
+                $alias = "vEthernet ($switchName)"
+                $aliasAddresses = @(Get-NetIPAddress -InterfaceAlias $alias -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+                if ($aliasAddresses.Count -eq 0) {
+                    New-NetIPAddress -IPAddress $hostIp -PrefixLength $prefixLength -InterfaceAlias $alias -ErrorAction Stop | Out-Null
+                    $hostAddressCreated = $true
+                }
+            }
+            $result = @{
+                vm = $vm.Name
+                switch_name = $switchName
+                switch_created = $switchCreated
+                adapter_name = [string]$adapter.Name
+                adapter_created = $adapterCreated
+                host_ip = $hostIp
+                host_address_created = $hostAddressCreated
+            }
+        }
+        # Undo only what provisioning added. The switch is never deleted: another
+        # VM may still use it and deleting a switch is not this tool's business.
+        'ssh_network_remove' {
+            $vm = Get-ExactVm -Name $request.vm
+            $switchName = [string]$request.switch_name
+            $adapterName = [string]$request.adapter_name
+            $hostIp = [string]$request.host_ip
+            $removed = @()
+            foreach ($adapter in @(Get-VMNetworkAdapter -VM $vm | Where-Object { $_.SwitchName -eq $switchName })) {
+                if ([bool]$request.remove_adapter -and [string]$adapter.Name -eq $adapterName) {
+                    Remove-VMNetworkAdapter -VMNetworkAdapter $adapter -Confirm:$false -ErrorAction Stop
+                    $removed += 'adapter'
+                } else {
+                    Disconnect-VMNetworkAdapter -VMNetworkAdapter $adapter -ErrorAction Stop
+                    $removed += 'connection'
+                }
+            }
+            if ([bool]$request.remove_host_address) {
+                $address = @(Get-NetIPAddress -IPAddress $hostIp -ErrorAction SilentlyContinue)
+                if ($address.Count -gt 0) {
+                    Remove-NetIPAddress -IPAddress $hostIp -Confirm:$false -ErrorAction Stop
+                    $removed += 'host_address'
+                }
+            }
+            $result = @{ vm = $vm.Name; switch_name = $switchName; removed = @($removed) }
         }
         'debug_serial_status' {
             $vm = Get-ExactVm -Name $request.vm

@@ -54,6 +54,22 @@ $env:HYPERV_MCP_ISO_ROOT = 'C:\VMs_iso'
 $env:HYPERV_MCP_SERIAL_LOG_ROOT = "$env:LOCALAPPDATA\HyperVConsoleMCP\serial"
 ```
 
+## Optional SSH transport
+
+SSH is off unless a VM has been provisioned with `guest_ssh_provision`; PowerShell Direct stays the default and needs no extra package. To use it:
+
+```powershell
+python -m pip install 'hyperv-console-mcp[ssh]'
+$env:HYPERV_MCP_GUEST_TRANSPORT = 'auto'          # auto | psdirect | ssh
+$env:HYPERV_MCP_SSH_SUBNET = '10.77.0.0/24'       # private lab subnet, host takes .1
+$env:HYPERV_MCP_SSH_ROOT = "$env:LOCALAPPDATA\HyperVConsoleMCP\ssh"
+$env:HYPERV_MCP_OPENSSH_PACKAGE = 'C:\VMs_iso\OpenSSH-Win64'   # only for guests without internet
+```
+
+Per-VM overrides use `HYPERV_MCP_GUEST_TRANSPORT_<VMNAME>` (dashes and underscores both work). `ssh` never falls back silently: if the VM is not provisioned, the call fails with instructions instead of quietly switching transport. `auto` uses SSH only when this tool provisioned the VM and the connection answers within two seconds.
+
+Provisioning creates a dedicated **internal** switch named `HyperV-MCP-Lab` (never external), gives the host `10.77.0.1` on it, installs a key-only sshd in the guest, and pins the guest host key in `%LOCALAPPDATA%\HyperVConsoleMCP\ssh\<vm>\known_hosts`. The private key never leaves that directory, whose ACL is restricted to the current user. `HYPERV_MCP_OPENSSH_PACKAGE` is only read when the guest cannot install `OpenSSH.Server` itself; point it at an extracted Win32-OpenSSH release containing `install-sshd.ps1`.
+
 ## Dashboard
 
 Start the native interface from the repository with:

@@ -543,3 +543,151 @@ def test_forced_power_stays_synchronous(tmp_path: Path) -> None:
     assert result["operation_id"] is None
     assert result["state"] == "completed"
     assert result["vm"]["name"] == "NORTH-Test"
+
+SSH_NETWORK_MOCKS = """
+$MockLogPath = '{log}'
+function Add-MockLog { param([string]$Value) Add-Content -LiteralPath $MockLogPath -Value $Value }
+function Get-VMSwitch { param($Name, $ErrorAction) }
+function New-VMSwitch {
+    param($Name, $SwitchType, $ErrorAction)
+    Add-MockLog "New-VMSwitch:${Name}:${SwitchType}"
+}
+function Get-VMNetworkAdapter { param($VM) }
+function Add-VMNetworkAdapter {
+    param($VM, $Name, $SwitchName, $ErrorAction)
+    Add-MockLog "Add-VMNetworkAdapter:${Name}:${SwitchName}"
+    [pscustomobject]@{ Name = $Name; SwitchName = $SwitchName }
+}
+function Connect-VMNetworkAdapter {
+    param($VMNetworkAdapter, $SwitchName, $ErrorAction)
+    Add-MockLog "Connect-VMNetworkAdapter:$($VMNetworkAdapter.Name):${SwitchName}"
+}
+function Remove-VMNetworkAdapter {
+    param($VMNetworkAdapter, [switch]$Confirm, $ErrorAction)
+    Add-MockLog "Remove-VMNetworkAdapter:$($VMNetworkAdapter.Name)"
+}
+function Disconnect-VMNetworkAdapter {
+    param($VMNetworkAdapter, $ErrorAction)
+    Add-MockLog "Disconnect-VMNetworkAdapter:$($VMNetworkAdapter.Name)"
+}
+function Get-NetIPAddress {
+    param($IPAddress, $InterfaceAlias, $AddressFamily, $ErrorAction)
+}
+function New-NetIPAddress {
+    param($IPAddress, $PrefixLength, $InterfaceAlias, $ErrorAction)
+    Add-MockLog "New-NetIPAddress:$IPAddress/$PrefixLength@$InterfaceAlias"
+}
+function Remove-NetIPAddress {
+    param($IPAddress, [switch]$Confirm, $ErrorAction)
+    Add-MockLog "Remove-NetIPAddress:$IPAddress"
+}
+"""
+
+SSH_NETWORK_PAYLOAD = {
+    "vm": "NORTH-Test", "switch_name": "HyperV-MCP-Lab",
+    "host_ip": "10.77.0.1", "prefix_length": 24,
+    "adapter_name": "HyperV-MCP-Lab",
+}
+
+def _ssh_network_mocks(tmp_path: Path, extra: str = "") -> str:
+    log = tmp_path / "network.log"
+    return SSH_NETWORK_MOCKS.replace("{log}", str(log).replace("'", "''")) + extra
+
+def _read_log(tmp_path: Path) -> list[str]:
+    path = tmp_path / "network.log"
+    return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+def test_ssh_network_prepare_creates_only_an_internal_switch(tmp_path: Path) -> None:
+    result = invoke_with_mocks(
+        tmp_path, _ssh_network_mocks(tmp_path), "ssh_network_prepare", SSH_NETWORK_PAYLOAD
+    )
+    assert result["switch_created"] is True
+    assert result["adapter_created"] is True
+    assert result["host_address_created"] is True
+    assert result["adapter_name"] == "HyperV-MCP-Lab"
+    assert _read_log(tmp_path) == [
+        "New-VMSwitch:HyperV-MCP-Lab:Internal",
+        "Add-VMNetworkAdapter:HyperV-MCP-Lab:HyperV-MCP-Lab",
+        "New-NetIPAddress:10.77.0.1/24@vEthernet (HyperV-MCP-Lab)",
+    ]
+
+def test_ssh_network_prepare_refuses_an_external_switch(tmp_path: Path) -> None:
+    extra = """
+function Get-VMSwitch { param($Name, $ErrorAction) [pscustomobject]@{ Name = $Name; SwitchType = 'External' } }
+"""
+    with pytest.raises(BackendError, match="not Internal"):
+        invoke_with_mocks(
+            tmp_path, _ssh_network_mocks(tmp_path, extra), "ssh_network_prepare",
+            SSH_NETWORK_PAYLOAD,
+        )
+    assert _read_log(tmp_path) == []
+
+def test_ssh_network_prepare_refuses_to_hijack_an_existing_adapter(tmp_path: Path) -> None:
+    extra = """
+function Get-VMNetworkAdapter { param($VM) [pscustomobject]@{ Name = 'WAN'; SwitchName = 'Default Switch' } }
+"""
+    with pytest.raises(BackendError, match="use_existing_adapter"):
+        invoke_with_mocks(
+            tmp_path, _ssh_network_mocks(tmp_path, extra), "ssh_network_prepare",
+            SSH_NETWORK_PAYLOAD,
+        )
+    assert _read_log(tmp_path) == []
+
+def test_ssh_network_prepare_can_attach_an_existing_adapter(tmp_path: Path) -> None:
+    extra = """
+function Get-VMNetworkAdapter { param($VM) [pscustomobject]@{ Name = 'WAN'; SwitchName = 'Default Switch' } }
+"""
+    result = invoke_with_mocks(
+        tmp_path, _ssh_network_mocks(tmp_path, extra), "ssh_network_prepare",
+        {**SSH_NETWORK_PAYLOAD, "use_existing_adapter": True},
+    )
+    assert result["adapter_created"] is False
+    assert result["adapter_name"] == "WAN"
+    assert "Connect-VMNetworkAdapter:WAN:HyperV-MCP-Lab" in _read_log(tmp_path)
+
+def test_ssh_network_prepare_reuses_an_existing_host_address(tmp_path: Path) -> None:
+    extra = """
+function Get-NetIPAddress {
+    param($IPAddress, $InterfaceAlias, $AddressFamily, $ErrorAction)
+    [pscustomobject]@{ IPAddress = '10.77.0.1'; PrefixLength = 24 }
+}
+"""
+    result = invoke_with_mocks(
+        tmp_path, _ssh_network_mocks(tmp_path, extra), "ssh_network_prepare",
+        SSH_NETWORK_PAYLOAD,
+    )
+    assert result["host_address_created"] is False
+    assert not [line for line in _read_log(tmp_path) if line.startswith("New-NetIPAddress")]
+
+def test_ssh_network_remove_undoes_only_what_was_added(tmp_path: Path) -> None:
+    extra = """
+function Get-VMNetworkAdapter {
+    param($VM) [pscustomobject]@{ Name = 'HyperV-MCP-Lab'; SwitchName = 'HyperV-MCP-Lab' }
+}
+function Get-NetIPAddress {
+    param($IPAddress, $InterfaceAlias, $AddressFamily, $ErrorAction)
+    [pscustomobject]@{ IPAddress = '10.77.0.1'; PrefixLength = 24 }
+}
+"""
+    result = invoke_with_mocks(
+        tmp_path, _ssh_network_mocks(tmp_path, extra), "ssh_network_remove",
+        {**SSH_NETWORK_PAYLOAD, "remove_adapter": True, "remove_host_address": True},
+    )
+    assert result["removed"] == ["adapter", "host_address"]
+    assert _read_log(tmp_path) == [
+        "Remove-VMNetworkAdapter:HyperV-MCP-Lab",
+        "Remove-NetIPAddress:10.77.0.1",
+    ]
+
+def test_ssh_network_remove_keeps_a_foreign_switch_alone(tmp_path: Path) -> None:
+    extra = """
+function Get-VMNetworkAdapter {
+    param($VM) [pscustomobject]@{ Name = 'HyperV-MCP-Lab'; SwitchName = 'HyperV-MCP-Lab' }
+}
+"""
+    result = invoke_with_mocks(
+        tmp_path, _ssh_network_mocks(tmp_path, extra), "ssh_network_remove",
+        {**SSH_NETWORK_PAYLOAD, "remove_adapter": False, "remove_host_address": False},
+    )
+    assert result["removed"] == ["connection"]
+    assert _read_log(tmp_path) == ["Disconnect-VMNetworkAdapter:HyperV-MCP-Lab"]

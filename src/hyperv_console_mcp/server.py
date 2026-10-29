@@ -240,6 +240,32 @@ def create_server(
         )
 
     @tool(
+        "guest_ssh_provision", annotations=MUTATION,
+        description="Provision SSH in the guest over PowerShell Direct: a dedicated internal switch, an ed25519 key, key-only sshd, and a TCP 22 rule scoped to the host's lab address. Never uses an external switch. Requires confirm_vm.",
+    )
+    async def guest_ssh_provision(
+        vm_name: str, confirm_vm: str, use_existing_adapter: bool = False
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.guest_ssh_provision, vm_name, confirm_vm,
+            use_existing_adapter=use_existing_adapter,
+        )
+
+    @tool(
+        "guest_ssh_status", annotations=READ_ONLY,
+        description="Report SSH provisioning: pinned host key, sshd service and config, authorized key, firewall rule, guest address, and whether the connection answers.",
+    )
+    async def guest_ssh_status(vm_name: str) -> dict[str, Any]:
+        return await _invoke(service.guest_ssh_status, vm_name)
+
+    @tool(
+        "guest_ssh_deprovision", annotations=MUTATION,
+        description="Remove the SSH firewall rule, the tool's authorized key, the pinned host key and the lab adapter if provisioning created it. Requires confirm_vm.",
+    )
+    async def guest_ssh_deprovision(vm_name: str, confirm_vm: str) -> dict[str, Any]:
+        return await _invoke(service.guest_ssh_deprovision, vm_name, confirm_vm)
+
+    @tool(
         "lab_init", annotations=MUTATION,
         description="Install or verify fixed lab tools in C:\\DriverLab and create package/run/evidence directories. Never executes a payload. Requires confirm_vm.",
     )
