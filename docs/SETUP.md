@@ -62,6 +62,8 @@ Example host configuration using Python directly:
 
 After an editable/package installation, `hyperv-console-mcp` can be the command instead. The server runs only on stdio; it does not listen on TCP.
 
+`hyperv-install --client claude` (also `codex` and `cursor`) writes that entry for you: it merges one `mcpServers.hyperv` entry into the client's own file, copies the file first, refuses one it cannot parse instead of rewriting it, and appends a single `[mcp_servers.hyperv]` section to Codex's TOML. `--uvx` writes `uvx hyperv-console-mcp` instead of the installing interpreter, `--profile lab` sets `HYPERV_MCP_PROFILE`, and `--shortcut` adds a Start Menu entry that opens the window. The command is not an MCP tool; nothing the AI can call reaches it.
+
 The process must have Hyper-V management permission. Run the MCP host elevated or grant the intended account Hyper-V Administrators access through your normal administrative process. The server never changes host group membership or UAC settings.
 
 ## Confined host paths

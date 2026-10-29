@@ -32,6 +32,7 @@ hyperv-console-mcp = "hyperv_console_mcp.server:main"
 hyperv-lab = "hyperv_console_mcp.lab.cli:main"
 hyperv-dashboard = "hyperv_console_mcp.dashboard:main"
 hyperv-access = "hyperv_console_mcp.access_cli:main"
+hyperv-install = "hyperv_console_mcp.install:main"
 hyperv-service = "hyperv_console_mcp.service.host:main"
 
 [tool.setuptools.dynamic]

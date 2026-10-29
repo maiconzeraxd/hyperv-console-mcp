@@ -1274,6 +1274,33 @@ Not exercised live: a real MCP mutation held open while the operator clicks *App
 a running host, the approval environment and a human click). The queue itself was exercised in a real
 window over the fake backend, which is where the widget code runs.
 
+### 2026-10-29 — v0.3 phase 5: `hyperv-install` writes the client's file, not a template
+
+- **What it does.** `hyperv-install --client claude|codex|cursor` merges one `mcpServers.hyperv`
+  entry into that client's own configuration, `--uvx` writes `uvx hyperv-console-mcp` instead of the
+  installing interpreter, `--profile` sets `HYPERV_MCP_PROFILE`, and `--shortcut` adds a Start Menu
+  entry that opens the window through `pythonw.exe`.
+- **Why it refuses rather than rewrites.** A file that is not valid JSON, or whose `mcpServers` is
+  not an object, is an error and is left byte-identical. Codex's TOML gets one appended section —
+  re-serialising it without a parser would reorder it and lose comments — and an existing
+  `[mcp_servers.hyperv]` header means `unchanged`. Every file that is changed is copied first, and a
+  second identical run reports `unchanged` rather than piling up backups.
+- **Out of the MCP surface.** No tool reaches this module: an install step an AI could run would be a
+  way to make itself a permanent client.
+
+Tests: `tests/test_install.py` (15 tests) — per-client paths, the entry with and without `uvx`, create
+/ merge / unchanged / refused JSON, TOML append and refusal to touch an existing section, the Start
+Menu path, the non-Windows skip, and the CLI writing the client it was given. Suite: 741 passing,
+1 skipped.
+
+Validated live, in a throwaway profile. The package was installed into a temporary virtual environment,
+so `hyperv-install.exe` was the real console script, and `USERPROFILE`/`APPDATA` pointed at a scratch
+directory: `--client cursor --profile lab` created the file with the venv's own interpreter,
+a second identical run reported `unchanged`, a file containing `{oops` was refused with exit 1 and
+left byte-identical, `--client codex` created the TOML section, and `--shortcut` produced a real
+`Hyper-V Console MCP.lnk` under the scratch Start Menu. Not exercised: writing into this host's own
+Claude, Cursor or Codex configuration — that is the operator's file and their decision.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,

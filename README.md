@@ -2,7 +2,7 @@
 
 A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/) server for **Hyper-V on Windows**. It combines VM management, checkpoints, PowerShell Direct diagnostics, synthetic keyboard/mouse input, console screenshots without VMConnect, installation media, serial consoles, and serial WinDbg preparation and a live kd.exe kernel-debugging session in one stdio server.
 
-**Alpha status:** 723 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
+**Alpha status:** 741 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
 
 ## Highlights
 
@@ -66,6 +66,17 @@ hyperv-console-mcp
 A VM with a level takes its capabilities from that level — per VM is more specific than a host-wide flag — and a VM without one keeps the older behaviour, where the profile and the `HYPERV_MCP_ALLOW_*` variables decide for every VM at once. `HYPERV_MCP_ALLOWED_VMS` narrows the file rather than replacing it.
 
 See [client configuration](docs/SETUP.md) for a stdio JSON example. All mutations require an explicit VM allowlist and their own capability flag. A `.env` file is **not** loaded automatically.
+
+`hyperv-install` writes that entry for you, into the client's own file, and copies the file first:
+
+```powershell
+hyperv-install --client claude                 # also: codex, cursor; repeat --client for more
+hyperv-install --client claude --uvx           # `uvx hyperv-console-mcp` instead of this interpreter
+hyperv-install --client claude --profile lab --shortcut   # plus a Start Menu shortcut to the window
+```
+
+It merges one `mcpServers.hyperv` entry and leaves every other server and setting untouched, appends one `[mcp_servers.hyperv]` section to Codex's TOML rather than re-serialising it, and refuses — without writing — a file it cannot parse. Running it twice reports `unchanged` instead of rewriting.
+
 
 `HYPERV_MCP_PROFILE` picks the default toolset list (`safe` or `lab`); `HYPERV_MCP_TOOLSETS` overrides it with a comma-separated list such as `core,console,guest` or `all`. An unknown name is refused at startup rather than silently ignored.
 
