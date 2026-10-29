@@ -710,3 +710,22 @@ Validated live: the method exists on this host's `Msvm_ComputerSystem` and repor
 in-parameters (introspection, read-only). **Not validated live:** the injection itself, which
 would bugcheck `NORTH-Test` — that is a deliberate act for the operator, not a side effect
 of a test run. The unit tests cover the refusal for a stopped VM and a provider refusal code.
+
+### 2026-10-29 — v0.3 phase 4: the firmware, and the field that has no counterpart
+
+- **`Get-VMFirmware` reads the realized setting**: `SecureBootEnabled` is the flag it prints
+  as On or Off and `VirtualSystemSubType` carries the generation, so the operation is one
+  projected query of two fields.
+- **A generation 1 VM is answered, not refused.** The cmdlet errors on generation 1; the
+  bridge reports `secure_boot_supported: false` with a null flag instead, and so does this.
+- **`preferred_boot_device` has no WMI source on this host.** The cmdlet's own property list
+  on this module carries no `PreferredBootDevice` at all (read from `Get-VMFirmware | Format-List *`
+  with the VM running and five boot sources present), which is why the bridge's
+  `PSObject.Properties[...]` lookup finds nothing and reports null. This reports null too, and
+  it is the field to revisit on a host whose module does expose one.
+
+Live validation (elevated, `NORTH-Test`, running): `vm_firmware` through WMI and through the
+bridge compared as whole dictionaries — `vm`, `generation`, `state`, `secure_boot_supported`,
+`secure_boot`, `preferred_boot_device` — and **the answers were equal** (generation 2, Secure
+Boot Off). Not validated live: a generation 1 VM, and a VM with Secure Boot On; both are unit
+tests here.
