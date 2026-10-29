@@ -57,6 +57,9 @@ $files = @(Get-ChildItem -LiteralPath $destination -File -Recurse | ForEach-Obje
     [pscustomobject][ordered]@{
         path = $_.FullName.Substring($destination.Length).TrimStart('\').Replace('\', '/')
         size = [Int64]$_.Length; sha256 = $hash
+        # The host analyzes the newest dump, and the index is a directory
+        # listing: without this the only order left is the file name.
+        modified_utc = $_.LastWriteTimeUtc.ToString('o')
     }
 })
 $index = [pscustomobject]@{

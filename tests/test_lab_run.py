@@ -55,6 +55,9 @@ class FakeLabService:
         kd_event: dict[str, Any] | None = None,
         manifest: dict[str, Any] | None = None,
         checkpoints: list[dict[str, Any]] | None = None,
+        dumps: list[dict[str, Any]] | None = None,
+        dump_report: dict[str, Any] | None = None,
+        dump_error: Exception | None = None,
     ) -> None:
         self.state = state
         self.uptime = uptime
@@ -69,6 +72,9 @@ class FakeLabService:
         self.kd_event = kd_event or {"event": "break", "module": None}
         self.manifest = manifest
         self.checkpoints = checkpoints
+        self.dumps = dumps or []
+        self.dump_report = dump_report
+        self.dump_error = dump_error
         self.calls: list[tuple[str, Any]] = []
         self.commands: list[str] = []
         self.files: dict[str, bytes] = {}
@@ -167,11 +173,12 @@ class FakeLabService:
         elif key.endswith(r"runs\run-1\result.json") and self.run_result is not None:
             data = json.dumps(self.run_result).encode()
         elif key.endswith(r"evidence\run-1\evidence.json"):
-            data = json.dumps({"schema": 1, "files": [{
+            files = [{
                 "path": "logs/run.log",
                 "size": len(b"evidence"),
                 "sha256": hashlib.sha256(b"evidence").hexdigest(),
-            }]}).encode()
+            }, *self.dumps]
+            data = json.dumps({"schema": 1, "files": files}).encode()
         else:
             raise BackendError(f"{path} not found", code="not_found")
         if len(data) > max_bytes:
@@ -197,6 +204,22 @@ class FakeLabService:
     def kd_analyze(self, vm_name: str) -> dict[str, Any]:
         self.calls.append(("kd_analyze", vm_name))
         return {"report": {"found": True, "bugcheck_code": "0xd1", "blamed_driver": "MyDriver.sys"}}
+
+    def kd_dump_open(
+        self, vm_name: str, dump_path: str, commands: list[str] | None = None
+    ) -> dict[str, Any]:
+        self.calls.append(("kd_dump_open", dump_path))
+        if self.dump_error is not None:
+            raise self.dump_error
+        return {
+            "dump": dump_path,
+            "output": "KD OUTPUT",
+            "duration_ms": 1_200,
+            "report": self.dump_report or {
+                "found": True, "bugcheck_code": "0x1e", "failure_bucket_id": "AV_MyDriver",
+                "blamed_driver": "MyDriver.sys", "top_frames": [{"symbol": "MyDriver!Crash"}],
+            },
+        }
 
     def kd_break_on_load(self, vm_name: str, module: str, enabled: bool = True) -> dict[str, Any]:
         self.calls.append(("kd_break_on_load", module))
@@ -625,6 +648,80 @@ def test_cycle_without_a_debugger_never_touches_kd(tmp_path: Path) -> None:
     )
     assert "debugger" not in report
     assert not [name for name, _ in service.calls if name.startswith("kd_")]
+
+
+def _dump_entry(name: str, when: str) -> dict[str, Any]:
+    return {
+        "path": f"minidumps/{name}", "size": len(b"evidence"),
+        "sha256": hashlib.sha256(b"evidence").hexdigest(), "modified_utc": when,
+    }
+
+
+def test_a_crash_without_a_debugger_still_gets_kds_reading(tmp_path: Path) -> None:
+    """The dump is on the host after collection, so !analyze -v can run there.
+
+    Without this, a bugcheck with no debugger attached said only that the guest
+    had crashed; FAILURE_BUCKET_ID and the blamed module needed a manual kd run.
+    """
+    service = FakeLabService(
+        run_error=BackendError("the guest session dropped", code="bridge_transport"),
+        after={"state": "Running", "uptime_seconds": 5},
+        host_events=[{"bugcheck_code": "0x1e", "parameters": ["0x1", "0x2", "0x3", "0x4"]}],
+        dumps=[_dump_entry("old.dmp", "2026-10-29T09:00:00Z"),
+               _dump_entry("new.dmp", "2026-10-29T12:00:00Z")],
+    )
+    service.settings = replace(service.settings, evidence_root=tmp_path)
+    report = lab_run.cycle(
+        service, "NORTH-Test",
+        package_id="north.1", run_id="run-1",
+        expected_manifest_sha256=DIGEST,
+    )
+
+    assert report["outcome"] == "bugcheck"
+    crash = report["crash"]
+    assert crash["analyzed"] is True
+    assert crash["dump"].endswith("new.dmp")
+    assert crash["bugcheck"]["failure_bucket_id"] == "AV_MyDriver"
+    assert crash["bugcheck"]["blamed_driver"] == "MyDriver.sys"
+    assert crash["bugcheck"]["bugcheck_parameters"] == ["0x1", "0x2", "0x3", "0x4"]
+    assert (tmp_path / "run-1" / "kd-analyze.log").read_text(encoding="utf-8") == "KD OUTPUT"
+
+
+def test_a_crash_with_no_dump_says_so_and_keeps_the_hosts_record(tmp_path: Path) -> None:
+    service = FakeLabService(
+        run_error=BackendError("the guest session dropped", code="bridge_transport"),
+        after={"state": "Running", "uptime_seconds": 5},
+        host_events=[{"bugcheck_code": "0x9f", "parameters": ["0x3"]}],
+    )
+    service.settings = replace(service.settings, evidence_root=tmp_path)
+    report = lab_run.cycle(
+        service, "NORTH-Test",
+        package_id="north.1", run_id="run-1",
+        expected_manifest_sha256=DIGEST,
+    )
+
+    assert report["outcome"] == "bugcheck"
+    assert report["crash"]["analyzed"] is False
+    assert report["crash"]["reason"]
+    assert report["bugcheck"][0]["bugcheck_code"] == "0x9f"
+    assert not [name for name, _ in service.calls if name == "kd_dump_open"]
+
+
+def test_a_run_that_did_not_crash_is_never_triaged(tmp_path: Path) -> None:
+    service = FakeLabService(
+        run_result={"success": True, "exit_code": 0},
+        dumps=[_dump_entry("new.dmp", "2026-10-29T12:00:00Z")],
+    )
+    service.settings = replace(service.settings, evidence_root=tmp_path)
+    report = lab_run.cycle(
+        service, "NORTH-Test",
+        package_id="north.1", run_id="run-1",
+        expected_manifest_sha256=DIGEST,
+    )
+
+    assert report["outcome"] == "ok"
+    assert "crash" not in report
+    assert not [name for name, _ in service.calls if name == "kd_dump_open"]
 
 
 def test_cycle_rejects_an_unknown_debugger_before_attaching() -> None:

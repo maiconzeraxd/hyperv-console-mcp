@@ -539,6 +539,12 @@ def cycle(
             # still has to come back.
             evidence = {"collected": False, "error": exc.code, "message": str(exc)}
     report["evidence"] = evidence
+    if report["outcome"] == "bugcheck":
+        # The dump is on the host by now, so kd can say what the crash was even
+        # when the run had no debugger attached. A failure here never costs the
+        # run its report: the host's code and parameters are already in it.
+        from .crash import triage
+        report["crash"] = triage(service, vm_name, report)
     checkpoint_id = (report.get("checkpoint") or {}).get("id")
     report["revert"] = (
         _restore(service, vm_name, report["run_id"], checkpoint_id) if revert_after else None

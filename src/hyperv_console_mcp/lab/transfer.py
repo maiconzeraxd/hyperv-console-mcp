@@ -291,7 +291,12 @@ class DriverLabTransfer:
             remote = rf"{GUEST_ROOT}\Evidence\{run_id}" + "\\" + "\\".join(PurePosixPath(relative).parts)
             local = destination.joinpath(*PurePosixPath(relative).parts)
             self._download(vm_name, remote, local, size, expected, chunk_bytes)
-            receipts.append({"path": relative, "size": size, "sha256": expected})
+            receipt = {"path": relative, "size": size, "sha256": expected}
+            # The guest stamps each file so the host can tell which dump is the
+            # one this run produced; an older guest simply does not send it.
+            if isinstance(entry.get("modified_utc"), str):
+                receipt["modified_utc"] = entry["modified_utc"]
+            receipts.append(receipt)
         receipt = {
             "schema": 1, "package_id": package_id, "run_id": run_id,
             "files": receipts, "payload_executed": False,
