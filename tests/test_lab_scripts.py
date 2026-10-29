@@ -148,6 +148,46 @@ def test_package_verification_hashes_the_manifest_file_not_a_reserialization(
 
 
 @requires_powershell
+def test_diagnostics_reads_the_token_a_pt_br_guest_prints(tmp_path: Path) -> None:
+    """The lab reads the same fixture the guest-config reader is tested against.
+
+    bcdedit translates the labels around an element and leaves the value alone,
+    so the token is reported as printed and the host decides what it means.
+    """
+    fixture = Path(__file__).with_name("fixtures") / "bcd-current-pt-br.txt"
+    command = (
+        f"Import-Module -Name {_quote(str(MODULE))} -Force; "
+        f"$text = Get-Content -LiteralPath {_quote(str(fixture))} -Raw -Encoding UTF8; "
+        "Write-Output ("
+        "(Get-LabBcdToken -Text $text -Name 'testsigning') + '|' + "
+        "(Get-LabBcdToken -Text $text -Name 'debug') + '|' + "
+        "(Get-LabBcdToken -Text $text -Name 'nx') + '|' + "
+        "[string](Get-LabBcdToken -Text $text -Name 'bootux'))"
+    )
+    completed = subprocess.run(
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True, text=True, encoding="utf-8", timeout=60, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    # Yes/Yes are what bcdedit prints for both settings on; nx is not a boolean
+    # and passes through, and an element bcdedit omits is empty, not "No".
+    assert completed.stdout.strip() == "Yes|Yes|OptIn|"
+
+
+def test_the_diagnostics_script_reports_tokens_instead_of_deciding_them() -> None:
+    """Regression: it shipped `test_signing`/`debug_enabled` from a regex over bcdedit.
+
+    That put the only reading of the token inside a script that can be run only
+    on a VM, and next to a second bcdedit parser in guest_config.ps1.
+    """
+    text = (MODULE.parent / "Get-DriverLabDiagnostics.ps1").read_text(encoding="utf-8")
+    assert "Get-LabBcdToken" in text
+    assert "boot_tokens" in text
+    assert "testsigning\\s+Yes" not in text
+    assert "debug_enabled" not in text
+
+
+@requires_powershell
 def test_run_entry_point_must_be_listed_in_the_manifest(tmp_path: Path) -> None:
     write_package(tmp_path, "unlisted.1", {"driver.sys": b"binary", "Run-Lab.ps1": b"# noop"})
     # Remove Run-Lab.ps1 from the manifest while leaving the file on disk.

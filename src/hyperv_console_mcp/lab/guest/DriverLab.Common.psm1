@@ -68,6 +68,16 @@ function Read-LabManifest {
     }
     return $manifest
 }
+function Get-LabBcdToken {
+    param([Parameter(Mandatory)][string]$Text, [Parameter(Mandatory)][string]$Name)
+    # bcdedit prints element names untranslated but everything around them in the
+    # guest's display language, so only the token after a name is read, and it is
+    # returned exactly as printed. What that token means is decided on the host,
+    # in bcd.py, so the guest never has to agree with it about a boot setting.
+    $match = [regex]::Match($Text, "(?m)^\s*$([regex]::Escape($Name))\s+(\S+)")
+    if (-not $match.Success) { return $null }
+    return $match.Groups[1].Value
+}
 function Get-LabEntryPointPath {
     param([Parameter(Mandatory)][string]$PackageId, [string]$Root = 'C:\DriverLab')
     # The entry point must be a verified manifest member, not just a file on disk.
@@ -79,4 +89,4 @@ function Get-LabEntryPointPath {
     if (-not [IO.File]::Exists($path)) { throw 'The verified package is missing its Run-Lab.ps1 entry point.' }
     return $path
 }
-Export-ModuleMember -Function @('Assert-LabIdentifier', 'Get-LabFullPath', 'Assert-LabChild', 'Get-LabRelativePath', 'Get-LabFileHash', 'Read-LabManifest', 'Get-LabEntryPointPath')
+Export-ModuleMember -Function @('Assert-LabIdentifier', 'Get-LabFullPath', 'Assert-LabChild', 'Get-LabRelativePath', 'Get-LabFileHash', 'Get-LabBcdToken', 'Read-LabManifest', 'Get-LabEntryPointPath')

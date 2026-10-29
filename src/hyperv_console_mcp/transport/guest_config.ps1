@@ -256,6 +256,10 @@ function Remove-RegistryValue {
 # language, even when both were on. The token is normalised to on/off here, and
 # 'on'/'off' is also what bcdedit accepts as input on a localized guest
 # (verified against pt-BR: it takes on/off and rejects Sim).
+#
+# The normalised value is what goes back through bcdedit on revert. The live
+# view reports the token as printed and the host reads it (bcd.py), so no
+# setting is described twice.
 $bcdBooleanTokens = @{
     'yes' = 'on'; 'no' = 'off'
     'on' = 'on'; 'off' = 'off'
@@ -266,12 +270,14 @@ function ConvertFrom-BcdEnum {
     param([string]$Text, [string]$Name)
     $match = [regex]::Match($Text, "(?m)^\s*$([regex]::Escape($Name))\s+(\S+)")
     if (-not $match.Success) {
-        return @{ existed = $false; value = $null }
+        return @{ existed = $false; value = $null; token = $null }
     }
     $token = $match.Groups[1].Value
     $normalized = $bcdBooleanTokens[$token.ToLowerInvariant()]
     if (-not $normalized) { $normalized = $token }
-    return @{ existed = $true; value = $normalized }
+    # `value` is what goes back through bcdedit on revert; `token` is what the
+    # guest printed, which the live view reports so the host can read it.
+    return @{ existed = $true; value = $normalized; token = $token }
 }
 
 function Read-BcdValue {
@@ -546,8 +552,8 @@ function Get-LiveConfig {
         }
         interactive_sessions = $sessions
         boot = @{
-            testsigning = $testSigning.value
-            debug = $debugEntry.value
+            testsigning = $testSigning.token
+            debug = $debugEntry.token
             crash_dump_enabled = $dumpMode.value
             hvci_enabled = $hvci.value
             vbs_enabled = $vbs.value

@@ -17,6 +17,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ..bcd import bcd_boolean
 from ..errors import BackendError
 
 GUEST_SCRIPT = r"C:\ProgramData\HyperVConsoleMCP\guest_config.ps1"
@@ -46,12 +47,13 @@ def _dump_mode(value: Any) -> str:
 def derive_live(facts: dict[str, Any]) -> dict[str, Any]:
     """Turn the guest's raw facts into the live view the tools report.
 
-    The guest reports registry values, BCD tokens and two memory figures; every
-    "is this on" in the answer is decided here, where it can be tested without a
-    VM. A missing value stays null rather than becoming False — absent and zero
-    are different facts — except where the guest has always read absence as the
-    Windows default: a guest without ``DisableCAD`` does require Ctrl+Alt+Del,
-    and a guest without ``CrashDumpEnabled`` has no dump configured.
+    The guest reports registry values, raw BCD tokens and two memory figures;
+    every "is this on" in the answer is decided here, where it can be tested
+    without a VM. A missing value stays null rather than becoming False — absent
+    and zero are different facts — except where the guest has always read
+    absence as the Windows default: a guest without ``DisableCAD`` does require
+    Ctrl+Alt+Del, and a guest without ``CrashDumpEnabled`` has no dump
+    configured.
     """
     boot = facts.get("boot") or {}
     capacity = facts.get("dump_capacity") or {}
@@ -74,8 +76,8 @@ def derive_live(facts: dict[str, Any]) -> dict[str, Any]:
         "power": facts.get("power") or {},
         "interactive_sessions": facts.get("interactive_sessions") or [],
         "driver_ready": {
-            "test_signing": boot.get("testsigning") == "on",
-            "kernel_debug": boot.get("debug") == "on",
+            "test_signing": bcd_boolean(boot.get("testsigning")),
+            "kernel_debug": bcd_boolean(boot.get("debug")),
             "crash_dump_enabled": boot.get("crash_dump_enabled"),
             "crash_dump_mode": _dump_mode(boot.get("crash_dump_enabled")),
             "hvci_enabled": _dword_is(boot.get("hvci_enabled"), 1),

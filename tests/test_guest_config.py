@@ -208,7 +208,7 @@ def test_the_live_view_is_derived_on_the_host_from_raw_guest_facts() -> None:
         "power": {"standby_timeout_ac": 0, "monitor_timeout_ac": 0, "console_lock": 0},
         "interactive_sessions": ["mcn1 console 1 Ativo"],
         "boot": {
-            "testsigning": "on", "debug": "on", "crash_dump_enabled": 2,
+            "testsigning": "Yes", "debug": "Yes", "crash_dump_enabled": 2,
             "hvci_enabled": 0, "vbs_enabled": 0,
         },
         "dump_capacity": {"memory_bytes": 4 * 1024**3, "pagefile_bytes": 5 * 1024**3},
@@ -245,7 +245,7 @@ def test_a_missing_value_stays_missing_and_a_small_pagefile_is_not_enough() -> N
     not invented values. Everything else reads back as null.
     """
     live = guest_config.derive_live({
-        "boot": {"testsigning": "off", "crash_dump_enabled": None},
+        "boot": {"testsigning": "No", "crash_dump_enabled": None},
         "dump_capacity": {"memory_bytes": 8 * 1024**3, "pagefile_bytes": 1 * 1024**3},
     })
 
@@ -406,12 +406,12 @@ def test_bcd_values_are_read_from_tokens_that_are_never_translated(tmp_path: Pat
         "$r | ConvertTo-Json -Depth 4 -Compress",
     ])
 
-    assert payload["testsigning"] == {"existed": True, "value": "on"}
-    assert payload["debug"] == {"existed": True, "value": "on"}
+    assert payload["testsigning"] == {"existed": True, "value": "on", "token": "Yes"}
+    assert payload["debug"] == {"existed": True, "value": "on", "token": "Yes"}
     # A value that is not a boolean is passed through untouched.
-    assert payload["nx"] == {"existed": True, "value": "OptIn"}
+    assert payload["nx"] == {"existed": True, "value": "OptIn", "token": "OptIn"}
     # An entry bcdedit does not list is absent, not off.
-    assert payload["bootux"] == {"existed": False, "value": None}
+    assert payload["bootux"] == {"existed": False, "value": None, "token": None}
 
 
 @WINDOWS_POWERSHELL_ONLY

@@ -993,6 +993,35 @@ Live, read-only on `NORTH-Test`: `guest_config_status` returned `crash_dump_enab
 `dump_support {memory 4 293 791 744, pagefile 1 476 395 008, sufficient: false}` — the derived view
 matching the raw facts the guest sent. Tests: 632 passing, 1 skipped.
 
+### 2026-10-29 — v0.3 phase 4: the lab diagnostics report tokens, not verdicts
+
+`Get-DriverLabDiagnostics.ps1` was the last guest script that concluded instead of reporting: it
+ran `[bool]($boot -match 'testsigning\s+Yes')` and `'debug\s+Yes'` over the bcdedit dump and shipped
+`test_signing`/`debug_enabled` as facts. That made the only reading of those tokens a regex inside a
+script that can be run only on a VM, and it was a second bcdedit parser next to the one in
+`guest_config.ps1`.
+
+- **`bcd.py`** now holds the one reading of a BCD token: `Yes`/`on`/`true` are on, `No`/`off`/
+  `false` are off, an absent element is off (bcdedit omits a setting that is disabled), and a token
+  this build does not recognise is `None` rather than a wrong `False`. `derive_live` uses it, so the
+  guest configuration view no longer depends on a normalisation written in PowerShell either.
+- **`Get-LabBcdToken`** in `DriverLab.Common.psm1` returns the token exactly as bcdedit printed it.
+  `guest_config.ps1` still normalises to on/off, but only for the value it writes back on revert;
+  its live view reports the raw token too (`boot.testsigning`, `boot.debug`).
+- **`lab/diagnostics.py`** derives `test_signing` and `debug_enabled` from `boot_tokens` and keeps
+  the raw facts beside them. `lab.cli.diagnostics` adds that as a `diagnostics` key and leaves the
+  raw `execution` untouched, so a report the host cannot parse (a failed run, a warning line) is
+  returned exactly as it arrived.
+
+The public shape of `lab_diagnostics` is additive: the derived answers moved from inside the
+guest's JSON text to a parsed object the tool returns.
+
+Live on the pt-BR `NORTH-Test`, read-only after `lab_init` installed the two updated tools:
+`boot_tokens {debug: "Yes", testsigning: null}` — bcdedit printed its labels in Portuguese
+("Configurações do Depurador") and the element names untouched — derived to `debug_enabled: true`
+and `test_signing: false`, which `guest_config_status` reported independently as
+`kernel_debug: true`, `test_signing: false`. Tests: 640 passing, 1 skipped.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,
@@ -1005,13 +1034,15 @@ SHA-256 check. `GuestSplitBackend` runs guest operations on a second worker, so 
 no longer blocks `vm_get`, the console or the dashboard. On the guest side, `lab/publish.py` owns
 every package decision (`guest_package_inspect`/`guest_package_list` return facts only),
 `DriverLab.Common.psm1` lost its canonical-JSON implementation, `Test-DriverLabPackage.ps1` hashes
-the manifest file, and `guest_config.ps1` reports raw registry/BCD/memory facts with
-`transport/guest_config.py::derive_live` computing the view.
+the manifest file, `guest_config.ps1` reports raw registry/BCD/memory facts with
+`transport/guest_config.py::derive_live` computing the view, and `Get-DriverLabDiagnostics.ps1`
+reports the BCD tokens it read with `lab/diagnostics.py` deciding them.
 
 **Tests added across the phase.** WMI handler tests with a fake COM connection, the publish/verify
 split (including a re-indented manifest being refused), the SSH provisioning upload of
 `guest_operations.ps1` and the per-process execution-policy bypass, the session-reuse and
-`Copy-Item` round trips, and the live-view derivation. Suite: 632 passing, 1 skipped.
+`Copy-Item` round trips, the live-view derivation, and the diagnostics derivation with the pt-BR
+bcdedit fixture. Suite: 640 passing, 1 skipped.
 
 **Validated live on `NORTH-Test`.** WMI power/checkpoint/firmware paths; the guest session being
 reused, a reboot opening a new one, and the second worker holding; a 100 KB `guest_exec` and a

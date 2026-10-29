@@ -14,6 +14,7 @@ from ..config import Settings
 from ..errors import HyperVError
 from ..hostwmi import create_backend
 from ..service import HyperVService
+from .diagnostics import derive_diagnostics, parse_report
 from .transfer import GUEST_ROOT, DriverLabTransfer, build_manifest, guest_script
 
 GUEST_DIRECTORY = Path(__file__).with_name("guest")
@@ -71,9 +72,20 @@ def initialize(service: HyperVService, vm_name: str) -> dict[str, Any]:
 
 
 def diagnostics(service: HyperVService, vm_name: str) -> dict[str, Any]:
-    return service.guest_exec(
+    """Read the guest's boot, Secure Boot and crash configuration.
+
+    The guest script reports facts and this adds the derived view beside them;
+    when the report cannot be read the raw execution is returned unchanged, so a
+    failure still explains itself.
+    """
+    result = service.guest_exec(
         vm_name, guest_script(rf"{GUEST_ROOT}\Tools\Get-DriverLabDiagnostics.ps1")
     )
+    execution = result.get("execution") or {}
+    facts = parse_report(str(execution.get("output") or ""))
+    if facts is None:
+        return result
+    return {**result, "diagnostics": derive_diagnostics(facts)}
 
 
 def _parser() -> argparse.ArgumentParser:

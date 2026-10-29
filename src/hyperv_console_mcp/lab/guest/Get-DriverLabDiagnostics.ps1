@@ -2,6 +2,7 @@
 param()
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+Import-Module "$PSScriptRoot\DriverLab.Common.psm1" -Force
 $os = Get-CimInstance Win32_OperatingSystem
 $computer = Get-CimInstance Win32_ComputerSystem
 $secureBoot = $null
@@ -20,8 +21,10 @@ $debug = (& bcdedit.exe /enum '{dbgsettings}' 2>&1 | Out-String)
     last_boot_utc = $os.LastBootUpTime.ToUniversalTime().ToString('o')
     free_system_drive_bytes = [Int64](Get-PSDrive -Name $env:SystemDrive.TrimEnd(':')).Free
     secure_boot = $secureBoot
-    test_signing = [bool]($boot -match 'testsigning\s+Yes')
-    debug_enabled = [bool]($boot -match 'debug\s+Yes')
+    boot_tokens = @{
+        testsigning = (Get-LabBcdToken -Text $boot -Name 'testsigning')
+        debug = (Get-LabBcdToken -Text $boot -Name 'debug')
+    }
     debug_settings = $debug
     vbs_status = if ($null -ne $deviceGuard) { [int]$deviceGuard.VirtualizationBasedSecurityStatus } else { $null }
     hvci_status = if ($null -ne $deviceGuard) { [int]$deviceGuard.CodeIntegrityPolicyEnforcementStatus } else { $null }
