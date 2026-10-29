@@ -22,10 +22,13 @@ PIPE_ACCESS_DUPLEX = 3
 FILE_FLAG_FIRST_PIPE_INSTANCE = 0x00080000
 PIPE_TYPE_MESSAGE = 4
 PIPE_READMODE_MESSAGE = 2
+PIPE_TYPE_BYTE = 0
+PIPE_READMODE_BYTE = 0
 PIPE_REJECT_REMOTE_CLIENTS = 0x00000008
 PIPE_WAIT = 0
 PIPE_UNLIMITED_INSTANCES = 255
 ERROR_PIPE_BUSY = 231
+ERROR_PIPE_NOT_CONNECTED = 233
 ERROR_PIPE_CONNECTED = 535
 ERROR_ACCESS_DENIED = 5
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
@@ -202,33 +205,33 @@ def _write(handle: wintypes.HANDLE, message: dict) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
-def _verify_server_process(handle: wintypes.HANDLE) -> None:
-    """Refuse an instance that is not the expected dashboard process of this user.
+def _verify_server_process(handle: wintypes.HANDLE, label: str = "approval broker") -> None:
+    """Refuse an instance that is not the expected server process of this user.
 
     A pipe name is guessable, so the client never trusts a connection just because
     the pipe exists: the server must be a Python interpreter owned by this user.
     """
     pid = wintypes.DWORD()
     if not kernel32.GetNamedPipeServerProcessId(handle, ctypes.byref(pid)) or not pid.value:
-        raise PolicyError("The approval broker could not identify its server process.")
+        raise PolicyError(f"The {label} could not identify its server process.")
     process = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
     if not process:
-        raise PolicyError("The approval broker process could not be inspected.")
+        raise PolicyError(f"The {label} process could not be inspected.")
     try:
         size = wintypes.DWORD(32_768)
         buffer = ctypes.create_unicode_buffer(size.value)
         if not kernel32.QueryFullProcessImageNameW(process, 0, buffer, ctypes.byref(size)):
-            raise PolicyError("The approval broker executable could not be identified.")
+            raise PolicyError(f"The {label} executable could not be identified.")
         if Path(buffer.value).name.casefold() not in PYTHON_IMAGES:
             raise PolicyError(
-                "The approval broker is not the dashboard process; refusing to trust the pipe."
+                f"The {label} is not a Python process; refusing to trust the pipe."
             )
         token = ctypes.c_void_p()
         if not kernel32.OpenProcessToken(process, TOKEN_QUERY, ctypes.byref(token)):
-            raise PolicyError("The approval broker token could not be inspected.")
+            raise PolicyError(f"The {label} token could not be inspected.")
         try:
             if _token_user_sid(token) != _current_user_sid():
-                raise PolicyError("The approval broker runs as a different user.")
+                raise PolicyError(f"The {label} runs as a different user.")
         finally:
             kernel32.CloseHandle(token)
     finally:
