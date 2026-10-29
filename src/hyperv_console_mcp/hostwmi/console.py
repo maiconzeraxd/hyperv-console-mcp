@@ -1,10 +1,10 @@
-"""Synthetic keyboard input and the guest display size.
+"""Synthetic keyboard and mouse input, and the guest display size.
 
 ``Msvm_Keyboard``, ``Msvm_SyntheticMouse`` and ``Msvm_VideoHead`` are per-VM
 device instances, and each one carries the VM's own GUID in ``SystemName`` — so
 finding a device is one query, not the association walk the bridge does.
 
-The keyboard methods answer ``0`` or a refusal directly; unlike the management
+The input methods answer ``0`` or a refusal directly; unlike the management
 service's, they start no job. Text is typed in chunks of 256 characters, the
 limit ``TypeText`` documents, and a newline becomes ``VK_RETURN``.
 """
@@ -95,6 +95,152 @@ def console_ctrl_alt_delete(connection: Connection, payload: dict[str, Any]) -> 
     keyboard = _device(connection, str(vm.get("Name") or ""), "Msvm_Keyboard")
     _invoke(connection, keyboard, "TypeCtrlAltDel")
     return {"vm": vm.get("ElementName"), "completed": True}
+
+
+def console_mouse_move(connection: Connection, payload: dict[str, Any]) -> dict[str, Any]:
+    vm = find_vm(connection, str(payload.get("vm") or ""))
+    mouse = _device(connection, str(vm.get("Name") or ""), "Msvm_SyntheticMouse")
+    x = _int(payload.get("x"))
+    y = _int(payload.get("y"))
+    _move(connection, mouse, x, y)
+    return {"vm": vm.get("ElementName"), "x": x, "y": y}
+
+
+def console_click(connection: Connection, payload: dict[str, Any]) -> dict[str, Any]:
+    vm = find_vm(connection, str(payload.get("vm") or ""))
+    mouse = _device(connection, str(vm.get("Name") or ""), "Msvm_SyntheticMouse")
+    if "x" in payload:
+        _move(connection, mouse, _int(payload.get("x")), _int(payload.get("y")))
+    button = _int(payload.get("button_index"))
+    _invoke(connection, mouse, "ClickButton", ButtonIndex=button)
+    return {"vm": vm.get("ElementName"), "button_index": button, "completed": True}
+
+
+def console_mouse_buttons(connection: Connection, payload: dict[str, Any]) -> dict[str, Any]:
+    vm = find_vm(connection, str(payload.get("vm") or ""))
+    mouse = _device(connection, str(vm.get("Name") or ""), "Msvm_SyntheticMouse")
+    states = _buttons(connection, mouse, payload)
+    return {"vm": vm.get("ElementName"), **states}
+
+
+def console_scroll(connection: Connection, payload: dict[str, Any]) -> dict[str, Any]:
+    vm = find_vm(connection, str(payload.get("vm") or ""))
+    mouse = _device(connection, str(vm.get("Name") or ""), "Msvm_SyntheticMouse")
+    delta = _int(payload.get("delta"))
+    _invoke(connection, mouse, "SetScrollPosition", ScrollPositionDelta=delta)
+    return {"vm": vm.get("ElementName"), "delta": delta, "completed": True}
+
+
+def console_batch(connection: Connection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Run an ordered batch with one device lookup per device.
+
+    The whole batch is one request so an intermediate state cannot be
+    interleaved with another console call, which is why it stays here rather
+    than in the caller.
+    """
+    vm = find_vm(connection, str(payload.get("vm") or ""))
+    identifier = str(vm.get("Name") or "")
+    keyboard: dict[str, Any] | None = None
+    mouse: dict[str, Any] | None = None
+    results: list[dict[str, Any]] = []
+    for index, action in enumerate(payload.get("actions") or []):
+        kind = str(action.get("type") or "")
+        if kind in _KEYBOARD_ACTIONS and keyboard is None:
+            keyboard = _device(connection, identifier, "Msvm_Keyboard")
+        if kind in _MOUSE_ACTIONS and mouse is None:
+            mouse = _device(connection, identifier, "Msvm_SyntheticMouse")
+        results.append(
+            {
+                "index": index,
+                "type": kind,
+                "result": _batch_entry(connection, kind, action, keyboard, mouse),
+            }
+        )
+    return {
+        "vm": vm.get("ElementName"),
+        "actions_completed": len(results),
+        "results": results,
+    }
+
+
+def _batch_entry(
+    connection: Connection,
+    kind: str,
+    action: dict[str, Any],
+    keyboard: dict[str, Any] | None,
+    mouse: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if kind == "text":
+        chunks = _type_text(connection, _require(keyboard), str(action.get("text") or ""))
+        return {"chunks_sent": chunks, "completed": True}
+    if kind == "keys":
+        keys = [str(key) for key in action.get("keys") or []]
+        return {"keys_sent": _chord(connection, _require(keyboard), keys), "completed": True}
+    if kind == "key_state":
+        key = str(action.get("key") or "")
+        down = bool(action.get("down"))
+        method = "PressKey" if down else "ReleaseKey"
+        _invoke(connection, _require(keyboard), method, KeyCode=_key_code(key))
+        return {"key": key, "down": down, "completed": True}
+    if kind == "ctrl_alt_delete":
+        _invoke(connection, _require(keyboard), "TypeCtrlAltDel")
+        return {"completed": True}
+    if kind == "mouse_buttons":
+        return {**_buttons(connection, _require(mouse), action), "completed": True}
+    if kind == "move":
+        x = _int(action.get("x"))
+        y = _int(action.get("y"))
+        _move(connection, _require(mouse), x, y)
+        return {"x": x, "y": y}
+    if kind == "click":
+        if "x" in action:
+            _move(connection, _require(mouse), _int(action.get("x")), _int(action.get("y")))
+        button = _int(action.get("button_index"))
+        _invoke(connection, _require(mouse), "ClickButton", ButtonIndex=button)
+        return {"button_index": button, "completed": True}
+    if kind == "scroll":
+        delta = _int(action.get("delta"))
+        _invoke(connection, _require(mouse), "SetScrollPosition", ScrollPositionDelta=delta)
+        return {"delta": delta, "completed": True}
+    if kind == "wait":
+        milliseconds = _int(action.get("milliseconds"))
+        time.sleep(milliseconds / 1000)
+        return {"waited_ms": milliseconds}
+    raise WmiFailure(f"Unsupported console action '{kind}'.", code="invalid_argument")
+
+
+def _buttons(
+    connection: Connection, mouse: dict[str, Any], payload: dict[str, Any]
+) -> dict[str, Any]:
+    """All three button states in one pass: left, right, middle are 1, 2, 3.
+
+    The second parameter is ``IsDown``, not ``ButtonState`` — the bridge passed
+    the latter, which the provider refuses, so that call never worked there.
+
+    The answer carries no ``completed`` flag because the bridge's standalone
+    ``console_mouse_buttons`` does not either; its batch entry adds one.
+    """
+    states = {name: bool(payload.get(name)) for name in ("left", "right", "middle")}
+    for index, state in enumerate(states.values(), start=1):
+        _invoke(connection, mouse, "SetButtonState", ButtonIndex=index, IsDown=state)
+    return states
+
+
+def _move(connection: Connection, mouse: dict[str, Any], x: int, y: int) -> None:
+    _invoke(
+        connection, mouse, "SetAbsolutePosition", HorizontalPosition=x, VerticalPosition=y
+    )
+
+
+_KEYBOARD_ACTIONS = frozenset({"text", "keys", "key_state", "ctrl_alt_delete"})
+_MOUSE_ACTIONS = frozenset({"mouse_buttons", "move", "click", "scroll"})
+
+
+def _require(device: dict[str, Any] | None) -> dict[str, Any]:
+    """The device the action needs; a batch that got here without it is a bug."""
+    if device is None:  # pragma: no cover - guarded by the action tables above
+        raise WmiFailure("The batch reached an action without its input device.")
+    return device
 
 
 def _type_text(connection: Connection, keyboard: dict[str, Any], text: str) -> int:

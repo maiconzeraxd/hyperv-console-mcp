@@ -1189,7 +1189,7 @@ function Invoke-BridgeOperation {
             $states = @([bool]$request.left, [bool]$request.right, [bool]$request.middle)
             for ($index = 0; $index -lt $states.Count; $index++) {
                 Invoke-InputMethod -Device $mouse -Method 'SetButtonState' -Arguments @{
-                    ButtonIndex = [uint32]($index + 1); ButtonState = [uint32]$states[$index]
+                    ButtonIndex = [uint32]($index + 1); IsDown = [bool]$states[$index]
                 }
             }
             $result = @{ vm = $vm.Name; left = $states[0]; right = $states[1]; middle = $states[2] }
@@ -1254,7 +1254,7 @@ function Invoke-BridgeOperation {
                         $states = @([bool]$action.left, [bool]$action.right, [bool]$action.middle)
                         for ($button = 0; $button -lt $states.Count; $button++) {
                             Invoke-InputMethod -Device $mouse -Method 'SetButtonState' -Arguments @{
-                                ButtonIndex = [uint32]($button + 1); ButtonState = [uint32]$states[$button]
+                                ButtonIndex = [uint32]($button + 1); IsDown = [bool]$states[$button]
                             }
                         }
                         $entry = @{ left = $states[0]; right = $states[1]; middle = $states[2]; completed = $true }

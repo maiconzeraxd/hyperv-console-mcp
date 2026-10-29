@@ -934,10 +934,13 @@ function Invoke-CimMethod {
         ],
     })
     assert result["actions_completed"] == 3
+    # The provider names the second parameter ``IsDown``; ``ButtonState`` is
+    # refused with "not found", which is why this test used to pin a call that
+    # could never have reached the provider.
     assert log.read_text(encoding="utf-8").splitlines() == [
         "Msvm_Keyboard PressKey KeyCode=16",
-        "Msvm_SyntheticMouse SetButtonState ButtonIndex=1,ButtonState=1",
-        "Msvm_SyntheticMouse SetButtonState ButtonIndex=2,ButtonState=0",
-        "Msvm_SyntheticMouse SetButtonState ButtonIndex=3,ButtonState=1",
+        "Msvm_SyntheticMouse SetButtonState ButtonIndex=1,IsDown=True",
+        "Msvm_SyntheticMouse SetButtonState ButtonIndex=2,IsDown=False",
+        "Msvm_SyntheticMouse SetButtonState ButtonIndex=3,IsDown=True",
         "Msvm_Keyboard ReleaseKey KeyCode=16",
     ]

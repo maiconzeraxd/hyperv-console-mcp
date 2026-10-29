@@ -44,6 +44,11 @@ HANDLERS: dict[str, Handler] = {
     "console_press_keys": console.console_press_keys,
     "console_key_state": console.console_key_state,
     "console_ctrl_alt_delete": console.console_ctrl_alt_delete,
+    "console_mouse_move": console.console_mouse_move,
+    "console_click": console.console_click,
+    "console_mouse_buttons": console.console_mouse_buttons,
+    "console_scroll": console.console_scroll,
+    "console_batch": console.console_batch,
 }
 
 

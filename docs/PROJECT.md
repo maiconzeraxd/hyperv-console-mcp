@@ -627,3 +627,25 @@ and through the bridge were compared as whole dictionaries — `vm`, `state` and
 string all returned `0` and reported what they sent. Not validated live:
 `console_ctrl_alt_delete`, which would put the guest on its security screen, and a VM whose
 keyboard device does not exist.
+
+### 2026-10-29 — v0.3 phase 4: the mouse, the batch, and a bridge bug it exposed
+
+- **`SetButtonState` takes `IsDown`, not `ButtonState`.** The provider answers the bridge's
+  name with `SWbemPropertySet: not found`, so `console_mouse_buttons` and the
+  `mouse_buttons` batch action had never worked — the bridge regression test pinned the
+  broken call, so it passed. The Python path uses the real parameter, the bridge is fixed,
+  and the test now pins `IsDown=True/False`.
+- **The batch is one request for the same reason the bridge made it one.** `console_batch`
+  looks each input device up once and runs the ordered actions against it, so an
+  intermediate state cannot be interleaved with another console call; the per-action result
+  shape is the bridge's, entry for entry.
+- **`console_mouse_buttons` returns no `completed` flag.** The bridge's standalone handler
+  does not either — its batch entry adds one — and the live comparison is what surfaced the
+  difference.
+
+Live validation (elevated, `NORTH-Test` on this host, VM running): `console_mouse_move` and
+`console_mouse_buttons` through WMI and through the bridge were compared as whole
+dictionaries and **were equal**; `console_scroll` (+120), `console_click` at 5,5 with the
+left button, a press-and-release of the left button, and a five-action batch (move, wait,
+`shift` down, `shift` up, buttons released) all returned `0` and reported every action. Not
+validated live: a click that lands on a guest window, and a drag (which no tool offers).

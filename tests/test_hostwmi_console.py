@@ -6,14 +6,18 @@ from typing import Any
 
 import pytest
 
-from hyperv_console_mcp.errors import BackendError
 from hyperv_console_mcp.hostwmi import WmiBackend
 from hyperv_console_mcp.hostwmi.connection import WmiFailure
 from hyperv_console_mcp.hostwmi.console import (
+    console_batch,
+    console_click,
     console_ctrl_alt_delete,
     console_info,
     console_key_state,
+    console_mouse_buttons,
+    console_mouse_move,
     console_press_keys,
+    console_scroll,
     console_type_text,
 )
 
@@ -21,6 +25,10 @@ VM_ID = "D5AD7D1D-5CB3-441F-A9D7-138640C8F61A"
 KEYBOARD_PATH = (
     r"\\HOST\root\virtualization\v2:Msvm_Keyboard.CreationClassName="
     f'"Msvm_Keyboard",DeviceID="Microsoft:DE6CDC86",SystemName="{VM_ID}"'
+)
+MOUSE_PATH = (
+    r"\\HOST\root\virtualization\v2:Msvm_SyntheticMouse.CreationClassName="
+    f'"Msvm_SyntheticMouse",DeviceID="Microsoft:58F75A6D",SystemName="{VM_ID}"'
 )
 
 
@@ -32,12 +40,18 @@ class FakeConnection:
         return_value: int = 0,
         fail_at: int | None = None,
     ) -> None:
-        self.devices = {"Msvm_Keyboard": [_device("Msvm_Keyboard")], **(devices or {})}
+        self.devices = {
+            "Msvm_Keyboard": [_device("Msvm_Keyboard")],
+            "Msvm_SyntheticMouse": [_device("Msvm_SyntheticMouse", __PATH=MOUSE_PATH)],
+            **(devices or {}),
+        }
         self.return_value = return_value
         self.fail_at = fail_at
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.queries: list[str] = []
 
     def query(self, wql: str, *, namespace: str = "") -> list[dict[str, Any]]:
+        self.queries.append(wql)
         if "FROM Msvm_ComputerSystem" in wql:
             return [_computer()]
         for class_name, rows in self.devices.items():
@@ -199,8 +213,90 @@ def test_the_backend_serves_the_keyboard() -> None:
     assert backend.invoke("console_ctrl_alt_delete", {"vm": "NORTH-Test"})["completed"] is True
 
 
-def test_the_mouse_is_still_the_workers() -> None:
+def test_mouse_move_sets_an_absolute_position() -> None:
+    connection = FakeConnection()
+    assert console_mouse_move(connection, {"vm": "NORTH-Test", "x": 512, "y": 384}) == {
+        "vm": "NORTH-Test",
+        "x": 512,
+        "y": 384,
+    }
+    assert connection.calls == [
+        (MOUSE_PATH, "SetAbsolutePosition", {"HorizontalPosition": 512, "VerticalPosition": 384})
+    ]
+
+
+def test_click_moves_first_only_when_given_a_point() -> None:
+    with_point = FakeConnection()
+    console_click(with_point, {"vm": "NORTH-Test", "button_index": 1, "x": 10, "y": 20})
+    assert with_point.methods() == ["SetAbsolutePosition", "ClickButton"]
+    without = FakeConnection()
+    assert console_click(without, {"vm": "NORTH-Test", "button_index": 2}) == {
+        "vm": "NORTH-Test",
+        "button_index": 2,
+        "completed": True,
+    }
+    assert without.methods() == ["ClickButton"]
+
+
+def test_mouse_buttons_sends_all_three_states() -> None:
+    """The bridge's answer has no ``completed`` flag, so neither does this one."""
+    connection = FakeConnection()
+    result = console_mouse_buttons(
+        connection, {"vm": "NORTH-Test", "left": True, "right": False, "middle": True}
+    )
+    assert result == {
+        "vm": "NORTH-Test",
+        "left": True,
+        "right": False,
+        "middle": True,
+    }
+    assert [call[2] for call in connection.calls] == [
+        {"ButtonIndex": 1, "IsDown": True},
+        {"ButtonIndex": 2, "IsDown": False},
+        {"ButtonIndex": 3, "IsDown": True},
+    ]
+
+
+def test_scroll_passes_a_signed_delta() -> None:
+    connection = FakeConnection()
+    assert console_scroll(connection, {"vm": "NORTH-Test", "delta": -120})["delta"] == -120
+    assert connection.calls == [(MOUSE_PATH, "SetScrollPosition", {"ScrollPositionDelta": -120})]
+
+
+def test_a_batch_looks_each_device_up_once() -> None:
+    """The bridge caches per request for the same reason: a batch is one request."""
+    connection = FakeConnection()
+    result = console_batch(
+        connection,
+        {
+            "vm": "NORTH-Test",
+            "actions": [
+                {"type": "text", "text": "a"},
+                {"type": "keys", "keys": ["enter"]},
+                {"type": "move", "x": 1, "y": 2},
+                {"type": "click", "button_index": 1},
+                {"type": "wait", "milliseconds": 1},
+            ],
+        },
+    )
+    assert result["actions_completed"] == 5
+    assert [entry["type"] for entry in result["results"]] == [
+        "text", "keys", "move", "click", "wait",
+    ]
+    assert [entry["index"] for entry in result["results"]] == [0, 1, 2, 3, 4]
+    assert result["results"][4]["result"] == {"waited_ms": 1}
+    keyboard_lookups = [q for q in connection.queries if "FROM Msvm_Keyboard" in q]
+    mouse_lookups = [q for q in connection.queries if "FROM Msvm_SyntheticMouse" in q]
+    assert (len(keyboard_lookups), len(mouse_lookups)) == (1, 1)
+
+
+def test_a_batch_refuses_an_unknown_action() -> None:
+    with pytest.raises(WmiFailure) as caught:
+        console_batch(FakeConnection(), {"vm": "NORTH-Test", "actions": [{"type": "teleport"}]})
+    assert caught.value.code == "invalid_argument"
+    assert "Unsupported console action 'teleport'." in str(caught.value)
+
+
+def test_the_backend_serves_the_mouse() -> None:
     backend = WmiBackend(connect=lambda: FakeConnection())
-    with pytest.raises(BackendError) as caught:
-        backend.invoke("console_mouse_move", {"vm": "NORTH-Test", "x": 1, "y": 2})
-    assert caught.value.code == "wmi_unsupported"
+    assert backend.invoke("console_scroll", {"vm": "NORTH-Test", "delta": 120})["completed"] is True
