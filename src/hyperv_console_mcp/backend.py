@@ -67,9 +67,50 @@ class GuestSplitBackend:
                 close()
 
 
+# A primary backend that answers `wmi_unsupported` or `wmi_unavailable` has
+# simply not taken that operation over yet; anything else is a real failure.
+FALLBACK_CODES = frozenset({"wmi_unsupported", "wmi_unavailable"})
+
+
+class FallbackBackend:
+    """The migrated path first, the PowerShell worker for what it refuses.
+
+    Migrating a host operation means writing it in Python and deleting it from
+    the bridge. Until then both have to answer, so this composes them instead of
+    replacing one with the other, and an operation moves the moment the primary
+    stops refusing it.
+    """
+
+    def __init__(
+        self,
+        primary: HyperVBackend,
+        fallback: HyperVBackend,
+        *,
+        codes: frozenset[str] = FALLBACK_CODES,
+    ) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.codes = codes
+
+    def invoke(
+        self, operation: str, payload: Mapping[str, Any], *, timeout: float | None = None
+    ) -> dict[str, Any]:
+        try:
+            return self.primary.invoke(operation, payload, timeout=timeout)
+        except BackendError as exc:
+            if exc.code not in self.codes:
+                raise
+        return self.fallback.invoke(operation, payload, timeout=timeout)
+
+    def close(self) -> None:
+        for worker in (self.primary, self.fallback):
+            close = getattr(worker, "close", None)
+            if callable(close):
+                close()
+
+
 class PowerShellBackend:
     """Reuses one finite, non-interactive PowerShell worker for low latency."""
-
     def __init__(
         self,
         script_path: Path | None = None,

@@ -15,10 +15,10 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, Field
 
 from . import __version__
-from .backend import GuestSplitBackend
 from .capture import VMConnectCapture
 from .config import TOOLSETS, Settings
 from .errors import HyperVError
+from .hostwmi import create_backend
 from .service import HyperVService
 
 T = TypeVar("T")
@@ -144,7 +144,7 @@ def create_server(
     service: HyperVService | None = None,
     capture: VMConnectCapture | None = None,
 ) -> MCPServer:
-    service = service or HyperVService(GuestSplitBackend(), Settings.from_env())
+    service = service or HyperVService(create_backend(), Settings.from_env())
     capture = capture or VMConnectCapture()
     mcp = MCPServer(
         name="hyperv-console-mcp",
@@ -871,7 +871,7 @@ def create_server(
 def main() -> None:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(message)s")
     from .events import EVENTS, EventSink
-    backend = EventSink(GuestSplitBackend(), EVENTS)
+    backend = EventSink(create_backend(), EVENTS)
     create_server(HyperVService(backend, Settings.from_env())).run(transport="stdio")
 
 

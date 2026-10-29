@@ -1,0 +1,76 @@
+"""Dispatch host operations to WMI, one operation at a time.
+
+An operation that is not in ``HANDLERS`` is refused with ``wmi_unsupported``,
+which is the signal ``FallbackBackend`` uses to send it to the PowerShell
+worker. That is what makes the migration incremental: each commit moves one
+operation and the rest keep working exactly as they did.
+"""
+
+from __future__ import annotations
+
+import threading
+from collections.abc import Callable, Mapping
+from typing import Any
+
+from ..backend import (
+    FallbackBackend,
+    GuestSplitBackend,
+    HyperVBackend,
+    PowerShellBackend,
+)
+from ..errors import BackendError
+from . import host
+from .connection import ComConnection, Connection, WmiFailure
+
+UNSUPPORTED = "wmi_unsupported"
+UNAVAILABLE = "wmi_unavailable"
+
+Handler = Callable[[Connection, dict[str, Any]], dict[str, Any]]
+
+HANDLERS: dict[str, Handler] = {
+    "host_status": host.host_status,
+}
+
+
+class WmiBackend(HyperVBackend):
+    """Serves the migrated operations and refuses the rest."""
+
+    def __init__(self, connect: Callable[[], Connection] | None = None) -> None:
+        # Lazy on purpose: constructing the backend must never touch COM, so a
+        # host without pywin32 fails per call and falls back per call.
+        self._connect = connect or ComConnection
+        self._thread = threading.local()
+
+    def _connection(self) -> Connection:
+        connection = getattr(self._thread, "connection", None)
+        if connection is None:
+            connection = self._connect()
+            self._thread.connection = connection
+        return connection
+
+    def invoke(
+        self, operation: str, payload: Mapping[str, Any], *, timeout: float | None = None
+    ) -> dict[str, Any]:
+        handler = HANDLERS.get(operation)
+        if handler is None:
+            raise BackendError(
+                f"{operation} is not served by WMI yet; the PowerShell worker handles it.",
+                code=UNSUPPORTED,
+            )
+        try:
+            return handler(self._connection(), dict(payload))
+        except WmiFailure as exc:
+            raise BackendError(str(exc), code=exc.code) from exc
+
+    def close(self) -> None:
+        """COM objects die with their apartment; nothing is held open."""
+
+
+def create_backend(
+    script_path: Any = None, executable: str = "powershell.exe"
+) -> GuestSplitBackend:
+    """Host work through WMI where it is migrated, PowerShell otherwise."""
+    return GuestSplitBackend(
+        host=FallbackBackend(WmiBackend(), PowerShellBackend(script_path, executable)),
+        guest=PowerShellBackend(script_path, executable),
+    )

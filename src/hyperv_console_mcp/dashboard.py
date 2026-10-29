@@ -15,10 +15,10 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
-from .backend import GuestSplitBackend
 from .config import Settings
 from .errors import HyperVError
 from .events import EVENTS, EventLogReader, EventSink
+from .hostwmi import create_backend
 from .ipc import ApprovalBroker
 from .lab.cli import diagnostics, initialize
 from .lab.transfer import DriverLabTransfer, build_manifest
@@ -195,7 +195,7 @@ class Dashboard(tk.Tk):
         super().__init__()
         self.vm_name = vm_name
         self.settings = Settings.from_env()
-        self.backend = EventSink(GuestSplitBackend(), EVENTS)
+        self.backend = EventSink(create_backend(), EVENTS)
         self.service = HyperVService(self.backend, self.settings)
         self.queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.pending: dict[str, queue.Queue[bool]] = {}

@@ -10,9 +10,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from ..backend import PowerShellBackend
 from ..config import Settings
 from ..errors import HyperVError
+from ..hostwmi import create_backend
 from ..service import HyperVService
 from .transfer import GUEST_ROOT, DriverLabTransfer, build_manifest, guest_script
 
@@ -101,7 +101,7 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     arguments = _parser().parse_args()
-    backend = PowerShellBackend()
+    backend = create_backend()
     service = HyperVService(backend, Settings.from_env())
     try:
         if arguments.action == "init":
