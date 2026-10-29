@@ -19,7 +19,7 @@ from ..backend import (
     PowerShellBackend,
 )
 from ..errors import BackendError
-from . import host, power, vm
+from . import checkpoint, host, power, vm
 from .connection import ComConnection, Connection, WmiFailure
 
 UNSUPPORTED = "wmi_unsupported"
@@ -32,6 +32,9 @@ HANDLERS: dict[str, Handler] = {
     "vm_list": vm.vm_list,
     "vm_get": vm.vm_get,
     "vm_power": power.vm_power,
+    "checkpoint_list": checkpoint.checkpoint_list,
+    "checkpoint_restore": checkpoint.checkpoint_restore,
+    "checkpoint_delete": checkpoint.checkpoint_delete,
 }
 
 

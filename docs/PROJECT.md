@@ -497,3 +497,38 @@ would have restarted the guest for no extra coverage of the mapping.
 Local validation: 449 passing tests, 1 skipped, clean Ruff, 11 PowerShell files parse,
 PSScriptAnalyzer reports nothing on `src`, and the stdio smoke still reports 29 tools on the
 safe profile and 53 with `HYPERV_MCP_TOOLSETS=all`.
+
+### 2026-10-29 — v0.3 phase 4: checkpoints from the snapshot setting data
+
+- **A checkpoint is an `Msvm_VirtualSystemSettingData` row.** Its `InstanceID` is
+  `Microsoft:<snapshot id>` — the id `Get-VMSnapshot` reports, not a path under the VM's id
+  — its `ElementName` is the name, and its `Parent` names the checkpoint before it, so the
+  chain comes from the references rather than from a cmdlet walk. `checkpoint_list` maps
+  those rows to the shape the bridge answered.
+- **The timestamps needed a converter, not a pass-through.** WMI answers `CreationTime` as
+  a CIM DATETIME in UTC (`20261029014417.778334-000`, where `-000` means "UTC, offset
+  unknown"), while the bridge prints a local `DateTime` with round-trip precision. The
+  mapper reads the offset in minutes, converts to the host's zone and writes seven
+  fractional digits and `±HH:MM`, so the two paths produce the same string for the same
+  instant — pinned by a test that only compares instants, so it holds in any time zone.
+- **`checkpoint_create` stays on the bridge, deliberately.** The name travels in
+  `SnapshotSettings`, an embedded-instance string, and the provider ignored every encoding
+  tried on the live host: CIM XML with and without the prolog and the key property, the
+  instance object itself (WMI refused the type), and the MOF of a cloned setting. Each
+  attempt created a checkpoint named with the provider's own template
+  (`NORTH-Test - (29/10/2026 - 15:52:30)`), so serving it from Python would silently drop
+  the caller's name. `checkpoint_restore` and `checkpoint_delete` need no name and are
+  served from here; `checkpoint_create` still answers `wmi_unsupported` and the fallback
+  takes it, which is the migration working as designed.
+- **`jobs.py` now holds the wait.** `RequestStateChange`, `ApplySnapshot` and
+  `DestroySnapshot` all answer with the same `0`/`4096` + `Msvm_ConcreteJob` scheme and the
+  same 3276x refusals, so `await_job` and the code table moved out of `power.py` and both
+  operations share them. The messages say "operation" rather than "transition".
+
+Live validation (elevated, `NORTH-Test` on this host): `checkpoint_list` was compared
+against `Get-VMSnapshot` field by field for all 12 checkpoints — id, name, creation_time,
+parent_snapshot_id and notes — and **every field matched**. `checkpoint_create` went through
+the fallback to the bridge (a checkpoint named `wmi-delete-probe`), and `checkpoint_delete`
+removed it from WMI with the count going 12 → 13 → 12. Not exercised live: `checkpoint_restore`,
+which would revert the guest to a checkpoint, and the create path through WMI, which is not
+served.

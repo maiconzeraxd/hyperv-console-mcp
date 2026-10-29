@@ -13,13 +13,8 @@ import pytest
 
 from hyperv_console_mcp.hostwmi import WmiBackend
 from hyperv_console_mcp.hostwmi.connection import WmiFailure
-from hyperv_console_mcp.hostwmi.power import (
-    JOB_FAILURES,
-    REQUESTED_STATES,
-    RETURN_CODES,
-    await_job,
-    vm_power,
-)
+from hyperv_console_mcp.hostwmi.jobs import JOB_FAILURES, RETURN_CODES, await_job
+from hyperv_console_mcp.hostwmi.power import REQUESTED_STATES, vm_power
 
 VM_ID = "D5AD7D1D-5CB3-441F-A9D7-138640C8F61A"
 JOB_PATH = f'\\\\HOST\\root\\virtualization\\v2:Msvm_ConcreteJob.InstanceID="{VM_ID}"'
@@ -122,7 +117,7 @@ def test_a_failed_job_carries_the_provider_description() -> None:
     )
     with pytest.raises(WmiFailure) as caught:
         vm_power(connection, {"vm": "NORTH-Test", "action": "pause"})
-    assert str(caught.value) == "The transition raised an exception: 0x0000007B."
+    assert str(caught.value) == "The operation raised an exception: 0x0000007B."
 
 
 @pytest.mark.parametrize(("state", "wording"), sorted(JOB_FAILURES.items()))
@@ -130,7 +125,7 @@ def test_each_job_failure_state_is_named(state: int, wording: str) -> None:
     connection = FakeConnection(response={"ReturnValue": 4096, "Job": JOB_PATH}, jobs=[state])
     with pytest.raises(WmiFailure) as caught:
         vm_power(connection, {"vm": "NORTH-Test", "action": "pause"})
-    assert str(caught.value) == f"The transition {wording}: no detail."
+    assert str(caught.value) == f"The operation {wording}: no detail."
 
 
 @pytest.mark.parametrize(("code", "expected"), sorted(RETURN_CODES.items()))
@@ -140,7 +135,7 @@ def test_every_documented_refusal_becomes_its_own_error(code: int, expected: tup
         vm_power(connection, {"vm": "NORTH-Test", "action": "pause"})
     name, description = expected
     assert caught.value.code == name
-    assert str(caught.value) == f"The provider refused the transition with code {code}: {description}."
+    assert str(caught.value) == f"The provider refused the operation with code {code}: {description}."
 
 
 def test_an_undocumented_refusal_keeps_the_number() -> None:
@@ -148,7 +143,7 @@ def test_an_undocumented_refusal_keeps_the_number() -> None:
     with pytest.raises(WmiFailure) as caught:
         vm_power(connection, {"vm": "NORTH-Test", "action": "pause"})
     assert caught.value.code == "backend_error"
-    assert str(caught.value) == "The provider refused the transition with code 12345."
+    assert str(caught.value) == "The provider refused the operation with code 12345."
 
 
 def test_a_job_that_does_not_finish_times_out() -> None:
