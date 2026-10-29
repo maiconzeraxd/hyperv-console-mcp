@@ -2,7 +2,7 @@
 
 A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/) server for **Hyper-V on Windows**. It combines VM management, checkpoints, PowerShell Direct diagnostics, synthetic keyboard/mouse input, console screenshots without VMConnect, installation media, serial consoles, and serial WinDbg preparation and a live kd.exe kernel-debugging session in one stdio server.
 
-**Alpha status:** 324 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. An earlier elevated read-only MCP diagnostic succeeded against `NORTH-Test` for host, VM, console, serial status, media, and checkpoint queries. Live mutations, PowerShell Direct guest operations and SSH provisioning were not exercised in this delivery. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
+**Alpha status:** 330 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. An earlier elevated read-only MCP diagnostic succeeded against `NORTH-Test` for host, VM, console, serial status, media, and checkpoint queries. Live mutations, PowerShell Direct guest operations and SSH provisioning were not exercised in this delivery. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
 
 ## Highlights
 
@@ -98,12 +98,15 @@ For kernel work, choose **KDNET** after reviewing a suitable network path, or **
 `kd_attach` then drives a real `kd.exe` from the server: one session per VM, a per-session marker that delimits every command's output (never a sleep), an explicit `disconnected → waiting_for_target → running ↔ broken` state reported by `kd_status`, break-in through the console with `vm_inject_nmi` as the fallback, and a full log under `%LOCALAPPDATA%\HyperVConsoleMCP\kd\<vm>\`. `debug_kdnet_prepare` sets up the internal lab switch, a UDP port in 50000–50039 and a host firewall rule that names `kd.exe`; the generated key lives only in the Windows Credential Manager and is masked in everything the tool returns. Symbols come from the Microsoft symbol server into a local cache, plus any staged lab package that ships a `.pdb`. In the lab profile, `lab_cycle(..., debugger="kdnet")` attaches kd before the run and reports a bugcheck with the parsed `!analyze -v` instead of calling it a hang.
 
 - [Performance rationale and benchmarks](docs/PERFORMANCE.md)
-- [WinDbg, KDNET, and serial setup](docs/DEBUGGING.md)
+- [WinDbg, KDNET, and serial setup](docs/WINDBG.md)
+- [Optional SSH transport](docs/SSH.md)
+- [Guest access: autologon, no prompts, revert](docs/GUEST-ACCESS.md)
 
 ## Security boundaries
 
 - Local stdio only; no HTTP server or unauthenticated network listener.
 - Read-only mode by default; allowlist required for every mutation.
+- The approval gate decides whether a tool call may proceed; it is not a sandbox. It does not protect against an agent that already has a shell on the host, and the lab profile deliberately gives an autonomous loop full control of the allowlisted VMs.
 - `HYPERV_MCP_PROFILE=lab` enables every capability for the allowlisted VMs and skips the per-mutation dashboard approval. It does not widen the allowlist, skip a `confirm_*` field, or stop the audit and event records; an explicit `HYPERV_MCP_ALLOW_*=false` still wins. `lab_run`/`lab_cycle`, which execute a staged package, exist only in this profile.
 - Console input is real input to the VM and can change state immediately.
 - The `kd_*` tools follow the same allowlist and require `HYPERV_MCP_ALLOW_DEBUGGER`; the KDNET key is generated on the host, stored in the Windows Credential Manager and masked in every result. The host-side KDNET change is one firewall rule for `kd.exe` on one UDP port of the internal lab switch — never an external switch.
@@ -131,6 +134,18 @@ python -I tests\live_mcp_readonly.py --vm NORTH-Test
 ```
 
 This queries host, VM, console, COM/debugger status, media, and checkpoints. It does not change VM or guest state.
+
+Live checks that do mutate a VM exist as separate scripts and never run in the pytest suite. Each reads `HYPERV_MCP_LIVE_TEST_VM` (or `--vm`) and expects a disposable guest:
+
+| Script | What it proves |
+|---|---|
+| `tests/live_readonly.py` | host, VM, console and debugger status, no changes |
+| `tests/live_mcp_readonly.py` | the same through a real MCP stdio client |
+| `tests/live_ssh.py` | SSH provisioning, transport round trip, deprovision |
+| `tests/live_lab_publish.py` | atomic package staging and the publish refusal |
+| `tests/live_guest_automation.py` | autologon + toggles, thumbnail screenshot, revert |
+| `tests/live_kd.py` | KDNET or serial attach → break → stack → detach |
+| `tests/live_cycle.py` | `lab_cycle` end to end with a harmless package |
 
 ## License
 

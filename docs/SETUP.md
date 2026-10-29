@@ -89,6 +89,29 @@ Per-VM overrides use `HYPERV_MCP_GUEST_TRANSPORT_<VMNAME>` (dashes and underscor
 
 Provisioning creates a dedicated **internal** switch named `HyperV-MCP-Lab` (never external), gives the host `10.77.0.1` on it, installs a key-only sshd in the guest, and pins the guest host key in `%LOCALAPPDATA%\HyperVConsoleMCP\ssh\<vm>\known_hosts`. The private key never leaves that directory, whose ACL is restricted to the current user. `HYPERV_MCP_OPENSSH_PACKAGE` is only read when the guest cannot install `OpenSSH.Server` itself; point it at an extracted Win32-OpenSSH release containing `install-sshd.ps1`.
 
+## Kernel debugging
+
+The `kd_*` tools need `HYPERV_MCP_ALLOW_DEBUGGER=true`, an allowlisted VM, and a classic
+command-line debugger. `kd.exe` is found in `HYPERV_MCP_DEBUGGERS_DIR`, then `PATH`, then the
+Windows SDK layouts:
+
+```powershell
+$env:HYPERV_MCP_ALLOW_DEBUGGER = 'true'
+$env:HYPERV_MCP_DEBUGGERS_DIR = 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64'
+$env:HYPERV_MCP_KD_LOG_ROOT   = "$env:LOCALAPPDATA\HyperVConsoleMCP\kd"
+$env:HYPERV_MCP_SYMBOL_ROOT   = "$env:LOCALAPPDATA\HyperVConsoleMCP\symbols"
+```
+
+`debug_kdnet_prepare` reuses the same internal `HyperV-MCP-Lab` switch as SSH (never an
+external one), allocates one UDP port in 50000–50039, sets the guest BCD over PowerShell
+Direct, and adds one firewall rule named `HyperVConsoleMCP KDNET <vm>` for that `kd.exe`, that
+port and that interface. The generated key goes into the Windows Credential Manager under
+`HyperVConsoleMCP/kdnet/<vm>` and is masked in every result; the guest must be rebooted before
+KDNET takes effect. `debug_kdnet_deprovision` removes the rule, the key and the state file.
+
+See [WINDBG.md](WINDBG.md) for both transports, the session tools, symbols and the bugcheck
+flow.
+
 ## Dashboard
 
 Start the native interface from the repository with:
@@ -104,3 +127,13 @@ For optional local approval of every AI-requested mutation, set `HYPERV_MCP_REQU
 `HYPERV_MCP_LAB_ROOT` restricts host package sources; `HYPERV_MCP_EVIDENCE_ROOT` controls evidence downloads. `HYPERV_MCP_EVENT_DIRECTORY` selects the local event store shared by the dashboard and MCP. Do not place credentials in these paths or in `.env.example`.
 
 See [LAB.md](LAB.md) for the non-executing staging/verification workflow and the separate manual guest runner. No staging or diagnostic step authorizes loading a driver.
+
+## Where to go next
+
+- [GUEST-ACCESS.md](GUEST-ACCESS.md) — autologon without a plain-text password, the no-prompt
+  toggles, and how to revert them.
+- [SSH.md](SSH.md) — the optional key-only SSH transport and its provisioning.
+- [WINDBG.md](WINDBG.md) — KDNET and the COM1 pipe, the `kd.exe` session tools, symbols.
+- [LAB.md](LAB.md) — packages, evidence and the autonomous `lab_run`/`lab_cycle`.
+- [DASHBOARD.md](DASHBOARD.md) — the local UI and per-mutation approval.
+

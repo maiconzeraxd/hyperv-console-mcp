@@ -35,7 +35,9 @@ async def main() -> None:
         async with ClientSession(reader, writer) as session:
             await session.initialize()
             tools = await session.list_tools()
-            assert len(tools.tools) == 44, len(tools.tools)
+            # Keep this in step with the tool table in README.md: the smoke
+            # proves the stdio server really exposes the whole surface.
+            assert len(tools.tools) == 78, len(tools.tools)
             denied = await session.call_tool(
                 "vm_power", {"vm_name": "NORTH-Test", "action": "start"}
             )
