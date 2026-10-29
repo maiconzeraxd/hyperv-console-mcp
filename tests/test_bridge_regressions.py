@@ -262,7 +262,12 @@ function Invoke-Command {
         (
             "guest_package_inspect",
             {"package_id": "pkg.1", "transfer_id": "0" * 32},
-            "staged", "PackageId,TransferId", 2,
+            "staged", "Path,ConflictPath", 2,
+        ),
+        (
+            "guest_package_list",
+            {"package_id": "pkg.1"},
+            "package", "Path,ConflictPath", 1,
         ),
         (
             "guest_package_commit",

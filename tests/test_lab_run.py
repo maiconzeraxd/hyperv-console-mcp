@@ -13,9 +13,18 @@ import pytest
 from hyperv_console_mcp.config import Settings
 from hyperv_console_mcp.errors import BackendError, PolicyError, ValidationError
 from hyperv_console_mcp.lab import run as lab_run
+from hyperv_console_mcp.lab.transfer import canonical_json
 from hyperv_console_mcp.service import GATED_TOOLS, HyperVService
 
-DIGEST = "a" * 64
+# The manifest the fake guest reports, and the digest of its bytes: verification
+# compares those bytes with the approved digest, exactly as the live path does.
+MANIFEST = {
+    "schema": 1,
+    "package_id": "north.1",
+    "files": [{"path": "Run-Lab.ps1", "size": 6, "sha256": hashlib.sha256(b"# noop").hexdigest()}],
+}
+MANIFEST_BYTES = canonical_json(MANIFEST)
+DIGEST = hashlib.sha256(MANIFEST_BYTES).hexdigest()
 EVIDENCE_FAILURE = (
     "New-DriverLabEvidence.ps1 : Cannot bind argument to parameter 'IncludeKernelDump'."
 )
@@ -117,13 +126,25 @@ class FakeLabService:
         return {"events": events}
 
     # -- guest side --------------------------------------------------------
+    def guest_package_list(self, vm_name: str, package_id: str) -> dict[str, Any]:
+        self.calls.append(("verify", None))
+        files = [
+            {"path": entry["path"], "size": entry["size"], "sha256": entry["sha256"]}
+            for entry in MANIFEST["files"]
+        ]
+        if not self.verification:
+            # Same listing, wrong hash: the package no longer matches its manifest.
+            files = [{**entry, "sha256": "0" * 64} for entry in files]
+        return {"package": {
+            "package_id": package_id, "present": True, "manifest_present": True,
+            "manifest_base64": base64.b64encode(MANIFEST_BYTES).decode("ascii"),
+            "files": files,
+        }}
+
     def guest_exec(
         self, vm_name: str, command: str, *, timeout_seconds: int | None = None
     ) -> dict[str, Any]:
         self.commands.append(command)
-        if "Test-DriverLabPackage" in command:
-            self.calls.append(("verify", timeout_seconds))
-            return {"execution": {"success": self.verification, "exit_code": 0, "output": ""}}
         if "New-DriverLabEvidence" in command:
             self.calls.append(("evidence", timeout_seconds))
             if not self.evidence:

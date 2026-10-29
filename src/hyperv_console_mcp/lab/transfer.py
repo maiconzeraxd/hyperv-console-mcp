@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ from .publish import (
     entry_path,
     identifier,
     validate_manifest,
+    verify_staged,
 )
 
 CHUNK_BYTES = 4 * 1024 * 1024
@@ -61,6 +63,13 @@ def failure_detail(execution: dict[str, Any]) -> str:
 
 def canonical_json(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _unverified(package_id: str, reason: str) -> dict[str, Any]:
+    return {
+        "package_id": package_id, "verified": False, "reason": reason,
+        "payload_executed": False,
+    }
 
 
 def manifest_hash(manifest: dict[str, Any]) -> str:
@@ -207,18 +216,37 @@ class DriverLabTransfer:
         return count
 
     def verify(self, vm_name: str, package_id: str, expected_hash: str) -> dict[str, Any]:
+        """Re-verify a published package: the guest lists it, the host decides.
+
+        The same split as publishing. ``guest_package_list`` returns the manifest
+        bytes and the listing of what is on disk; ``verify_staged`` compares them
+        with the digest the caller approved. A package that does not match is a
+        result (``verified: false``) rather than an error, because ``lab_run``
+        turns it into the ``not_verified`` outcome.
+        """
         package_id = identifier(package_id, "package_id")
         if not re.fullmatch(r"[0-9a-fA-F]{64}", expected_hash):
             raise ValidationError("expected_hash must be a SHA-256 hexadecimal string.")
-        result = self.service.guest_exec(
-            vm_name,
-            guest_script(
-                rf"{GUEST_ROOT}\Tools\Test-DriverLabPackage.ps1",
-                f"-PackageId '{package_id}'",
-                f"-ExpectedManifestSha256 '{expected_hash.lower()}'",
-            ),
-        )
-        return {"package_id": package_id, "verification": result, "payload_executed": False, "verified": bool(result.get("execution", {}).get("success"))}
+        digest = expected_hash.lower()
+        package = self.service.guest_package_list(vm_name, package_id)["package"]
+        if not package.get("present") or not package.get("manifest_present"):
+            return _unverified(package_id, "The package is not published on the guest.")
+        try:
+            manifest = base64.b64decode(str(package.get("manifest_base64") or ""), validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValidationError("The published manifest is invalid.") from exc
+        try:
+            verdict = verify_staged(
+                package_id=package_id, expected_sha256=digest, manifest=manifest,
+                listing=list(package.get("files") or []), label="published",
+            )
+        except ValidationError as exc:
+            return _unverified(package_id, str(exc))
+        return {
+            "package_id": package_id, "verified": True,
+            "files_verified": verdict["files_verified"], "manifest_sha256": digest,
+            "payload_executed": False,
+        }
 
     def collect(
         self, vm_name: str, package_id: str, run_id: str, output: Path,

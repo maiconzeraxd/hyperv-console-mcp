@@ -6,17 +6,12 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from hyperv_console_mcp.errors import ValidationError
 from hyperv_console_mcp.lab.publish import entry_path, validate_manifest
-from hyperv_console_mcp.lab.transfer import (
-    build_manifest,
-    canonical_json,
-    manifest_hash,
-)
+from hyperv_console_mcp.lab.transfer import canonical_json, manifest_hash
 
 MODULE = (
     Path(__file__).parents[1] / "src" / "hyperv_console_mcp" / "lab" / "guest" / "DriverLab.Common.psm1"
@@ -29,54 +24,6 @@ requires_powershell = pytest.mark.skipif(
 
 def _quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
-
-
-def powershell_manifest_hash(tmp_path: Path, manifest: dict[str, Any]) -> str:
-    path = tmp_path / "manifest.json"
-    path.write_text(json.dumps(manifest), encoding="utf-8")
-    command = (
-        f"Import-Module -Name {_quote(str(MODULE))} -Force; "
-        f"$m = Get-Content -LiteralPath {_quote(str(path))} -Raw | ConvertFrom-Json; "
-        "Get-LabManifestHash -Manifest $m"
-    )
-    completed = subprocess.run(
-        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
-        capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
-    return completed.stdout.strip()
-
-
-@requires_powershell
-def test_powershell_canonical_manifest_hash_matches_python(tmp_path: Path) -> None:
-    source = tmp_path / "package"
-    source.mkdir()
-    (source / "driver.sys").write_bytes(b"not executed")
-    (source / "notes.txt").write_text('ASCII "quotes" and \\slash', encoding="ascii")
-    manifest = build_manifest(source, "hash-test.1")
-    assert powershell_manifest_hash(tmp_path, manifest) == manifest_hash(manifest)
-
-
-@requires_powershell
-def test_powershell_canonical_hash_matches_python_for_special_characters(
-    tmp_path: Path,
-) -> None:
-    # PowerShell 5.1's ConvertTo-Json escapes & ' < > while Python leaves them literal,
-    # so the module must serialize strings by hand to keep the two hashes equal.
-    manifest = {
-        "schema": 1,
-        "package_id": "chars-1",
-        "note": "amp & lt < gt > quote ' dquote \" slash \\ control \u0001 tab \t",
-        "files": [{"path": "driver.sys", "size": 1, "sha256": "a" * 64}],
-    }
-    assert powershell_manifest_hash(tmp_path, manifest) == manifest_hash(manifest)
-
-
-@requires_powershell
-def test_powershell_canonical_hash_orders_keys_ordinally(tmp_path: Path) -> None:
-    # "Z" sorts before "a" ordinally but after it under a culture-aware comparison.
-    manifest = {"schema": 1, "Zeta": 1, "alpha": 2, "files": []}
-    assert powershell_manifest_hash(tmp_path, manifest) == manifest_hash(manifest)
 
 
 @requires_powershell
@@ -174,6 +121,30 @@ def test_package_verification_rejects_files_missing_from_the_manifest(tmp_path: 
     assert completed.returncode != 0
     assert "not in the manifest" in completed.stderr
     assert "extra.dll" in completed.stderr
+
+
+@requires_powershell
+def test_package_verification_hashes_the_manifest_file_not_a_reserialization(
+    tmp_path: Path,
+) -> None:
+    """The approved digest is of the bytes the host wrote, so a re-indented copy fails.
+
+    Regression: the guest re-serialized the parsed manifest into its own canonical
+    JSON and hashed that, so the two sides could disagree about a document they
+    both read correctly.
+    """
+    digest = write_package(tmp_path, "reindented.1", {"driver.sys": b"binary"})
+    manifest_path = tmp_path / "Packages" / "reindented.1" / "lab-manifest.json"
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_path.write_bytes(json.dumps(document, indent=2).encode("utf-8"))
+    completed = subprocess.run(
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", str(PACKAGE_SCRIPT), "-PackageId", "reindented.1",
+         "-ExpectedManifestSha256", digest, "-Root", str(tmp_path)],
+        capture_output=True, text=True, encoding="utf-8", timeout=60, check=False,
+    )
+    assert completed.returncode != 0
+    assert "does not match the host-approved hash" in completed.stderr
 
 
 @requires_powershell

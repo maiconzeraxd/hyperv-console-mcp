@@ -384,6 +384,41 @@ $script:EnsureGuestParent = {
     return [IO.File]::Exists($Path)
 }
 
+# Runs inside the guest. Facts about one lab directory - the manifest bytes and
+# every file with its size and hash - plus whether a second path already exists,
+# which is how a publish refuses to overwrite a package. It compares nothing: the
+# verdict is made on the host, in lab/publish.py, where it can be tested without
+# a VM.
+$script:LabDirectoryFacts = {
+    param($Path, $ConflictPath = $null)
+    $Path = [IO.Path]::GetFullPath($Path)
+    $manifestPath = Join-Path $Path 'lab-manifest.json'
+    $manifestBase64 = $null
+    if ([IO.File]::Exists($manifestPath)) {
+        $bytes = [IO.File]::ReadAllBytes($manifestPath)
+        if ($bytes.Length -gt 4MB) { throw 'Manifest exceeds its size limit.' }
+        $manifestBase64 = [Convert]::ToBase64String($bytes)
+    }
+    $files = @()
+    if ([IO.Directory]::Exists($Path)) {
+        $files = @(Get-ChildItem -LiteralPath $Path -File -Recurse -Force | ForEach-Object {
+            [pscustomobject]@{
+                path = $_.FullName.Substring($Path.Length).TrimStart('\').Replace('\', '/')
+                size = [Int64]$_.Length
+                sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+        })
+    }
+    [pscustomobject]@{
+        path = $Path
+        present = [IO.Directory]::Exists($Path)
+        conflict_exists = [bool]($ConflictPath -and ([IO.Directory]::Exists($ConflictPath) -or [IO.File]::Exists($ConflictPath)))
+        manifest_present = [IO.File]::Exists($manifestPath)
+        manifest_base64 = $manifestBase64
+        files = $files
+    }
+}
+
 function Invoke-BackgroundVmPower {
     param([Parameter(Mandatory)]$Vm, [Parameter(Mandatory)][string]$Action)
     $job = switch ($Action) {
@@ -1066,41 +1101,20 @@ function Invoke-BridgeOperation {
             # its size and hash. It compares nothing; the verdict is made on the
             # host, in lab/publish.py, where it can be tested without a VM.
             $guestResult = Invoke-GuestQuery -Vm $vm -Request $request `
-                -Arguments $packageId, $transferId -Query {
-                    param($PackageId, $TransferId)
-                    $transferRoot = [IO.Path]::GetFullPath("C:\DriverLab\Transfers\$TransferId")
-                    $staging = [IO.Path]::GetFullPath((Join-Path $transferRoot $PackageId))
-                    $final = [IO.Path]::GetFullPath("C:\DriverLab\Packages\$PackageId")
-                    if (-not $staging.StartsWith($transferRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
-                        throw 'The staging directory escapes C:\DriverLab\Transfers.'
-                    }
-                    $manifestPath = Join-Path $staging 'lab-manifest.json'
-                    $manifestBase64 = $null
-                    if ([IO.File]::Exists($manifestPath)) {
-                        $bytes = [IO.File]::ReadAllBytes($manifestPath)
-                        if ($bytes.Length -gt 4MB) { throw 'Manifest exceeds its size limit.' }
-                        $manifestBase64 = [Convert]::ToBase64String($bytes)
-                    }
-                    $files = @()
-                    if ([IO.Directory]::Exists($staging)) {
-                        $files = @(Get-ChildItem -LiteralPath $staging -File -Recurse -Force |
-                            ForEach-Object {
-                                [pscustomobject]@{
-                                    path = $_.FullName.Substring($staging.Length).TrimStart('\').Replace('\', '/')
-                                    size = [Int64]$_.Length
-                                    sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-                                }
-                            })
-                    }
-                    [pscustomobject]@{
-                        staging = $staging
-                        exists = ([IO.Directory]::Exists($final) -or [IO.File]::Exists($final))
-                        manifest_present = [IO.File]::Exists($manifestPath)
-                        manifest_base64 = $manifestBase64
-                        files = $files
-                    }
-                }
+                -Arguments "C:\DriverLab\Transfers\$transferId\$packageId", "C:\DriverLab\Packages\$packageId" `
+                -Query $script:LabDirectoryFacts
             $result = @{ vm = $vm.Name; staged = $guestResult }
+        }
+        'guest_package_list' {
+            $vm = Get-ExactVm -Name $request.vm
+            $packageId = [string]$request.package_id
+            if ($packageId -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$') { throw 'package_id is invalid.' }
+            # The same facts for a package that is already published; the host
+            # re-checks it against the digest the caller approved.
+            $guestResult = Invoke-GuestQuery -Vm $vm -Request $request `
+                -Arguments "C:\DriverLab\Packages\$packageId" `
+                -Query $script:LabDirectoryFacts
+            $result = @{ vm = $vm.Name; package = $guestResult }
         }
         'guest_package_commit' {
             $vm = Get-ExactVm -Name $request.vm

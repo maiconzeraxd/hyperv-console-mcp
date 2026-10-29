@@ -47,54 +47,6 @@ function Get-LabFileHash {
         finally { $sha.Dispose() }
     } finally { $stream.Dispose() }
 }
-function ConvertTo-LabJsonString {
-    # Python's json.dumps(ensure_ascii=False) escapes only quote, backslash and control
-    # characters. ConvertTo-Json on PowerShell 5.1 also escapes & ' < > as & and
-    # friends, which would make the two canonical hashes differ.
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
-    $builder = [Text.StringBuilder]::new()
-    [void]$builder.Append('"')
-    foreach ($character in $Value.ToCharArray()) {
-        $code = [int]$character
-        switch ($code) {
-            0x22 { [void]$builder.Append('\"'); continue }
-            0x5C { [void]$builder.Append('\\'); continue }
-            0x08 { [void]$builder.Append('\b'); continue }
-            0x0C { [void]$builder.Append('\f'); continue }
-            0x0A { [void]$builder.Append('\n'); continue }
-            0x0D { [void]$builder.Append('\r'); continue }
-            0x09 { [void]$builder.Append('\t'); continue }
-            default {
-                if ($code -lt 0x20) { [void]$builder.Append('\u' + $code.ToString('x4')) }
-                else { [void]$builder.Append($character) }
-            }
-        }
-    }
-    [void]$builder.Append('"')
-    return $builder.ToString()
-}
-function ConvertTo-LabCanonicalJson {
-    param([Parameter(Mandatory)]$Value)
-    if ($null -eq $Value) { return 'null' }
-    if ($Value -is [bool]) { return $(if ($Value) { 'true' } else { 'false' }) }
-    if ($Value -is [string]) { return ConvertTo-LabJsonString -Value $Value }
-    if ($Value -is [ValueType]) { return [Convert]::ToString($Value, [Globalization.CultureInfo]::InvariantCulture) }
-    if ($Value -is [System.Collections.IDictionary]) {
-        $keys = [string[]]@($Value.Keys)
-        [Array]::Sort($keys, [StringComparer]::Ordinal)
-        $members = foreach ($key in $keys) {
-            (ConvertTo-LabJsonString -Value $key) + ':' + (ConvertTo-LabCanonicalJson -Value $Value[$key])
-        }
-        return '{' + ($members -join ',') + '}'
-    }
-    if ($Value -is [System.Collections.IEnumerable]) {
-        $members = foreach ($item in $Value) { ConvertTo-LabCanonicalJson -Value $item }
-        return '[' + ($members -join ',') + ']'
-    }
-    $map = [ordered]@{}
-    foreach ($property in $Value.PSObject.Properties) { $map[$property.Name] = $property.Value }
-    return ConvertTo-LabCanonicalJson -Value $map
-}
 function Read-LabManifest {
     param([Parameter(Mandatory)][string]$PackageId, [string]$Root = 'C:\DriverLab')
     Assert-LabIdentifier -Value $PackageId -Name 'PackageId'
@@ -127,12 +79,4 @@ function Get-LabEntryPointPath {
     if (-not [IO.File]::Exists($path)) { throw 'The verified package is missing its Run-Lab.ps1 entry point.' }
     return $path
 }
-function Get-LabManifestHash {
-    param([Parameter(Mandatory)]$Manifest)
-    $json = ConvertTo-LabCanonicalJson -Value $Manifest
-    $bytes = [Text.Encoding]::UTF8.GetBytes($json)
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try { return [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant() }
-    finally { $sha.Dispose() }
-}
-Export-ModuleMember -Function @('Assert-LabIdentifier', 'Get-LabFullPath', 'Assert-LabChild', 'Get-LabRelativePath', 'Get-LabFileHash', 'ConvertTo-LabJsonString', 'ConvertTo-LabCanonicalJson', 'Read-LabManifest', 'Get-LabEntryPointPath', 'Get-LabManifestHash')
+Export-ModuleMember -Function @('Assert-LabIdentifier', 'Get-LabFullPath', 'Assert-LabChild', 'Get-LabRelativePath', 'Get-LabFileHash', 'Read-LabManifest', 'Get-LabEntryPointPath')

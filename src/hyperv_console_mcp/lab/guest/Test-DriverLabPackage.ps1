@@ -8,10 +8,15 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 Import-Module "$PSScriptRoot\DriverLab.Common.psm1" -Force
 if ($ExpectedManifestSha256 -notmatch '^[0-9a-f]{64}$') { throw 'Expected manifest SHA-256 is invalid.' }
-$manifest = Read-LabManifest -PackageId $PackageId -Root $Root
-$actualManifestHash = Get-LabManifestHash -Manifest $manifest
-if ($actualManifestHash -cne $ExpectedManifestSha256) { throw 'The guest manifest does not match the host-approved hash.' }
 $packageRoot = Join-Path $Root "Packages\$PackageId"
+$manifestPath = Join-Path $packageRoot 'lab-manifest.json'
+if (-not [IO.File]::Exists($manifestPath)) { throw 'The package is missing its manifest.' }
+# The approved digest is of the manifest file as the host wrote it, so it is the
+# bytes on disk that are hashed. Re-serializing the parsed document here is what
+# used to make the guest and the host disagree about canonical JSON.
+$actualManifestHash = Get-LabFileHash -Path $manifestPath
+if ($actualManifestHash -cne $ExpectedManifestSha256) { throw 'The guest manifest does not match the host-approved hash.' }
+$manifest = Read-LabManifest -PackageId $PackageId -Root $Root
 $files = foreach ($entry in @($manifest.files)) {
     $parts = Get-LabRelativePath -Path ([string]$entry.path)
     $path = Assert-LabChild -Path (Join-Path $packageRoot ($parts -join '\')) -Parent $packageRoot

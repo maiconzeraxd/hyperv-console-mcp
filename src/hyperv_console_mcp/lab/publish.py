@@ -93,14 +93,17 @@ def verify_staged(
     expected_sha256: str,
     manifest: bytes,
     listing: list[dict[str, Any]],
+    label: str = "staged",
 ) -> dict[str, Any]:
     """Check what the guest says it has against the manifest the host approved.
 
-    ``manifest`` is the bytes the guest found in its staging directory, not the
-    ones the host sent: the point is to prove the transfer landed intact, so the
-    hash is computed here, from those bytes, and compared with the approved one.
-    ``listing`` is the guest's own inventory of the staging directory — every
-    file, with its size and SHA-256 — and it is compared entry by entry.
+    ``manifest`` is the bytes the guest found on disk, not the ones the host
+    sent: the point is to prove what landed is what was approved, so the hash is
+    computed here, from those bytes, and compared with the approved one.
+    ``listing`` is the guest's own inventory of the directory — every file, with
+    its size and SHA-256 — and it is compared entry by entry. ``label`` names the
+    directory in a refusal: a staged package and a published one are checked the
+    same way, and the message should say which one failed.
     """
     identifier(package_id, "package_id")
     if not _SHA256.fullmatch(expected_sha256 or ""):
@@ -132,17 +135,17 @@ def verify_staged(
         relative = entry_path(entry)
         found = present.pop(relative.casefold(), None)
         if found is None:
-            raise ValidationError(f"The staged package is missing a file: {relative}")
+            raise ValidationError(f"The {label} package is missing a file: {relative}")
         if (
             _int(found.get("size")) != entry["size"]
             or str(found.get("sha256") or "").casefold() != entry["sha256"]
         ):
-            raise ValidationError(f"The staged package failed verification: {relative}")
+            raise ValidationError(f"The {label} package failed verification: {relative}")
         verified += 1
     if present:
         extra = ", ".join(sorted(entry["path"] for entry in present.values()))
         raise ValidationError(
-            f"The staged package contains files that are not in the manifest: {extra}"
+            f"The {label} package contains files that are not in the manifest: {extra}"
         )
     return {"files_verified": verified, "manifest_sha256": expected_sha256}
 

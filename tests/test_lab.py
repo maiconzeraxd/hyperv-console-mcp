@@ -15,7 +15,6 @@ from hyperv_console_mcp.lab.transfer import (
     DriverLabTransfer,
     build_manifest,
     failure_detail,
-    manifest_hash,
 )
 from hyperv_console_mcp.service import HyperVService
 
@@ -57,8 +56,9 @@ class FakeGuestBackend:
             }
             manifest = staged.get(staging + r"\lab-manifest.json")
             return {"staged": {
-                "staging": staging,
-                "exists": any(key.startswith(final) for key in self.files),
+                "path": staging,
+                "present": any(key.startswith(staging + "\\") for key in self.files),
+                "conflict_exists": any(key.startswith(final) for key in self.files),
                 "manifest_present": manifest is not None,
                 "manifest_base64": (
                     base64.b64encode(manifest).decode("ascii") if manifest is not None else None
@@ -82,6 +82,29 @@ class FakeGuestBackend:
             return {"package": {
                 "package_id": payload["package_id"],
                 "guest_path": rf"C:\DriverLab\Packages\{payload['package_id']}",
+            }}
+        if operation == "guest_package_list":
+            final = rf"c:\driverlab\packages\{payload['package_id']}".casefold()
+            listed = {
+                key: data for key, data in self.files.items()
+                if key.startswith(final + "\\")
+            }
+            manifest = listed.get(final + r"\lab-manifest.json")
+            return {"package": {
+                "package_id": payload["package_id"],
+                "present": bool(listed),
+                "manifest_present": manifest is not None,
+                "manifest_base64": (
+                    base64.b64encode(manifest).decode("ascii") if manifest is not None else None
+                ),
+                "files": [
+                    {
+                        "path": key[len(final) + 1:].replace("\\", "/"),
+                        "size": len(data),
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                    }
+                    for key, data in listed.items()
+                ],
             }}
         if operation == "guest_read_chunk":
             data = self.files[self._path(payload)][payload["offset"]:payload["offset"] + payload["count"]]
@@ -291,22 +314,60 @@ def test_a_guest_failure_detail_prefers_the_specific_reason() -> None:
     assert failure_detail({"exit_code": 3}) == "exit code 3"
 
 
-def test_guest_scripts_run_even_when_the_guest_policy_forbids_scripts(
+def test_verification_lists_the_package_and_decides_on_the_host(
     guest: tuple[HyperVService, FakeGuestBackend], tmp_path: Path
+) -> None:
+    """The guest reports facts; the verdict comes from lab/publish.py."""
+    service, backend = guest
+    source = tmp_path / "package"
+    source.mkdir()
+    (source / "driver.sys").write_bytes(b"binary")
+    (source / "Run-Lab.ps1").write_bytes(b"# noop")
+    manifest = build_manifest(source, "north-test.1")
+    staged = DriverLabTransfer(service).stage("NORTH-Test", source, manifest)
+    backend.calls.clear()
+    backend.commands.clear()
+
+    result = DriverLabTransfer(service).verify(
+        "NORTH-Test", "north-test.1", staged["manifest_sha256"]
+    )
+
+    assert result["verified"] is True
+    assert result["files_verified"] == 2
+    assert backend.calls == ["guest_package_list"]
+    assert backend.commands == [], "verification must not run a guest script"
+
+
+def test_verification_names_the_file_that_no_longer_matches(
+    guest: tuple[HyperVService, FakeGuestBackend], tmp_path: Path
+) -> None:
+    service, backend = guest
+    source = tmp_path / "package"
+    source.mkdir()
+    (source / "driver.sys").write_bytes(b"binary")
+    manifest = build_manifest(source, "north-test.1")
+    staged = DriverLabTransfer(service).stage("NORTH-Test", source, manifest)
+    backend.files[r"c:\driverlab\packages\north-test.1\driver.sys"] = b"swapped"
+
+    result = DriverLabTransfer(service).verify(
+        "NORTH-Test", "north-test.1", staged["manifest_sha256"]
+    )
+
+    assert result["verified"] is False
+    assert "failed verification: driver.sys" in result["reason"]
+    assert result["payload_executed"] is False
+
+
+def test_guest_scripts_run_even_when_the_guest_policy_forbids_scripts(
+    guest: tuple[HyperVService, FakeGuestBackend],
 ) -> None:
     """A default Windows guest is `Restricted`; the lab must not depend on that.
 
     Regression: `& 'C:\\DriverLab\\Tools\\...ps1'` died with "execution of scripts
-    is disabled on this system" on a stock guest, so lab_init, verify and collect
-    all failed against a real VM.
+    is disabled on this system" on a stock guest, so lab_init and collect failed
+    against a real VM.
     """
     service, backend = guest
-    source = tmp_path / "package"
-    source.mkdir()
-    (source / "Run-Lab.ps1").write_text("exit 0\n", encoding="utf-8")
-    manifest = build_manifest(source, "north-test.1")
-    transfer = DriverLabTransfer(service)
-    transfer.verify("NORTH-Test", "north-test.1", manifest_hash(manifest))
     initialize(service, "NORTH-Test")
 
     assert backend.commands, "no guest command was issued"
@@ -314,5 +375,4 @@ def test_guest_scripts_run_even_when_the_guest_policy_forbids_scripts(
         assert command.startswith(
             "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '"
         ), command
-    assert any("Test-DriverLabPackage.ps1" in command for command in backend.commands)
     assert any("Initialize-DriverLab.ps1" in command for command in backend.commands)

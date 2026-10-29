@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..errors import BackendError, ValidationError
-from ..lab.publish import verify_staged
+from ..lab.publish import identifier, verify_staged
 from ._base import (
     MAX_GUEST_FILE_BYTES,
     ServiceBase,
@@ -268,7 +268,7 @@ class GuestService(ServiceBase):
         staged = self._guest_call("guest_package_inspect", vm_name, request)["staged"]
         if not staged.get("manifest_present"):
             raise ValidationError("The staged package has no manifest.")
-        if staged.get("exists"):
+        if staged.get("conflict_exists"):
             raise ValidationError("The package directory already exists; packages are immutable.")
         try:
             manifest = base64.b64decode(str(staged.get("manifest_base64") or ""), validate=True)
@@ -290,6 +290,18 @@ class GuestService(ServiceBase):
                 "manifest_sha256": manifest_sha256,
             },
         }
+
+    def guest_package_list(self, vm_name: str, package_id: str) -> dict[str, Any]:
+        """Ask the guest what a published package holds; the host decides what it means.
+
+        The counterpart of ``guest_package_inspect`` for a package already under
+        Packages: the guest returns the manifest bytes and a listing of the files
+        it has, and ``lab.publish.verify_staged`` compares them with the digest
+        the caller approved.
+        """
+        return self._guest_call(
+            "guest_package_list", vm_name, {"package_id": identifier(package_id, "package_id")}
+        )
 
     def guest_write_file(
         self,

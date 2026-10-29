@@ -916,3 +916,31 @@ by the host — *"The staged package contains files that are not in the manifest
 with nothing published. Not validated live: the same path over SSH, and a package whose manifest
 bytes differ from the approved digest (unit test only).
 
+### 2026-10-29 — v0.3 phase 4: `lab_verify` asks, and the guest stops canonicalizing JSON
+
+The same split as publishing, applied to the check `lab_run` makes before it executes anything.
+`lab_verify` used to shell out to `Test-DriverLabPackage.ps1`, which parsed the manifest, rebuilt it
+as canonical JSON and hashed that — a second canonicalizer, in another language, whose only job was
+to agree with `json.dumps`. When it disagreed, the caller learned nothing beyond a failed exit code.
+
+- **`guest_package_list` is the new operation**, in both transports: the guest reports the directory
+  path, whether it exists, the manifest bytes and a listing of every file with its size and hash.
+  It shares one guest-side scriptblock (`$script:LabDirectoryFacts`) with `guest_package_inspect`,
+  so the two answers cannot drift. It reports facts only.
+- **`lab/publish.py` decides**, through the same `verify_staged` the publish path uses, with a
+  `label` so a refusal says "published" rather than "staged". `DriverLabTransfer.verify` now returns
+  `{verified: true, files_verified, manifest_sha256}` or `{verified: false, reason}`; a mismatch is
+  a result, not an exception, because `lab_run` maps it to the `not_verified` outcome.
+- **The guest's canonical JSON is gone.** `ConvertTo-LabJsonString`, `ConvertTo-LabCanonicalJson`
+  and `Get-LabManifestHash` are deleted from `DriverLab.Common.psm1` — about 60 lines whose entire
+  purpose was to reproduce Python's serializer byte for byte. `Test-DriverLabPackage.ps1` now hashes
+  the manifest *file*, and keeps its per-file and unlisted-file checks as the tripwire the manual
+  runner calls immediately before executing `Run-Lab.ps1`. A re-indented manifest that parses to the
+  same document is now refused, which is the rule the host has always applied; a regression test
+  (`test_package_verification_hashes_the_manifest_file_not_a_reserialization`) covers it.
+
+Tests: 626 passing, 1 skipped. New: verification asks the guest for a listing and runs no guest
+script; a swapped file is named in the refusal; the re-indented manifest is refused. Not validated
+live yet: `guest_package_list` over either transport, and the manual runner's tripwire (it needs an
+elevated guest console and a real package to execute).
+

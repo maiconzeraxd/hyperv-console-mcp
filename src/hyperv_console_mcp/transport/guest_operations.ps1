@@ -46,6 +46,39 @@ function Get-AbsolutePath {
     return [IO.Path]::GetFullPath($Path)
 }
 
+function Get-LabDirectoryListing {
+    # Facts about one lab directory: the manifest bytes and every file with its
+    # size and hash, plus whether a conflicting path already exists. Nothing is
+    # compared here; the verdict is made on the host, in lab/publish.py.
+    param([string]$Path, [string]$ConflictPath)
+    $Path = [IO.Path]::GetFullPath($Path)
+    $manifestPath = Join-Path $Path 'lab-manifest.json'
+    $manifestBase64 = $null
+    if ([IO.File]::Exists($manifestPath)) {
+        $bytes = [IO.File]::ReadAllBytes($manifestPath)
+        if ($bytes.Length -gt 4MB) { throw 'Manifest exceeds its size limit.' }
+        $manifestBase64 = [Convert]::ToBase64String($bytes)
+    }
+    $files = @()
+    if ([IO.Directory]::Exists($Path)) {
+        $files = @(Get-ChildItem -LiteralPath $Path -File -Recurse -Force | ForEach-Object {
+            @{
+                path = $_.FullName.Substring($Path.Length).TrimStart('\').Replace('\', '/')
+                size = [Int64]$_.Length
+                sha256 = Get-FileSha256Hex $_.FullName
+            }
+        })
+    }
+    return @{
+        path = $Path
+        present = [IO.Directory]::Exists($Path)
+        conflict_exists = [bool]($ConflictPath -and ([IO.Directory]::Exists($ConflictPath) -or [IO.File]::Exists($ConflictPath)))
+        manifest_present = [IO.File]::Exists($manifestPath)
+        manifest_base64 = $manifestBase64
+        files = $files
+    }
+}
+
 function Invoke-GuestOperation {
     param([string]$Name, $Body)
 
@@ -187,37 +220,16 @@ function Invoke-GuestOperation {
             if ($transferId -notmatch '^[0-9a-f]{32}$') { throw 'transfer_id is invalid.' }
             # Facts only: the manifest bytes and every file with its size and hash.
             # The host decides what they mean; see lab/publish.py.
-            $transferRoot = [IO.Path]::GetFullPath("C:\DriverLab\Transfers\$transferId")
-            $staging = [IO.Path]::GetFullPath((Join-Path $transferRoot $packageId))
-            $final = [IO.Path]::GetFullPath("C:\DriverLab\Packages\$packageId")
-            if (-not $staging.StartsWith($transferRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
-                throw 'The staging directory escapes C:\DriverLab\Transfers.'
-            }
-            $manifestPath = Join-Path $staging 'lab-manifest.json'
-            $manifestBase64 = $null
-            if ([IO.File]::Exists($manifestPath)) {
-                $bytes = [IO.File]::ReadAllBytes($manifestPath)
-                if ($bytes.Length -gt 4MB) { throw 'Manifest exceeds its size limit.' }
-                $manifestBase64 = [Convert]::ToBase64String($bytes)
-            }
-            $files = @()
-            if ([IO.Directory]::Exists($staging)) {
-                $files = @(Get-ChildItem -LiteralPath $staging -File -Recurse -Force |
-                    ForEach-Object {
-                        @{
-                            path = $_.FullName.Substring($staging.Length).TrimStart('\').Replace('\', '/')
-                            size = [Int64]$_.Length
-                            sha256 = Get-FileSha256Hex $_.FullName
-                        }
-                    })
-            }
-            return @{ staged = @{
-                staging = $staging
-                exists = ([IO.Directory]::Exists($final) -or [IO.File]::Exists($final))
-                manifest_present = [IO.File]::Exists($manifestPath)
-                manifest_base64 = $manifestBase64
-                files = $files
-            } }
+            $facts = Get-LabDirectoryListing -Path "C:\DriverLab\Transfers\$transferId\$packageId" `
+                -ConflictPath "C:\DriverLab\Packages\$packageId"
+            return @{ staged = $facts }
+        }
+        'guest_package_list' {
+            $packageId = [string]$Body.package_id
+            if ($packageId -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$') { throw 'package_id is invalid.' }
+            # The same facts for a package that is already published; the host
+            # re-checks it against the digest the caller approved.
+            return @{ package = (Get-LabDirectoryListing -Path "C:\DriverLab\Packages\$packageId") }
         }
         'guest_package_commit' {
             $packageId = [string]$Body.package_id
