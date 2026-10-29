@@ -212,6 +212,27 @@ function Get-VM { param($Name) throw [System.UnauthorizedAccessException]::new('
         invoke_with_mocks(tmp_path, mocks, "debug_serial_status", {"vm": "NORTH-Test"})
     assert error.value.code == "access_denied"
 
+def test_a_wrapped_access_denial_is_recognised_without_reading_the_message(
+    tmp_path: Path,
+) -> None:
+    """The exception type survives translation; the message does not.
+
+    Regression: only the top-level HResult was checked, plus a list of English
+    and Portuguese words. A Hyper-V cmdlet that wraps the denial in a generic
+    exception therefore reported ``bridge_error`` on any other display language.
+    """
+    mocks = """
+function Get-VM {
+    param($Name)
+    throw [System.Exception]::new(
+        'Zugriff verweigert',
+        [System.UnauthorizedAccessException]::new('Zugriff verweigert'))
+}
+"""
+    with pytest.raises(BackendError) as error:
+        invoke_with_mocks(tmp_path, mocks, "debug_serial_status", {"vm": "NORTH-Test"})
+    assert error.value.code == "access_denied"
+
 
 # The guest query helper declares -Arguments. Four operations used to pass -ArgumentList,
 # which failed parameter binding before the guest scriptblock ever ran.

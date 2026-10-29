@@ -1022,6 +1022,22 @@ Live on the pt-BR `NORTH-Test`, read-only after `lab_init` installed the two upd
 and `test_signing: false`, which `guest_config_status` reported independently as
 `kernel_debug: true`, `test_signing: false`. Tests: 640 passing, 1 skipped.
 
+### 2026-10-29 — v0.3 phase 1 sweep: an access denial is read from the exception, not the message
+
+`Invoke-BridgeRequest` decided `access_denied` from the top-level HResult and, as a fallback, from
+`$message -match 'permission|permiss|access denied|acesso negado'` — a list of English and
+Portuguese words. A Hyper-V cmdlet that wraps the denial in a generic exception therefore reported
+`bridge_error` on a host in any other display language, and the caller saw the raw cmdlet error
+instead of "run elevated or grant Hyper-V Administrators access".
+
+`Test-AccessDeniedError` walks the inner-exception chain for `UnauthorizedAccessException` or
+`E_ACCESSDENIED`, the same way `Test-NotFoundError` already walks it for file-not-found, and it runs
+before every other classification. The word list stays as the last resort for a CIM error that
+carries the denial only in its text, and is now marked as the heuristic it is.
+
+Test: a wrapped denial carrying a German message, which came back as `bridge_error` before the
+change. Tests: 641 passing, 1 skipped.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,
@@ -1042,7 +1058,7 @@ reports the BCD tokens it read with `lab/diagnostics.py` deciding them.
 split (including a re-indented manifest being refused), the SSH provisioning upload of
 `guest_operations.ps1` and the per-process execution-policy bypass, the session-reuse and
 `Copy-Item` round trips, the live-view derivation, and the diagnostics derivation with the pt-BR
-bcdedit fixture. Suite: 640 passing, 1 skipped.
+bcdedit fixture. Suite: 641 passing, 1 skipped.
 
 **Validated live on `NORTH-Test`.** WMI power/checkpoint/firmware paths; the guest session being
 reused, a reboot opening a new one, and the second worker holding; a 100 KB `guest_exec` and a

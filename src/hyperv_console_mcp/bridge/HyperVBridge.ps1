@@ -1723,6 +1723,22 @@ function Test-NotFoundError {
     return ([string]$ErrorRecord.FullyQualifiedErrorId) -match '^(FileNotFoundException|DirectoryNotFoundException)'
 }
 
+function Test-AccessDeniedError {
+    # E_ACCESSDENIED and the exception type survive translation; the message does
+    # not. Hyper-V cmdlets wrap the failure in a generic exception often enough
+    # that only the top-level HResult is not enough, so the chain is walked the
+    # same way Test-NotFoundError walks it.
+    param([Parameter(Mandatory)]$ErrorRecord)
+    if ($ErrorRecord.CategoryInfo.Category -eq 'PermissionDenied') { return $true }
+    $exception = $ErrorRecord.Exception
+    for ($depth = 0; $null -ne $exception -and $depth -lt 8; $depth++) {
+        if ($exception -is [System.UnauthorizedAccessException] -or
+            $exception.HResult -eq -2147024891) { return $true }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
 function Invoke-BridgeRequest {
     param([Parameter(Mandatory)][string]$Operation, [Parameter(Mandatory)]$Request)
     try {
@@ -1734,14 +1750,16 @@ function Invoke-BridgeRequest {
         $message = $errorRecord.Exception.Message
         $category = [string]$errorRecord.CategoryInfo.Category
         $code = 'bridge_error'
-        if ($category -eq 'PermissionDenied' -or $errorRecord.Exception.HResult -eq -2147024891) {
+        if (Test-AccessDeniedError -ErrorRecord $errorRecord) {
             $code = 'access_denied'
         } elseif ($errorRecord.Exception -is [System.ArgumentException] -or $category -eq 'InvalidArgument') {
             $code = 'invalid_argument'
         } elseif ($category -eq 'ObjectNotFound' -or (Test-NotFoundError -ErrorRecord $errorRecord)) {
             $code = 'not_found'
         } elseif ($message -match 'permission|permiss|access denied|acesso negado') {
-            # Some Hyper-V cmdlets wrap access failures in a generic RuntimeException.
+            # Last resort for a Hyper-V CIM error that carries the denial only in
+            # its message. It is a heuristic over translated text, so it is tried
+            # after every structured check and never instead of one.
             $code = 'access_denied'
         }
         if ($code -eq 'access_denied') {
