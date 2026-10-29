@@ -162,6 +162,7 @@ Live checks that do mutate a VM exist as separate scripts and never run in the p
 | `tests/live_kd.py` | KDNET or serial attach → break → stack → detach |
 | `tests/live_cycle.py` | `lab_cycle` end to end with a harmless package |
 | `tests/live_large_payload.py` | a ~100 KB `guest_exec` and file transfer over both transports |
+| `tests/live_guest_session.py` | the session is reused, `Copy-Item` carries a file both ways, and `--reboot` proves a reboot opens a new session |
 
 ## License
 

@@ -848,3 +848,37 @@ found (`Running`), which is deterministic instead of a race.
 
 Not validated live: the deadline path and the "VM is not Running" refusal, which are unit
 tests.
+
+### 2026-10-29 — v0.3 phase 4: the guest session, proved against a real guest
+
+The persistent `New-PSSession -VMName`, the `Copy-Item -ToSession`/`-FromSession` transfer, the
+uptime-based reboot detector and the second worker were all written in v0.2 and all had the same
+caveat attached: *not validated live*. They now are, on `NORTH-Test`, through the same service the
+MCP server builds (`GuestSplitBackend` + `Settings.from_env()`).
+
+- **The session is reused, and it is the same runspace.** A first `guest_exec` sets a global
+  variable in the guest; a second one reads it back. The answer was `REUSED:alive` — not "new
+  session" — which no per-request `Invoke-Command` could produce, since each of those starts a
+  fresh runspace. The first call took 0.66 s (it opens the session) and the second 0.03 s.
+- **`Copy-Item` carries the file both ways.** 102 400 bytes out and back over the session, with
+  the SHA-256 matching the host's in both directions.
+- **A reboot is detected without an extra remote call.** `shutdown /r /t 3` in the guest took it
+  down 16 s later and it answered again at 44 s; the next `guest_exec` reported
+  `NEW SESSION` — the pre-reboot runspace was gone — and the call after that answered in 0.05 s
+  from a freshly opened session. The uptime comparison in `Get-GuestSession` is what dropped the
+  dead entry.
+- **The second worker holds.** An `Start-Sleep -Seconds 8` guest command ran while `vm_get`
+  answered in 1.0 s, so guest work no longer queues behind host work.
+
+**What a reboot looks like from the caller, and it is not pretty.** Every call that lands while
+the guest is restarting fails with the bridge's own timeout — *"The local bridge timed out. A
+guest command may still be running; inspect the guest before retrying."* — because the request
+is sitting inside `New-PSSession` for longer than the bridge's request timeout. That message is
+honest but misleading for this case: nothing is running, the guest is simply not there yet. A
+`guest_unreachable` classification for a call that fails during a reboot is the next thing this
+area needs; until then, a caller retrying through a reboot sees `timeout` and has to know why.
+
+Not validated live: two workers each holding a session to the *same* VM at the same time (the
+overlap probe above proves non-blocking, not that both sessions coexist), a VM rebooted while a
+transfer is in flight, and the session being closed when the worker's stdin loop ends.
+
