@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -13,6 +14,7 @@ from hyperv_console_mcp.errors import ValidationError
 from hyperv_console_mcp.lab.transfer import (
     DriverLabTransfer,
     build_manifest,
+    canonical_json,
     manifest_hash,
 )
 
@@ -123,3 +125,88 @@ def test_case_insensitive_manifest_duplicates_are_rejected(tmp_path: Path) -> No
     ]}
     with pytest.raises(ValidationError, match="duplicate"):
         DriverLabTransfer._validate_manifest(manifest)
+
+
+PACKAGE_SCRIPT = MODULE.parent / "Test-DriverLabPackage.ps1"
+
+
+def write_package(root: Path, package_id: str, files: dict[str, bytes]) -> str:
+    package = root / "Packages" / package_id
+    package.mkdir(parents=True)
+    entries = []
+    for name, data in files.items():
+        target = package.joinpath(*name.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+        entries.append({
+            "path": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+        })
+    manifest = {"schema": 1, "package_id": package_id, "files": entries}
+    (package / "lab-manifest.json").write_bytes(canonical_json(manifest))
+    return manifest_hash(manifest)
+
+
+@requires_powershell
+def test_package_verification_accepts_a_clean_package(tmp_path: Path) -> None:
+    digest = write_package(tmp_path, "clean.1", {"driver.sys": b"binary", "sub/notes.txt": b"x"})
+    completed = subprocess.run(
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", str(PACKAGE_SCRIPT), "-PackageId", "clean.1",
+         "-ExpectedManifestSha256", digest, "-Root", str(tmp_path)],
+        capture_output=True, text=True, encoding="utf-8", timeout=60, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["verified"] is True
+    assert result["file_count"] == 2
+
+
+@requires_powershell
+def test_package_verification_rejects_files_missing_from_the_manifest(tmp_path: Path) -> None:
+    digest = write_package(tmp_path, "sneaky.1", {"driver.sys": b"binary"})
+    (tmp_path / "Packages" / "sneaky.1" / "extra.dll").write_bytes(b"unverified")
+    completed = subprocess.run(
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+         "-File", str(PACKAGE_SCRIPT), "-PackageId", "sneaky.1",
+         "-ExpectedManifestSha256", digest, "-Root", str(tmp_path)],
+        capture_output=True, text=True, encoding="utf-8", timeout=60, check=False,
+    )
+    assert completed.returncode != 0
+    assert "not in the manifest" in completed.stderr
+    assert "extra.dll" in completed.stderr
+
+
+@requires_powershell
+def test_run_entry_point_must_be_listed_in_the_manifest(tmp_path: Path) -> None:
+    write_package(tmp_path, "unlisted.1", {"driver.sys": b"binary", "Run-Lab.ps1": b"# noop"})
+    # Remove Run-Lab.ps1 from the manifest while leaving the file on disk.
+    package = tmp_path / "Packages" / "unlisted.1"
+    manifest = json.loads((package / "lab-manifest.json").read_text(encoding="utf-8"))
+    manifest["files"] = [entry for entry in manifest["files"] if entry["path"] != "Run-Lab.ps1"]
+    (package / "lab-manifest.json").write_bytes(canonical_json(manifest))
+    command = (
+        f"Import-Module -Name {_quote(str(MODULE))} -Force; "
+        f"try {{ Get-LabEntryPointPath -PackageId 'unlisted.1' -Root {_quote(str(tmp_path))} }} "
+        "catch { Write-Output $_.Exception.Message; exit 1 }"
+    )
+    completed = subprocess.run(
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True, text=True, encoding="utf-8", timeout=60, check=False,
+    )
+    assert completed.returncode == 1
+    assert "must list Run-Lab.ps1" in completed.stdout
+
+
+@requires_powershell
+def test_run_entry_point_is_returned_when_the_manifest_lists_it(tmp_path: Path) -> None:
+    write_package(tmp_path, "listed.1", {"Run-Lab.ps1": b"# noop"})
+    command = (
+        f"Import-Module -Name {_quote(str(MODULE))} -Force; "
+        f"Get-LabEntryPointPath -PackageId 'listed.1' -Root {_quote(str(tmp_path))}"
+    )
+    completed = subprocess.run(
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True, text=True, encoding="utf-8", timeout=60, check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip().endswith("Run-Lab.ps1")

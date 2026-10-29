@@ -96,9 +96,9 @@ function ConvertTo-LabCanonicalJson {
     return ConvertTo-LabCanonicalJson -Value $map
 }
 function Read-LabManifest {
-    param([Parameter(Mandatory)][string]$PackageId)
+    param([Parameter(Mandatory)][string]$PackageId, [string]$Root = 'C:\DriverLab')
     Assert-LabIdentifier -Value $PackageId -Name 'PackageId'
-    $path = "C:\DriverLab\Packages\$PackageId\lab-manifest.json"
+    $path = Join-Path $Root "Packages\$PackageId\lab-manifest.json"
     $bytes = [IO.File]::ReadAllBytes($path)
     if ($bytes.Length -gt 4MB) { throw 'Manifest exceeds its size limit.' }
     $manifest = [Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json
@@ -116,6 +116,17 @@ function Read-LabManifest {
     }
     return $manifest
 }
+function Get-LabEntryPointPath {
+    param([Parameter(Mandatory)][string]$PackageId, [string]$Root = 'C:\DriverLab')
+    # The entry point must be a verified manifest member, not just a file on disk.
+    $manifest = Read-LabManifest -PackageId $PackageId -Root $Root
+    if (@($manifest.files | ForEach-Object { [string]$_.path }) -notcontains 'Run-Lab.ps1') {
+        throw 'The verified package must list Run-Lab.ps1 in its manifest.'
+    }
+    $path = Join-Path $Root "Packages\$PackageId\Run-Lab.ps1"
+    if (-not [IO.File]::Exists($path)) { throw 'The verified package is missing its Run-Lab.ps1 entry point.' }
+    return $path
+}
 function Get-LabManifestHash {
     param([Parameter(Mandatory)]$Manifest)
     $json = ConvertTo-LabCanonicalJson -Value $Manifest
@@ -124,4 +135,4 @@ function Get-LabManifestHash {
     try { return [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant() }
     finally { $sha.Dispose() }
 }
-Export-ModuleMember -Function @('Assert-LabIdentifier', 'Get-LabFullPath', 'Assert-LabChild', 'Get-LabRelativePath', 'Get-LabFileHash', 'ConvertTo-LabCanonicalJson', 'Read-LabManifest', 'Get-LabManifestHash')
+Export-ModuleMember -Function @('Assert-LabIdentifier', 'Get-LabFullPath', 'Assert-LabChild', 'Get-LabRelativePath', 'Get-LabFileHash', 'ConvertTo-LabJsonString', 'ConvertTo-LabCanonicalJson', 'Read-LabManifest', 'Get-LabEntryPointPath', 'Get-LabManifestHash')

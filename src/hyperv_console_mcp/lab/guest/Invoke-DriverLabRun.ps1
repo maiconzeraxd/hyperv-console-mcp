@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory)][string]$PackageId,
     [Parameter(Mandatory)][string]$RunId,
     [Parameter(Mandatory)][string]$ExpectedManifestSha256,
-    [Parameter(Mandatory)][string]$ApproveExecution
+    [Parameter(Mandatory)][string]$ApproveExecution,
+    [string]$Root = 'C:\DriverLab'
 )
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -16,10 +17,9 @@ if ($ApproveExecution -cne "EXECUTE $PackageId $RunId") {
     throw "Execution was not approved. Supply exactly: -ApproveExecution 'EXECUTE $PackageId $RunId'"
 }
 if (-not (Get-CimInstance Win32_ComputerSystem).HypervisorPresent) { throw 'Driver lab execution is restricted to a guest with a hypervisor.' }
-& "$PSScriptRoot\Test-DriverLabPackage.ps1" -PackageId $PackageId -ExpectedManifestSha256 $ExpectedManifestSha256 | Out-Null
-$entry = "C:\DriverLab\Packages\$PackageId\Run-Lab.ps1"
-if (-not [IO.File]::Exists($entry)) { throw 'The verified package must contain its own Run-Lab.ps1 entry point.' }
-$run = "C:\DriverLab\Runs\$RunId"
+& "$PSScriptRoot\Test-DriverLabPackage.ps1" -PackageId $PackageId -ExpectedManifestSha256 $ExpectedManifestSha256 -Root $Root | Out-Null
+$entry = Get-LabEntryPointPath -PackageId $PackageId -Root $Root
+$run = Join-Path $Root "Runs\$RunId"
 if (Test-Path -LiteralPath $run) { throw 'This run ID already exists.' }
 [IO.Directory]::CreateDirectory($run) | Out-Null
 $record = [ordered]@{
