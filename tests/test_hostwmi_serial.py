@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 from typing import Any
+from xml.etree import ElementTree
 
 import pytest
 
-from hyperv_console_mcp.hostwmi import WmiBackend
+from hyperv_console_mcp.hostwmi.backend import WmiBackend
 from hyperv_console_mcp.hostwmi.connection import WmiFailure
-from hyperv_console_mcp.hostwmi.serial import debug_serial_status
+from hyperv_console_mcp.hostwmi.serial import debug_serial_prepare, debug_serial_status
 
 VM_ID = "D5AD7D1D-5CB3-441F-A9D7-138640C8F61A"
 CONTROLLER = "8E3A359F-559A-4B6A-98A9-1690A6100ED7"
 PIPE = r"\\.\pipe\north-test-kd"
+OFF = 3
 
 
 class FakeConnection:
@@ -94,7 +96,11 @@ def test_the_vm_state_and_tools_come_back_with_the_ports() -> None:
 
 
 def test_the_query_is_scoped_to_one_vm() -> None:
-    """The class holds every VM's ports and every checkpoint's copy of them."""
+    """The class holds every VM's ports.
+
+    A checkpoint's copy is keyed by the checkpoint's identifier, not the VM's,
+    so the same prefix keeps those out too.
+    """
     connection = FakeConnection()
     debug_serial_status(connection, {"vm": "NORTH-Test"})
     query = next(q for q in connection.queries if "FROM Msvm_SerialPortSettingData" in q)
@@ -112,3 +118,104 @@ def test_a_missing_vm_is_not_found() -> None:
 def test_the_backend_serves_debug_serial_status() -> None:
     backend = WmiBackend(connect=lambda: FakeConnection())
     assert backend.invoke("debug_serial_status", {"vm": "NORTH-Test"})["com_ports"][0]["number"] == 1
+
+
+class PrepareConnection(FakeConnection):
+    """A stopped VM whose COM1 is free, and a provider that applies the change."""
+
+    def __init__(self, state: int = OFF, *, apply: bool = True) -> None:
+        super().__init__(computers=[_computer(EnabledState=state)])
+        self.ports = [_port(0, "", False), _port(1, "", False)]
+        self.apply = apply
+        self.calls: list[dict[str, Any]] = []
+
+    def call(self, path: str, method: str, **parameters: Any) -> dict[str, Any]:
+        self.calls.append({"path": path, "method": method, **parameters})
+        if self.apply:
+            for port in self.ports:
+                if port["InstanceID"] == _value(parameters["ResourceSettings"][0], "InstanceID"):
+                    port["Connection"] = (_connection(parameters["ResourceSettings"][0]),)
+                    port["DebuggerMode"] = True
+        return {"ReturnValue": 0}
+
+
+def _value(xml: str, name: str) -> str:
+    for prop in ElementTree.fromstring(xml):
+        if prop.get("NAME") == name:
+            element = prop.find("VALUE")
+            return "" if element is None else (element.text or "")
+    raise AssertionError(f"the embedded instance carries no {name}")
+
+
+def _connection(xml: str) -> str:
+    for prop in ElementTree.fromstring(xml):
+        if prop.get("NAME") == "Connection":
+            element = prop.find("VALUE.ARRAY/VALUE")
+            return "" if element is None else (element.text or "")
+    raise AssertionError("the embedded instance carries no Connection")
+
+
+def test_prepare_points_com1_at_the_pipe() -> None:
+    result = debug_serial_prepare(PrepareConnection(), {"vm": "NORTH-Test", "pipe_name": "north-test-kd"})
+    assert result["pipe_path"] == PIPE
+    assert (result["port_number"], result["debugger_mode"]) == (1, "On")
+    assert result["baud_rate"] == 115200
+    assert result["windbg_arguments"] == (
+        r"-k com:pipe,port=\\.\pipe\north-test-kd,baud=115200,reconnect,resets=0"
+    )
+    assert len(result["next_steps"]) == 4
+
+
+def test_prepare_modifies_the_ports_own_setting() -> None:
+    """COM2 is a different setting; changing it would leave COM1 as it was."""
+    connection = PrepareConnection()
+    debug_serial_prepare(connection, {"vm": "NORTH-Test", "pipe_name": "north-test-kd"})
+    xml = connection.calls[0]["ResourceSettings"][0]
+    assert _value(xml, "InstanceID") == f"Microsoft:{VM_ID}\\{CONTROLLER}\\0"
+
+
+def test_prepare_sends_the_connection_as_an_array() -> None:
+    """As a scalar the provider refuses the setting, which is what a disc taught."""
+    connection = PrepareConnection()
+    debug_serial_prepare(connection, {"vm": "NORTH-Test", "pipe_name": "north-test-kd"})
+    xml = connection.calls[0]["ResourceSettings"][0]
+    assert 'PROPERTY.ARRAY NAME="Connection"' in xml
+    assert "<VALUE.ARRAY>" in xml
+    assert _connection(xml) == PIPE
+
+
+def test_prepare_refuses_a_running_vm() -> None:
+    connection = PrepareConnection(state=2)
+    with pytest.raises(WmiFailure) as caught:
+        debug_serial_prepare(connection, {"vm": "NORTH-Test", "pipe_name": "north-test-kd"})
+    assert caught.value.code == "invalid_state"
+    assert connection.calls == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["", "!!!abc", "north test", "north/test", "north\\test", "-leading", "a" * 65],
+)
+def test_prepare_refuses_a_pipe_name_that_is_not_a_name(name: str) -> None:
+    """The bridge's own regex was unanchored, so ``!!!abc`` reached Hyper-V."""
+    connection = PrepareConnection()
+    with pytest.raises(WmiFailure) as caught:
+        debug_serial_prepare(connection, {"vm": "NORTH-Test", "pipe_name": name})
+    assert caught.value.code == "invalid_argument"
+    assert connection.calls == []
+
+
+def test_prepare_fails_when_the_port_did_not_change() -> None:
+    """A provider that accepts the call and changes nothing is a failure, not a success."""
+    connection = PrepareConnection(apply=False)
+    with pytest.raises(WmiFailure) as caught:
+        debug_serial_prepare(connection, {"vm": "NORTH-Test", "pipe_name": "north-test-kd"})
+    assert caught.value.code == "backend_error"
+    assert "COM1 was not changed" in str(caught.value)
+
+
+def test_the_backend_serves_debug_serial_prepare() -> None:
+    backend = WmiBackend(connect=PrepareConnection)
+    result = backend.invoke("debug_serial_prepare", {"vm": "NORTH-Test", "pipe_name": "north-test-kd"})
+    assert result["pipe_path"] == PIPE
+

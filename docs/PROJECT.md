@@ -669,3 +669,28 @@ through WMI and through the bridge were compared as whole dictionaries — `vm`,
 COM ports (`COM 1` on `\.\pipe\north-test-kd` in debugger mode, `COM 2` unconnected) and the
 three tool flags — and **the answers were equal**. Not validated live: a VM whose ports are
 not in debugger mode on COM 1, which this VM's are.
+
+### 2026-10-29 — v0.3 phase 4: pointing COM1 at a pipe
+
+- **This one is a `ModifyResourceSettings`**, unlike the disc: the provider applies it. The
+  setting travels as an embedded `Msvm_SerialPortSettingData` keyed by its `InstanceID`, with
+  `Connection` as a `PROPERTY.ARRAY` and `DebuggerMode` as `TRUE`. Only the properties being
+  changed are sent; the rest of the setting carries text the host has already translated.
+- **The result is read back.** The disc taught that this provider answers a modify it did not
+  apply with a success code, so the call re-reads COM1 and fails with `backend_error` if the
+  path or the debugger flag did not take.
+- **The pipe name is matched in full**, unlike the bridge's `-notmatch`, which only asks
+  whether the string *contains* a valid name and therefore accepted `!!!abc`. The new check
+  is stricter and the tool's contract is a pipe name, not a string with one inside.
+- **A checkpoint's copy of the port is keyed by the checkpoint's identifier**
+  (`Microsoft:<checkpoint>\<controller>\<number>`), not the VM's, so the VM-prefix query
+  already excludes those; that is why no extra filtering was needed to find the realized port.
+
+Live validation (elevated, `NORTH-Test`, stopped with `vm_power` and started again
+afterwards): `debug_serial_prepare` through WMI and through the bridge were compared as whole
+dictionaries on the same pipe name — `vm`, `port_number`, `pipe_path`, `debugger_mode`,
+`baud_rate`, `windbg_arguments` and the four `next_steps` — and **the answers were equal**;
+COM1 read back as `\.\pipe\north-test-kd-probe` in debugger mode, and was restored to
+`\.\pipe\north-test-kd` before the VM was started. Not validated live: the refusal paths
+(VM running, a bad pipe name) run only in the unit tests, and a host whose COM1 is not
+controller 0.

@@ -50,6 +50,7 @@ HANDLERS: dict[str, Handler] = {
     "console_scroll": console.console_scroll,
     "console_batch": console.console_batch,
     "debug_serial_status": serial.debug_serial_status,
+    "debug_serial_prepare": serial.debug_serial_prepare,
 }
 
 
