@@ -260,12 +260,14 @@ function Invoke-Command {
             "file", "EncodedPath,EncodedParts,PartCount,ExpectedSize,ExpectedHash", 5,
         ),
         (
-            "guest_publish_package",
-            {
-                "package_id": "pkg.1", "transfer_id": "0" * 32,
-                "manifest_sha256": "0" * 64,
-            },
-            "package", "PackageId,TransferId,ExpectedHash", 3,
+            "guest_package_inspect",
+            {"package_id": "pkg.1", "transfer_id": "0" * 32},
+            "staged", "PackageId,TransferId", 2,
+        ),
+        (
+            "guest_package_commit",
+            {"package_id": "pkg.1", "transfer_id": "0" * 32},
+            "package", "PackageId,TransferId", 2,
         ),
     ],
 )

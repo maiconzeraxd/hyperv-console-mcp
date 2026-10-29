@@ -14,7 +14,6 @@ from hyperv_console_mcp.lab.cli import _tool_files, initialize
 from hyperv_console_mcp.lab.transfer import (
     DriverLabTransfer,
     build_manifest,
-    canonical_json,
     failure_detail,
     manifest_hash,
 )
@@ -50,28 +49,39 @@ class FakeGuestBackend:
             for key in [key for key in self.files if key.startswith(directory + "\\")]:
                 del self.files[key]
             return {"file": {"sha256": hashlib.sha256(data).hexdigest(), "bytes_written": len(data)}}
-        if operation == "guest_publish_package":
+        if operation == "guest_package_inspect":
             staging = rf"c:\driverlab\transfers\{payload['transfer_id']}\{payload['package_id']}".casefold()
             final = rf"c:\driverlab\packages\{payload['package_id']}".casefold()
             staged = {
                 key: data for key, data in self.files.items() if key.startswith(staging + "\\")
             }
-            assert staged, "nothing was staged"
-            manifest = json.loads(staged.pop(staging + r"\lab-manifest.json"))
-            assert hashlib.sha256(canonical_json(manifest)).hexdigest() == payload["manifest_sha256"]
-            for entry in manifest["files"]:
-                key = staging + "\\" + entry["path"].replace("/", "\\").casefold()
-                data = staged.pop(key)
-                assert hashlib.sha256(data).hexdigest() == entry["sha256"]
-                self.files[final + key[len(staging):]] = data
-            assert not staged, f"unlisted staged files: {sorted(staged)}"
+            manifest = staged.get(staging + r"\lab-manifest.json")
+            return {"staged": {
+                "staging": staging,
+                "exists": any(key.startswith(final) for key in self.files),
+                "manifest_present": manifest is not None,
+                "manifest_base64": (
+                    base64.b64encode(manifest).decode("ascii") if manifest is not None else None
+                ),
+                "files": [
+                    {
+                        "path": key[len(staging) + 1:].replace("\\", "/"),
+                        "size": len(data),
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                    }
+                    for key, data in staged.items()
+                ],
+            }}
+        if operation == "guest_package_commit":
+            staging = rf"c:\driverlab\transfers\{payload['transfer_id']}\{payload['package_id']}".casefold()
+            final = rf"c:\driverlab\packages\{payload['package_id']}".casefold()
+            assert any(key.startswith(staging + "\\") for key in self.files), "nothing was staged"
+            assert not any(key.startswith(final) for key in self.files)
             for key in [key for key in self.files if key.startswith(staging + "\\")]:
-                del self.files[key]
+                self.files[final + key[len(staging):]] = self.files.pop(key)
             return {"package": {
                 "package_id": payload["package_id"],
                 "guest_path": rf"C:\DriverLab\Packages\{payload['package_id']}",
-                "files_verified": len(manifest["files"]),
-                "manifest_sha256": payload["manifest_sha256"],
             }}
         if operation == "guest_read_chunk":
             data = self.files[self._path(payload)][payload["offset"]:payload["offset"] + payload["count"]]
@@ -115,7 +125,8 @@ def test_large_package_chunks_empty_files_and_hashes(guest, tmp_path: Path) -> N
     assert result["files"][0]["chunks"] == 3
     assert result["files_verified"] == 2
     assert backend.calls.count("guest_assemble_file") == 1
-    assert backend.calls.count("guest_publish_package") == 1
+    assert backend.calls.count("guest_package_inspect") == 1
+    assert backend.calls.count("guest_package_commit") == 1
     assert backend.files[r"c:\driverlab\packages\north-test.1\driver.bin"] == large
     assert backend.files[r"c:\driverlab\packages\north-test.1\empty.log"] == b""
     assert not [path for path in backend.files if path.startswith(r"c:\driverlab\transfers")]
@@ -140,7 +151,7 @@ def test_staging_never_publishes_a_package_that_fails_verification(guest, tmp_pa
     backend.invoke = tampering  # type: ignore[method-assign]
     with pytest.raises(ValidationError, match="hash mismatch"):
         DriverLabTransfer(service).stage("NORTH-Test", source, manifest)
-    assert "guest_publish_package" not in backend.calls
+    assert "guest_package_commit" not in backend.calls
     assert not [path for path in backend.files if path.startswith(r"c:\driverlab\packages")]
 
 

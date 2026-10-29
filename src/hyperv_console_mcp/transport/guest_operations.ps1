@@ -180,13 +180,50 @@ function Invoke-GuestOperation {
             }
             return @{ file = @{ path = $path; bytes_written = $length; sha256 = $actual } }
         }
-        'guest_publish_package' {
+        'guest_package_inspect' {
             $packageId = [string]$Body.package_id
             $transferId = [string]$Body.transfer_id
-            $expectedHash = [string]$Body.manifest_sha256
             if ($packageId -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$') { throw 'package_id is invalid.' }
             if ($transferId -notmatch '^[0-9a-f]{32}$') { throw 'transfer_id is invalid.' }
-            if ($expectedHash -notmatch '^[0-9a-f]{64}$') { throw 'manifest_sha256 is invalid.' }
+            # Facts only: the manifest bytes and every file with its size and hash.
+            # The host decides what they mean; see lab/publish.py.
+            $transferRoot = [IO.Path]::GetFullPath("C:\DriverLab\Transfers\$transferId")
+            $staging = [IO.Path]::GetFullPath((Join-Path $transferRoot $packageId))
+            $final = [IO.Path]::GetFullPath("C:\DriverLab\Packages\$packageId")
+            if (-not $staging.StartsWith($transferRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'The staging directory escapes C:\DriverLab\Transfers.'
+            }
+            $manifestPath = Join-Path $staging 'lab-manifest.json'
+            $manifestBase64 = $null
+            if ([IO.File]::Exists($manifestPath)) {
+                $bytes = [IO.File]::ReadAllBytes($manifestPath)
+                if ($bytes.Length -gt 4MB) { throw 'Manifest exceeds its size limit.' }
+                $manifestBase64 = [Convert]::ToBase64String($bytes)
+            }
+            $files = @()
+            if ([IO.Directory]::Exists($staging)) {
+                $files = @(Get-ChildItem -LiteralPath $staging -File -Recurse -Force |
+                    ForEach-Object {
+                        @{
+                            path = $_.FullName.Substring($staging.Length).TrimStart('\').Replace('\', '/')
+                            size = [Int64]$_.Length
+                            sha256 = Get-FileSha256Hex $_.FullName
+                        }
+                    })
+            }
+            return @{ staged = @{
+                staging = $staging
+                exists = ([IO.Directory]::Exists($final) -or [IO.File]::Exists($final))
+                manifest_present = [IO.File]::Exists($manifestPath)
+                manifest_base64 = $manifestBase64
+                files = $files
+            } }
+        }
+        'guest_package_commit' {
+            $packageId = [string]$Body.package_id
+            $transferId = [string]$Body.transfer_id
+            if ($packageId -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$') { throw 'package_id is invalid.' }
+            if ($transferId -notmatch '^[0-9a-f]{32}$') { throw 'transfer_id is invalid.' }
             $transferRoot = [IO.Path]::GetFullPath("C:\DriverLab\Transfers\$transferId")
             $staging = [IO.Path]::GetFullPath((Join-Path $transferRoot $packageId))
             $final = [IO.Path]::GetFullPath("C:\DriverLab\Packages\$packageId")
@@ -197,49 +234,13 @@ function Invoke-GuestOperation {
             if ([IO.Directory]::Exists($final) -or [IO.File]::Exists($final)) {
                 throw 'The package directory already exists; packages are immutable.'
             }
-            $manifestPath = Join-Path $staging 'lab-manifest.json'
-            if (-not [IO.File]::Exists($manifestPath)) { throw 'The staged package has no manifest.' }
-            $bytes = [IO.File]::ReadAllBytes($manifestPath)
-            if ($bytes.Length -gt 4MB) { throw 'Manifest exceeds its size limit.' }
-            $actualHash = Get-Sha256Hex $bytes
-            if ($actualHash -cne $expectedHash) {
-                throw 'The staged manifest does not match the host-approved hash.'
-            }
-            $manifest = [Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json
-            $count = @($manifest.files).Count
-            if ($manifest.schema -ne 1 -or $manifest.package_id -ne $packageId -or
-                $count -lt 1 -or $count -gt 512) {
-                throw 'The staged manifest is invalid.'
-            }
-            $verified = 0
-            foreach ($entry in @($manifest.files)) {
-                $relative = [string]$entry.path
-                if ($relative.Length -gt 240 -or $relative -cnotmatch '^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$') {
-                    throw 'The staged manifest contains an unsafe path.'
-                }
-                foreach ($part in $relative.Split('/')) {
-                    if ($part -ceq '.' -or $part -ceq '..' -or $part.EndsWith('.')) {
-                        throw 'The staged manifest contains an unsafe path.'
-                    }
-                }
-                $file = [IO.Path]::GetFullPath((Join-Path $staging ($relative.Replace('/', '\'))))
-                if (-not $file.StartsWith($staging + '\', [StringComparison]::OrdinalIgnoreCase)) {
-                    throw 'The staged manifest escapes its package directory.'
-                }
-                if (-not [IO.File]::Exists($file)) { throw "The staged package is missing a file: $relative" }
-                if ((Get-FileSha256Hex $file) -cne [string]$entry.sha256) {
-                    throw "The staged package file failed its SHA-256 check: $relative"
-                }
-                $verified++
-            }
             [IO.Directory]::CreateDirectory('C:\DriverLab\Packages') | Out-Null
             [IO.Directory]::Move($staging, $final)
-            return @{ package = @{
-                package_id = $packageId
-                path = $final
-                files = $verified
-                manifest_sha256 = $actualHash
-            } }
+            if ([IO.Directory]::Exists($transferRoot) -and
+                @(Get-ChildItem -LiteralPath $transferRoot -Force).Count -eq 0) {
+                [IO.Directory]::Delete($transferRoot)
+            }
+            return @{ package = @{ package_id = $packageId; guest_path = $final } }
         }
         'guest_processes' {
             $filter = [string]$Body.name_contains

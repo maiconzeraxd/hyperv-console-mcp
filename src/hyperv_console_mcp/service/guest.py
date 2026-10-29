@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..errors import BackendError, ValidationError
+from ..lab.publish import verify_staged
 from ._base import (
     MAX_GUEST_FILE_BYTES,
     ServiceBase,
@@ -248,22 +249,47 @@ class GuestService(ServiceBase):
     def guest_publish_package(
         self, vm_name: str, package_id: str, transfer_id: str, manifest_sha256: str
     ) -> dict[str, Any]:
-        """Verify a staged package inside the guest and move it into Packages atomically."""
+        """Verify a staged package on the host, then move it into Packages.
+
+        Two guest calls with the verdict in between: the guest reports the
+        manifest bytes and its file listing, ``publish.verify_staged`` decides
+        whether that is the package the host approved, and only then is the
+        staging directory renamed into place. The window between the two calls
+        is one rename's worth of work in a directory only the operator and this
+        server write to; the commit refuses an existing package either way.
+        """
         if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,63}", package_id) is None:
             raise ValidationError("package_id must be 1-64 letters, digits, dots, or hyphens.")
         if re.fullmatch(r"[0-9a-f]{32}", transfer_id) is None:
             raise ValidationError("transfer_id must be a 32-character lowercase hexadecimal id.")
         if re.fullmatch(r"[0-9a-f]{64}", manifest_sha256) is None:
             raise ValidationError("manifest_sha256 must be a lowercase SHA-256 hexadecimal string.")
-        return self._guest_call(
-            "guest_publish_package",
-            vm_name,
-            {
+        request = {"package_id": package_id, "transfer_id": transfer_id}
+        staged = self._guest_call("guest_package_inspect", vm_name, request)["staged"]
+        if not staged.get("manifest_present"):
+            raise ValidationError("The staged package has no manifest.")
+        if staged.get("exists"):
+            raise ValidationError("The package directory already exists; packages are immutable.")
+        try:
+            manifest = base64.b64decode(str(staged.get("manifest_base64") or ""), validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValidationError("The staged manifest is invalid.") from exc
+        verdict = verify_staged(
+            package_id=package_id,
+            expected_sha256=manifest_sha256,
+            manifest=manifest,
+            listing=list(staged.get("files") or []),
+        )
+        committed = self._guest_call("guest_package_commit", vm_name, request)["package"]
+        return {
+            "vm": committed.get("vm", vm_name),
+            "package": {
                 "package_id": package_id,
-                "transfer_id": transfer_id,
+                "guest_path": committed["guest_path"],
+                "files_verified": verdict["files_verified"],
                 "manifest_sha256": manifest_sha256,
             },
-        )
+        }
 
     def guest_write_file(
         self,

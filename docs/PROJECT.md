@@ -882,3 +882,37 @@ Not validated live: two workers each holding a session to the *same* VM at the s
 overlap probe above proves non-blocking, not that both sessions coexist), a VM rebooted while a
 transfer is in flight, and the session being closed when the worker's stdin loop ends.
 
+### 2026-10-29 — v0.3 phase 4: the guest reports, the host decides
+
+Publishing a staged package was the one place where the guest was asked for a *verdict*, and it
+was written twice — once in the bridge for PowerShell Direct, once in `guest_operations.ps1` for
+SSH — each with its own canonical-JSON assumption, its own path rules and its own hash
+comparison. Two PowerShell implementations of the same decision drift, and when they disagree
+the caller gets a bare "failed verification" from inside the VM with nothing to act on. That is
+the class the roadmap's "minimal guest PowerShell" paragraph names.
+
+- **The guest now returns facts.** `guest_package_inspect` answers the manifest bytes (base64),
+  whether the package directory already exists, and a listing of every file under the staging
+  directory with its size and `Get-FileHash`. It parses nothing, compares nothing, and has no
+  opinion about paths. `guest_package_commit` does one directory rename and refuses an existing
+  package. Both are the same two scriptblocks in both transports.
+- **`lab/publish.py` makes the decision**, as a pure function: hash the bytes the guest sent,
+  compare with the approved digest, parse, validate the manifest and every path, then match the
+  listing entry by entry — a missing file, a changed size, a changed hash and an unlisted
+  leftover each get their own message. No VM is involved, so the whole verdict is unit-tested
+  (29 cases, `tests/test_lab_publish.py`) instead of being asserted through a fake guest.
+- **`service.guest_publish_package` is the sequence**: inspect, decide, commit. The window
+  between the two calls is one rename in a directory only the operator and this server write to,
+  and the commit still refuses a package that already exists.
+- **A latent bug fell out of this.** The SSH guest script returned `{path, files}` where the
+  bridge returned `{guest_path, files_verified}`, so `lab_stage` over SSH would have raised
+  `KeyError` on the answer. The service now builds the package answer itself from the commit's
+  `guest_path` and the host's own count, so both transports answer identically.
+
+Live validation (elevated, `NORTH-Test`, PowerShell Direct): `tests/live_lab_publish.py` staged a
+two-file package, published it (`files_verified: 2`, `C:\DriverLab\Packages\live.c045ae77`),
+re-verified it in the guest, and then had a staging directory with an extra `extra.dll` refused
+by the host — *"The staged package contains files that are not in the manifest: extra.dll"* —
+with nothing published. Not validated live: the same path over SSH, and a package whose manifest
+bytes differ from the approved digest (unit test only).
+

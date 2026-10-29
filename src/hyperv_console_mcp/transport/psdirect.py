@@ -14,7 +14,7 @@ from .base import ExecResult, FileResult
 GUEST_OPERATIONS = frozenset({
     "guest_processes", "guest_services", "guest_events",
     "guest_read_file", "guest_read_chunk", "guest_assemble_file",
-    "guest_write_file", "guest_publish_package",
+    "guest_write_file", "guest_package_inspect", "guest_package_commit",
 })
 
 

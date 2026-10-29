@@ -1056,20 +1056,64 @@ function Invoke-BridgeOperation {
                 }
             $result = @{ vm = $vm.Name; file = $guestResult }
         }
-        'guest_publish_package' {
+        'guest_package_inspect' {
             $vm = Get-ExactVm -Name $request.vm
             $packageId = [string]$request.package_id
             $transferId = [string]$request.transfer_id
-            $expectedHash = [string]$request.manifest_sha256
             if ($packageId -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$') { throw 'package_id is invalid.' }
             if ($transferId -notmatch '^[0-9a-f]{32}$') { throw 'transfer_id is invalid.' }
-            if ($expectedHash -notmatch '^[0-9a-f]{64}$') { throw 'manifest_sha256 is invalid.' }
-            # Everything is staged under Transfers\<id>\<package> and verified here before a
-            # single directory rename makes it visible to the guest tooling. A failed transfer
-            # therefore never leaves a half-written package in Packages.
+            # The guest reports what it has: the manifest bytes and every file with
+            # its size and hash. It compares nothing; the verdict is made on the
+            # host, in lab/publish.py, where it can be tested without a VM.
             $guestResult = Invoke-GuestQuery -Vm $vm -Request $request `
-                -Arguments $packageId, $transferId, $expectedHash -Query {
-                    param($PackageId, $TransferId, $ExpectedHash)
+                -Arguments $packageId, $transferId -Query {
+                    param($PackageId, $TransferId)
+                    $transferRoot = [IO.Path]::GetFullPath("C:\DriverLab\Transfers\$TransferId")
+                    $staging = [IO.Path]::GetFullPath((Join-Path $transferRoot $PackageId))
+                    $final = [IO.Path]::GetFullPath("C:\DriverLab\Packages\$PackageId")
+                    if (-not $staging.StartsWith($transferRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                        throw 'The staging directory escapes C:\DriverLab\Transfers.'
+                    }
+                    $manifestPath = Join-Path $staging 'lab-manifest.json'
+                    $manifestBase64 = $null
+                    if ([IO.File]::Exists($manifestPath)) {
+                        $bytes = [IO.File]::ReadAllBytes($manifestPath)
+                        if ($bytes.Length -gt 4MB) { throw 'Manifest exceeds its size limit.' }
+                        $manifestBase64 = [Convert]::ToBase64String($bytes)
+                    }
+                    $files = @()
+                    if ([IO.Directory]::Exists($staging)) {
+                        $files = @(Get-ChildItem -LiteralPath $staging -File -Recurse -Force |
+                            ForEach-Object {
+                                [pscustomobject]@{
+                                    path = $_.FullName.Substring($staging.Length).TrimStart('\').Replace('\', '/')
+                                    size = [Int64]$_.Length
+                                    sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                                }
+                            })
+                    }
+                    [pscustomobject]@{
+                        staging = $staging
+                        exists = ([IO.Directory]::Exists($final) -or [IO.File]::Exists($final))
+                        manifest_present = [IO.File]::Exists($manifestPath)
+                        manifest_base64 = $manifestBase64
+                        files = $files
+                    }
+                }
+            $result = @{ vm = $vm.Name; staged = $guestResult }
+        }
+        'guest_package_commit' {
+            $vm = Get-ExactVm -Name $request.vm
+            $packageId = [string]$request.package_id
+            $transferId = [string]$request.transfer_id
+            if ($packageId -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$') { throw 'package_id is invalid.' }
+            if ($transferId -notmatch '^[0-9a-f]{32}$') { throw 'transfer_id is invalid.' }
+            # One directory rename publishes the package, after the host has
+            # verified what the guest reported. Nothing is re-checked here: a
+            # second opinion in the guest is what this split removes.
+            $guestResult = Invoke-GuestQuery -Vm $vm -Request $request `
+                -Arguments $packageId, $transferId -Query {
+                    param($PackageId, $TransferId)
                     $transferRoot = [IO.Path]::GetFullPath("C:\DriverLab\Transfers\$TransferId")
                     $staging = [IO.Path]::GetFullPath((Join-Path $transferRoot $PackageId))
                     $final = [IO.Path]::GetFullPath("C:\DriverLab\Packages\$PackageId")
@@ -1080,65 +1124,13 @@ function Invoke-BridgeOperation {
                     if ([IO.Directory]::Exists($final) -or [IO.File]::Exists($final)) {
                         throw 'The package directory already exists; packages are immutable.'
                     }
-                    $manifestPath = Join-Path $staging 'lab-manifest.json'
-                    if (-not [IO.File]::Exists($manifestPath)) { throw 'The staged package has no manifest.' }
-                    $bytes = [IO.File]::ReadAllBytes($manifestPath)
-                    if ($bytes.Length -gt 4MB) { throw 'Manifest exceeds its size limit.' }
-                    $sha = [Security.Cryptography.SHA256]::Create()
-                    try { $actualHash = [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant() }
-                    finally { $sha.Dispose() }
-                    if ($actualHash -cne $ExpectedHash) { throw 'The staged manifest does not match the host-approved hash.' }
-                    $manifest = [Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json
-                    $count = @($manifest.files).Count
-                    if ($manifest.schema -ne 1 -or $manifest.package_id -ne $PackageId -or $count -lt 1 -or $count -gt 512) {
-                        throw 'The staged manifest is invalid.'
-                    }
-                    $listed = @{}
-                    $verified = 0
-                    foreach ($entry in @($manifest.files)) {
-                        $relative = [string]$entry.path
-                        if ($relative.Length -gt 240 -or $relative -cnotmatch '^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$') {
-                            throw 'The staged manifest contains an unsafe path.'
-                        }
-                        foreach ($part in $relative.Split('/')) {
-                            if ($part -ceq '.' -or $part -ceq '..' -or $part.EndsWith('.')) {
-                                throw 'The staged manifest contains an unsafe path.'
-                            }
-                        }
-                        $file = [IO.Path]::GetFullPath((Join-Path $staging ($relative.Replace('/', '\'))))
-                        if (-not $file.StartsWith($staging + '\', [StringComparison]::OrdinalIgnoreCase)) {
-                            throw 'The staged manifest escapes its package directory.'
-                        }
-                        if (-not [IO.File]::Exists($file)) { throw "The staged package is missing a file: $relative" }
-                        $stream = [IO.File]::OpenRead($file)
-                        try {
-                            $length = $stream.Length
-                            $fileSha = [Security.Cryptography.SHA256]::Create()
-                            try { $fileHash = [BitConverter]::ToString($fileSha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
-                            finally { $fileSha.Dispose() }
-                        } finally { $stream.Dispose() }
-                        if ($length -ne [Int64]$entry.size -or $fileHash -cne [string]$entry.sha256) {
-                            throw "The staged package failed verification: $relative"
-                        }
-                        $listed[$relative] = $true
-                        $verified++
-                    }
-                    $unlisted = @(Get-ChildItem -LiteralPath $staging -File -Recurse -Force | ForEach-Object {
-                        $_.FullName.Substring($staging.Length).TrimStart('\').Replace('\', '/')
-                    } | Where-Object { $_ -cne 'lab-manifest.json' -and -not $listed.ContainsKey($_) })
-                    if ($unlisted.Count) {
-                        throw "The staged package contains files that are not in the manifest: $($unlisted -join ', ')"
-                    }
-                    [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($final)) | Out-Null
+                    [IO.Directory]::CreateDirectory('C:\DriverLab\Packages') | Out-Null
                     [IO.Directory]::Move($staging, $final)
                     if ([IO.Directory]::Exists($transferRoot) -and
                         @(Get-ChildItem -LiteralPath $transferRoot -Force).Count -eq 0) {
                         [IO.Directory]::Delete($transferRoot)
                     }
-                    [pscustomobject]@{
-                        package_id = $PackageId; guest_path = $final
-                        files_verified = $verified; manifest_sha256 = $ExpectedHash
-                    }
+                    [pscustomobject]@{ package_id = $PackageId; guest_path = $final }
                 }
             $result = @{ vm = $vm.Name; package = $guestResult }
         }
