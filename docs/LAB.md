@@ -108,6 +108,8 @@ With `HYPERV_MCP_PROFILE=lab`, `lab_run` performs the same deliberate sequence w
 
 `lab_cycle` does the same and then collects evidence (kernel dump included by default) and, with `revert_after=true`, restores `pre-<run_id>`.
 
+With `debugger="kdnet"` or `"serial"` the cycle also attaches kd before step 4 and, because it can read `lab-manifest.json` from the guest, arms `sxe ld:<driver>` for every `.sys` the package ships before the payload can load one. The report's `debugger.break_on_load` says which modules were found and which were armed (`error` is set if a break could not be armed, and the cycle carries on). A package with no driver, or an unreadable manifest, simply arms nothing.
+
 `outcome` is one of:
 
 | Outcome | Meaning |

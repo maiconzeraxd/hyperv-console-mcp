@@ -139,7 +139,8 @@ that already holds the modules you care about.
    debugger's backtick; a text that is not an analysis comes back with `found: false` rather
    than a fabricated code.
 3. `lab_cycle(..., debugger="kdnet"|"serial")` does this for you: it attaches kd before the
-   run, waits for an event afterwards, and when the guest bugchecked it reports
+   run, arms `sxe ld:<driver>` for every `.sys` the package manifest lists, waits for an
+   event afterwards, and when the guest bugchecked it reports
    `outcome="bugcheck"` with the parsed analysis in `debugger.analysis` — instead of
    classifying the dropped session as a hang.
 

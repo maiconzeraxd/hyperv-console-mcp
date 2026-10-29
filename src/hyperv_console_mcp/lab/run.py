@@ -13,6 +13,7 @@ import json
 import re
 import time
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from typing import Any
 
 from ..errors import HyperVError, PolicyError, ValidationError
@@ -267,6 +268,47 @@ def _restore(service: Any, vm_name: str, run_id: str) -> dict[str, Any]:
 DEBUGGERS = ("none", "serial", "kdnet")
 
 
+def _driver_modules(service: Any, vm_name: str, package_id: str) -> list[str]:
+    """The ``.sys`` modules a staged package ships, named the way kd expects.
+
+    ``sxe ld:<module>`` needs the module name without the extension. The manifest
+    is read from the guest because the cycle only knows the package id; a missing
+    or unreadable manifest simply means no break-on-load is armed.
+    """
+    manifest_path = rf"{GUEST_ROOT}\Packages\{package_id}\lab-manifest.json"
+    try:
+        fetched = service.guest_read_file(vm_name, manifest_path, max_bytes=MAX_RESULT_BYTES)
+        raw = base64.b64decode(fetched["file"]["content_base64"], validate=True)
+        manifest = json.loads(raw.decode("utf-8"))
+    except (HyperVError, KeyError, ValueError, TypeError):
+        return []
+    entries = manifest.get("files") if isinstance(manifest, dict) else None
+    modules: list[str] = []
+    for entry in entries if isinstance(entries, list) else []:
+        path = str(entry.get("path") or "") if isinstance(entry, dict) else ""
+        if path.casefold().endswith(".sys"):
+            stem = PurePosixPath(path).stem
+            if stem and stem not in modules:
+                modules.append(stem)
+    return modules
+
+
+def _arm_driver_breakpoints(service: Any, vm_name: str, package_id: str) -> dict[str, Any]:
+    """Arm ``sxe ld:<driver>`` for every driver the package ships, before it runs."""
+    modules = _driver_modules(service, vm_name, package_id)
+    armed: list[str] = []
+    error: str | None = None
+    for module in modules:
+        try:
+            service.kd_break_on_load(vm_name, module)
+        except HyperVError as exc:
+            error = exc.code
+            break
+        armed.append(module)
+    return {"modules": modules, "armed": armed, "error": error}
+
+
+
 def _debugger_report(
     service: Any,
     vm_name: str,
@@ -328,8 +370,12 @@ def cycle(
     if debugger not in DEBUGGERS:
         raise ValidationError(f"debugger must be one of: {', '.join(DEBUGGERS)}.")
     attached: dict[str, Any] | None = None
+    breakpoints: dict[str, Any] | None = None
     if debugger != "none":
         attached = service.kd_attach(vm_name, debugger)
+        # Arm the break before the payload can load it, so the run stops at
+        # DriverEntry instead of racing the first break-in.
+        breakpoints = _arm_driver_breakpoints(service, vm_name, package_id)
     report = run(
         service, vm_name,
         package_id=package_id, run_id=run_id,
@@ -337,7 +383,9 @@ def cycle(
         timeout_seconds=timeout_seconds, checkpoint_before=checkpoint_before,
     )
     if attached is not None:
-        report["debugger"] = _debugger_report(service, vm_name, debugger, attached, report)
+        debug = _debugger_report(service, vm_name, debugger, attached, report)
+        debug["break_on_load"] = breakpoints
+        report["debugger"] = debug
     evidence: dict[str, Any]
     if not report["payload_executed"]:
         evidence = {"collected": False, "reason": "the run did not execute a payload"}

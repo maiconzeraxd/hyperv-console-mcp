@@ -32,6 +32,7 @@ class FakeLabService:
         events: list[dict[str, Any]] | None = None,
         evidence: bool = True,
         kd_event: dict[str, Any] | None = None,
+        manifest: dict[str, Any] | None = None,
     ) -> None:
         self.state = state
         self.uptime = uptime
@@ -42,6 +43,7 @@ class FakeLabService:
         self.events = events
         self.evidence = evidence
         self.kd_event = kd_event or {"event": "break", "module": None}
+        self.manifest = manifest
         self.calls: list[tuple[str, Any]] = []
         self.commands: list[str] = []
         self.files: dict[str, bytes] = {}
@@ -96,7 +98,9 @@ class FakeLabService:
 
     def guest_read_file(self, vm_name: str, path: str, max_bytes: int = 65_536) -> dict[str, Any]:
         key = path.casefold()
-        if key.endswith(r"runs\run-1\result.json") and self.run_result is not None:
+        if key.endswith(r"packages\north.1\lab-manifest.json") and self.manifest is not None:
+            data = json.dumps(self.manifest).encode()
+        elif key.endswith(r"runs\run-1\result.json") and self.run_result is not None:
             data = json.dumps(self.run_result).encode()
         elif key.endswith(r"evidence\run-1\evidence.json"):
             data = json.dumps({"schema": 1, "files": [{
@@ -129,6 +133,10 @@ class FakeLabService:
     def kd_analyze(self, vm_name: str) -> dict[str, Any]:
         self.calls.append(("kd_analyze", vm_name))
         return {"report": {"found": True, "bugcheck_code": "0xd1", "blamed_driver": "MyDriver.sys"}}
+
+    def kd_break_on_load(self, vm_name: str, module: str, enabled: bool = True) -> dict[str, Any]:
+        self.calls.append(("kd_break_on_load", module))
+        return {"break_on_load": module, "enabled": enabled}
 
 
 def _run(service: FakeLabService, **overrides: Any) -> dict[str, Any]:
@@ -310,6 +318,51 @@ def test_cycle_attaches_kd_and_reports_a_bugcheck_instead_of_a_hang(tmp_path: Pa
     assert report["debugger"]["event"] == "bugcheck"
     assert report["debugger"]["analysis"]["bugcheck_code"] == "0xd1"
     assert ("kd_analyze", "NORTH-Test") in service.calls
+
+
+def test_cycle_arms_a_break_on_load_for_each_driver_before_the_run(tmp_path: Path) -> None:
+    service = FakeLabService(
+        run_result={"success": True, "exit_code": 0},
+        manifest={"schema": 1, "package_id": "north.1", "files": [
+            {"path": "MyDriver.sys"},
+            {"path": "sub/Helper.sys"},
+            {"path": "notes.txt"},
+        ]},
+    )
+    service.settings = replace(service.settings, evidence_root=tmp_path)
+    report = lab_run.cycle(
+        service, "NORTH-Test",
+        package_id="north.1", run_id="run-1",
+        expected_manifest_sha256=DIGEST, debugger="kdnet",
+    )
+
+    assert report["debugger"]["break_on_load"] == {
+        "modules": ["MyDriver", "Helper"],
+        "armed": ["MyDriver", "Helper"],
+        "error": None,
+    }
+    order = [name for name, _ in service.calls]
+    # The break has to be armed before the payload can load it.
+    assert order.index("kd_break_on_load") < order.index("run")
+    assert [value for name, value in service.calls if name == "kd_break_on_load"] == [
+        "MyDriver", "Helper",
+    ]
+
+
+def test_cycle_arms_nothing_when_the_package_ships_no_driver(tmp_path: Path) -> None:
+    service = FakeLabService(
+        run_result={"success": True, "exit_code": 0},
+        manifest={"schema": 1, "package_id": "north.1", "files": [{"path": "Run-Lab.ps1"}]},
+    )
+    service.settings = replace(service.settings, evidence_root=tmp_path)
+    report = lab_run.cycle(
+        service, "NORTH-Test",
+        package_id="north.1", run_id="run-1",
+        expected_manifest_sha256=DIGEST, debugger="serial",
+    )
+
+    assert report["debugger"]["break_on_load"] == {"modules": [], "armed": [], "error": None}
+    assert not [name for name, _ in service.calls if name == "kd_break_on_load"]
 
 
 def test_cycle_without_a_debugger_never_touches_kd(tmp_path: Path) -> None:
