@@ -1,0 +1,197 @@
+"""Guest automation settings: the settings document, the command, and the errors.
+
+The guest is modelled by a fake transport here; nothing in this file touches a VM.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from hyperv_console_mcp.config import Settings
+from hyperv_console_mcp.errors import BackendError
+from hyperv_console_mcp.transport import guest_config
+from hyperv_console_mcp.transport.ssh import JSON_MARKER
+
+VM = "LAB-Test"
+SECRET = "Sup3r-Secret-For-Tests!"
+
+
+def settings(tmp_path: Path, **overrides: Any) -> Settings:
+    values: dict[str, Any] = {"allowed_vms": frozenset({VM}), "allow_guest": True}
+    values.update(overrides)
+    return Settings(**values)
+
+
+def marker(payload: dict[str, Any]) -> str:
+    body = json.dumps(payload)
+    return JSON_MARKER + base64.b64encode(body.encode("utf-8")).decode("ascii")
+
+
+class FakeTransport:
+    name = "psdirect"
+
+    def __init__(self, output: str | None = None, *, fail_first_exec: bool = False) -> None:
+        self.uploads: list[dict[str, Any]] = []
+        self.commands: list[str] = []
+        self.output = output if output is not None else marker({"mode": "Apply", "changed": ["autologon"]})
+        self.fail_first_exec = fail_first_exec
+
+    def health(self, vm: str) -> dict[str, Any]:
+        return {"ok": True}
+
+    def put_file(self, vm: str, local: Path, remote: str, *, overwrite: bool) -> Any:
+        content = Path(local).read_bytes()
+        self.uploads.append(
+            {"remote": remote, "content": content, "overwrite": overwrite, "local": str(local)}
+        )
+        return SimpleNamespace(path=remote, size=len(content), sha256="0" * 64)
+
+    def exec(self, vm: str, command: str, *, timeout: float, max_output: int) -> Any:
+        self.commands.append(command)
+        if self.fail_first_exec and len(self.commands) == 1:
+            raise BackendError("the guest is unreachable", code="guest_exec_failed")
+        return SimpleNamespace(output=self.output)
+
+
+class FakeService:
+    def __init__(self, transport: FakeTransport, settings_value: Settings) -> None:
+        self.transport = transport
+        self.settings = settings_value
+
+    def _transport(self, vm: str) -> FakeTransport:
+        return self.transport
+
+
+def document(transport: FakeTransport) -> dict[str, Any]:
+    """The settings document the host uploaded, decoded."""
+    upload = transport.uploads[1]
+    return json.loads(upload["content"].decode("utf-8"))
+
+
+def test_apply_uploads_the_script_then_the_document_and_never_the_secret(
+    tmp_path: Path,
+) -> None:
+    transport = FakeTransport()
+    service = FakeService(transport, settings(tmp_path))
+
+    result = guest_config.apply(
+        service, VM,
+        autologon={"enabled": True, "username": "mcn1", "domain": ".", "secret": SECRET},
+        lock_screen=True, disable_cad=None, power=True, uac=False, windows_update=None,
+    )
+
+    assert result["changed"] == ["autologon"]
+    # The helper script first, then the settings document.
+    assert transport.uploads[0]["remote"] == guest_config.GUEST_SCRIPT
+    assert transport.uploads[0]["overwrite"] is True
+    assert transport.uploads[1]["remote"].startswith(guest_config.GUEST_SETTINGS_ROOT)
+    assert transport.uploads[1]["remote"].endswith(".json")
+    assert transport.uploads[1]["overwrite"] is False
+
+    # The password travels in the document, never on the command line.
+    body = document(transport)
+    assert body["autologon"]["secret"] == SECRET
+    assert len(transport.commands) == 1
+    assert SECRET not in transport.commands[0]
+    assert "-Mode Apply" in transport.commands[0]
+    assert guest_config.GUEST_STATE_PATH in transport.commands[0]
+
+    # Tri-state toggles survive: None leaves a setting alone.
+    assert body["lock_screen"] is True
+    assert body["disable_cad"] is None
+    assert body["power"] is True
+    assert body["uac"] is False
+    assert body["windows_update"] is None
+
+
+def test_the_local_copy_of_the_document_is_removed(tmp_path: Path) -> None:
+    transport = FakeTransport()
+    service = FakeService(transport, settings(tmp_path))
+
+    guest_config.apply(
+        service, VM, autologon=None,
+        lock_screen=None, disable_cad=None, power=None, uac=None, windows_update=None,
+    )
+
+    # Only the script upload remains; the document's local directory is gone.
+    assert not Path(transport.uploads[1]["local"]).exists()
+    assert not Path(transport.uploads[1]["local"]).parent.exists()
+
+
+def test_a_failed_apply_still_tries_to_remove_the_settings_file_from_the_guest(
+    tmp_path: Path,
+) -> None:
+    transport = FakeTransport(fail_first_exec=True)
+    service = FakeService(transport, settings(tmp_path))
+
+    with pytest.raises(BackendError, match="unreachable"):
+        guest_config.apply(
+            service, VM, autologon=None,
+            lock_screen=True, disable_cad=None, power=None, uac=None, windows_update=None,
+        )
+
+    guest_path = transport.uploads[1]["remote"]
+    assert len(transport.commands) == 2
+    assert "Remove-Item" in transport.commands[1]
+    assert guest_path in transport.commands[1]
+
+
+def test_an_error_marker_becomes_a_backend_error(tmp_path: Path) -> None:
+    transport = FakeTransport(output="HVMCP_ERROR:Set-LocalUser was denied")
+    service = FakeService(transport, settings(tmp_path))
+
+    with pytest.raises(BackendError) as caught:
+        guest_config.apply(
+            service, VM, autologon=None,
+            lock_screen=True, disable_cad=None, power=None, uac=None, windows_update=None,
+        )
+
+    assert caught.value.code == "guest_config_failed"
+    assert "denied" in str(caught.value)
+
+
+def test_output_without_a_marker_is_an_error(tmp_path: Path) -> None:
+    transport = FakeTransport(output="nothing useful")
+    service = FakeService(transport, settings(tmp_path))
+
+    with pytest.raises(BackendError, match="produced no result"):
+        guest_config.status(service, VM)
+
+
+def test_status_sends_no_settings_document(tmp_path: Path) -> None:
+    transport = FakeTransport(output=marker({"mode": "Status", "managed_entries": []}))
+    service = FakeService(transport, settings(tmp_path))
+
+    result = guest_config.status(service, VM)
+
+    assert result["mode"] == "Status"
+    assert [upload["remote"] for upload in transport.uploads] == [guest_config.GUEST_SCRIPT]
+    assert "-Mode Status" in transport.commands[0]
+
+
+def test_revert_asks_the_guest_to_restore_and_checks_health_first(tmp_path: Path) -> None:
+    transport = FakeTransport(output=marker({"mode": "Revert", "restored": {"uac": ["X"]}}))
+    service = FakeService(transport, settings(tmp_path))
+
+    result = guest_config.revert(service, VM)
+
+    assert result["restored"] == {"uac": ["X"]}
+    assert "-Mode Revert" in transport.commands[0]
+
+
+def test_the_guest_script_is_the_one_shipped_with_the_package() -> None:
+    source = Path(guest_config.__file__).with_name("guest_config.ps1")
+    text = source.read_text(encoding="utf-8")
+    # The state file the roadmap asks for, and the LSA route for the password.
+    assert guest_config.GUEST_STATE_PATH == r"C:\DriverLab\State\guest-config.json"
+    assert "LsaStorePrivateData" in text
+    assert "DevicePasswordLessBuildVersion" in text
+    assert "ConsentPromptBehaviorAdmin" in text
+    assert "NoLockScreen" in text
+    assert "DisableCAD" in text

@@ -431,6 +431,53 @@ class Dashboard(tk.Tk):
             "Rotating writes a new random password in the guest, proves a fresh session "
             "accepts it, and restores the previous one if it does not.",
         )
+
+        automation = ttk.LabelFrame(self.content, text="Guest automation (revertible)")
+        automation.pack(fill="x", pady=(14, 0))
+        self.automation_choices = {
+            "autologon": tk.StringVar(value="leave"),
+            "lock_screen": tk.StringVar(value="leave"),
+            "disable_cad": tk.StringVar(value="leave"),
+            "power": tk.StringVar(value="leave"),
+            "uac": tk.StringVar(value="leave"),
+            "windows_update": tk.StringVar(value="leave"),
+        }
+        labels = {
+            "autologon": "Autologon",
+            "lock_screen": "No lock screen",
+            "disable_cad": "No Ctrl+Alt+Del",
+            "power": "No standby, blanking or console lock",
+            "uac": "No UAC prompt for admins",
+            "windows_update": "No automatic update reboot",
+        }
+        for row, (key, variable) in enumerate(self.automation_choices.items()):
+            ttk.Label(automation, text=labels[key]).grid(row=row, column=0, sticky="w", pady=2)
+            ttk.Combobox(
+                automation, textvariable=variable, values=("leave", "on", "off"),
+                width=10, state="readonly",
+            ).grid(row=row, column=1, sticky="w", padx=(10, 0), pady=2)
+        self.automation_restart = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            automation, text="Restart the VM afterwards and wait for a desktop session",
+            variable=self.automation_restart,
+        ).grid(row=len(labels), column=0, columnspan=2, sticky="w", pady=(8, 0))
+        automation_buttons = ttk.Frame(automation, style="Panel.TFrame")
+        automation_buttons.grid(row=len(labels) + 1, column=0, columnspan=2, sticky="ew", pady=(8, 4))
+        for text, command in (
+            ("Apply", self._apply_automation),
+            ("Read automation state", self._read_automation),
+            ("Revert all recorded changes", self._revert_automation),
+        ):
+            ttk.Button(automation_buttons, text=text, command=command).pack(side="left", padx=(0, 6))
+        frame, self.automation_text = self._text(self.content, 10)
+        frame.pack(fill="both", expand=True, pady=(10, 0))
+        self._write_text(
+            self.automation_text,
+            "Each row is independent: leave keeps the current value, on applies the setting, "
+            "off restores the value it replaced. Every change is recorded in the guest's "
+            "C:\\DriverLab\\State\\guest-config.json with the value it replaced.\n"
+            "The autologon password is written to LSA private data, never to the registry.",
+        )
         # No automatic query on page load: reading the status needs the guest
         # capability, and a disabled capability should not open an error dialog
         # just because the page was opened.
@@ -475,6 +522,52 @@ class Dashboard(tk.Tk):
             "Delete the stored guest credential?\n\nThis does not change the guest password.",
             lambda: self.service.guest_credential_forget(self.vm_name, self.vm_name),
             lambda _result: self._refresh_credentials(),
+        )
+
+    @staticmethod
+    def _automation_value(choice: str) -> bool | None:
+        return {"on": True, "off": False}.get(choice, None)
+
+    def _apply_automation(self) -> None:
+        chosen = {
+            key: self._automation_value(variable.get())
+            for key, variable in self.automation_choices.items()
+        }
+        if all(value is None for value in chosen.values()):
+            self._write_text(self.automation_text, "Nothing selected: every row is set to leave.")
+            return
+        restart = bool(self.automation_restart.get())
+        autologon = chosen.pop("autologon")
+        toggles = dict(chosen)
+        self.mutate(
+            "Apply the selected guest automation settings?\n\n"
+            + "\n".join(
+                f"{key}: {'on' if value else 'off'}"
+                for key, value in {"autologon": autologon, **toggles}.items()
+                if value is not None
+            )
+            + ("\n\nThe VM will be restarted afterwards." if restart else ""),
+            lambda: self.service.guest_autologon_configure(
+                self.vm_name, autologon, self.vm_name, restart=restart, **toggles
+            ),
+            lambda result: self._write_text(self.automation_text, _safe_json(result)),
+        )
+
+    def _read_automation(self) -> None:
+        self.submit(
+            "guest.config_status",
+            lambda: self.service.guest_config_status(self.vm_name),
+            lambda result: self._write_text(self.automation_text, _safe_json(result)),
+        )
+
+    def _revert_automation(self) -> None:
+        self.mutate(
+            "Restore every setting recorded in guest-config.json to its previous value?\n\n"
+            "The LSA autologon secret is removed if it was absent before.",
+            lambda: self.service.guest_config_revert(
+                self.vm_name, self.vm_name, restart=bool(self.automation_restart.get())
+            ),
+            lambda result: self._write_text(self.automation_text, _safe_json(result)),
         )
 
     def _page_console(self) -> None:

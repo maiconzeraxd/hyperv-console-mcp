@@ -521,3 +521,147 @@ def test_rotation_refuses_a_vm_without_a_credential(
     with pytest.raises(PolicyError, match="to rotate"):
         service.guest_password_rotate("NORTH-Test", "NORTH-Test")
     assert backend.calls == []
+
+
+def test_autologon_needs_a_guest_credential(
+    enabled: HyperVService, backend: FakeBackend, monkeypatch
+) -> None:
+    from hyperv_console_mcp import credentials
+
+    monkeypatch.setattr(credentials, "_read", lambda target: None)
+    service = HyperVService(
+        backend, replace(enabled.settings, guest_password=None), enabled.audit
+    )
+    with pytest.raises(PolicyError, match="credential"):
+        service.guest_autologon_configure("NORTH-Test", True, "NORTH-Test")
+    assert backend.calls == []
+
+
+def test_autologon_sends_the_password_only_to_the_guest_document(
+    enabled: HyperVService, backend: FakeBackend, monkeypatch
+) -> None:
+    from hyperv_console_mcp.transport import guest_config
+
+    captured: dict[str, Any] = {}
+
+    def fake_apply(service, vm, **kwargs):
+        captured.update({"vm": vm, **kwargs})
+        return {"mode": "Apply", "changed": ["autologon"], "live": {}}
+
+    monkeypatch.setattr(guest_config, "apply", fake_apply)
+
+    result = enabled.guest_autologon_configure(
+        "NORTH-Test", True, "NORTH-Test", lock_screen=True, uac=False
+    )
+
+    assert captured["autologon"] == {
+        "enabled": True, "username": "Administrator", "domain": ".", "secret": "secret",
+    }
+    # None leaves the setting alone; False restores it.
+    assert captured["lock_screen"] is True
+    assert captured["uac"] is False
+    assert captured["disable_cad"] is None
+    assert captured["power"] is None
+    assert captured["windows_update"] is None
+    # The password is not in the tool result.
+    assert "secret" not in repr(result)
+
+
+def test_autologon_can_be_turned_off_without_a_password(
+    enabled: HyperVService, backend: FakeBackend, monkeypatch
+) -> None:
+    from hyperv_console_mcp.transport import guest_config
+
+    captured: dict[str, Any] = {}
+
+    def fake_apply(service, vm, **kwargs):
+        captured.update(kwargs)
+        return {"mode": "Apply", "changed": ["autologon_disabled"], "live": {}}
+
+    monkeypatch.setattr(guest_config, "apply", fake_apply)
+    service = HyperVService(
+        backend, replace(enabled.settings, guest_password=None), enabled.audit
+    )
+
+    result = service.guest_autologon_configure("NORTH-Test", False, "NORTH-Test")
+
+    assert captured["autologon"] == {"enabled": False}
+    assert result["changed"] == ["autologon_disabled"]
+
+
+def test_autologon_can_be_left_alone_while_a_toggle_changes(
+    enabled: HyperVService, backend: FakeBackend, monkeypatch
+) -> None:
+    from hyperv_console_mcp.transport import guest_config
+
+    captured: dict[str, Any] = {}
+
+    def fake_apply(service, vm, **kwargs):
+        captured.update(kwargs)
+        return {"mode": "Apply", "changed": ["lock_screen:on"], "live": {}}
+
+    monkeypatch.setattr(guest_config, "apply", fake_apply)
+    service = HyperVService(
+        backend, replace(enabled.settings, guest_password=None), enabled.audit
+    )
+
+    service.guest_autologon_configure("NORTH-Test", None, "NORTH-Test", lock_screen=True)
+
+    # No credential is needed because autologon is not being touched.
+    assert captured["autologon"] is None
+    assert captured["lock_screen"] is True
+
+
+def test_autologon_restart_needs_the_power_capability(
+    enabled: HyperVService, backend: FakeBackend
+) -> None:
+    service = HyperVService(backend, replace(enabled.settings, allow_power=False), enabled.audit)
+    with pytest.raises(PolicyError, match="HYPERV_MCP_ALLOW_POWER"):
+        service.guest_autologon_configure("NORTH-Test", False, "NORTH-Test", restart=True)
+    assert backend.calls == []
+
+
+def test_autologon_toggles_must_be_boolean(enabled: HyperVService, backend: FakeBackend) -> None:
+    with pytest.raises(ValidationError, match="lock_screen"):
+        enabled.guest_autologon_configure(
+            "NORTH-Test", False, "NORTH-Test", lock_screen="yes"  # type: ignore[arg-type]
+        )
+    assert backend.calls == []
+
+
+def test_autologon_needs_the_exact_vm_name(enabled: HyperVService, backend: FakeBackend) -> None:
+    with pytest.raises(PolicyError, match="confirm_vm"):
+        enabled.guest_autologon_configure("NORTH-Test", False, "north-test")
+    assert backend.calls == []
+
+
+def test_config_revert_restores_what_was_recorded(
+    enabled: HyperVService, backend: FakeBackend, monkeypatch
+) -> None:
+    from hyperv_console_mcp.transport import guest_config
+
+    monkeypatch.setattr(
+        guest_config, "revert",
+        lambda service, vm: {"mode": "Revert", "restored": {"uac": ["ConsentPromptBehaviorAdmin"]}},
+    )
+    result = enabled.guest_config_revert("NORTH-Test", "NORTH-Test")
+    assert result["restored"] == {"uac": ["ConsentPromptBehaviorAdmin"]}
+    with pytest.raises(PolicyError, match="confirm_vm"):
+        enabled.guest_config_revert("NORTH-Test", "other")
+
+
+def test_config_revert_restart_needs_the_power_capability(
+    enabled: HyperVService, backend: FakeBackend
+) -> None:
+    service = HyperVService(backend, replace(enabled.settings, allow_power=False), enabled.audit)
+    with pytest.raises(PolicyError, match="HYPERV_MCP_ALLOW_POWER"):
+        service.guest_config_revert("NORTH-Test", "NORTH-Test", restart=True)
+    assert backend.calls == []
+
+
+def test_guest_config_mutations_are_gated() -> None:
+    from hyperv_console_mcp.service import GATED_TOOLS
+
+    assert "guest_autologon_configure" in GATED_TOOLS
+    assert "guest_config_revert" in GATED_TOOLS
+    assert "guest_config_status" not in GATED_TOOLS

@@ -287,6 +287,43 @@ def create_server(
         return await _invoke(service.guest_credential_forget, vm_name, confirm_vm)
 
     @tool(
+        "guest_autologon_configure", annotations=MUTATION,
+        description="Boot the guest straight to the desktop: autologon with the password kept in LSA private data, plus independent toggles for no lock screen, no Ctrl+Alt+Del, no standby/screen blanking/console lock, no UAC consent prompt for administrators, and no automatic update reboot. Every change is recorded with the value it replaced. Restarts only when restart=true. Requires confirm_vm.",
+    )
+    async def guest_autologon_configure(
+        vm_name: str,
+        enabled: bool,
+        confirm_vm: str,
+        restart: bool = False,
+        lock_screen: bool | None = None,
+        disable_cad: bool | None = None,
+        power: bool | None = None,
+        uac: bool | None = None,
+        windows_update: bool | None = None,
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.guest_autologon_configure, vm_name, enabled, confirm_vm,
+            restart=restart, lock_screen=lock_screen, disable_cad=disable_cad,
+            power=power, uac=uac, windows_update=windows_update,
+        )
+
+    @tool(
+        "guest_config_status", annotations=READ_ONLY,
+        description="Report the guest's autologon, lock-screen, Ctrl+Alt+Del, power, UAC and update settings, which of them this tool recorded, and any interactive session. Changes no setting; it uploads its helper script if the guest does not have it yet.",
+    )
+    async def guest_config_status(vm_name: str) -> dict[str, Any]:
+        return await _invoke(service.guest_config_status, vm_name)
+
+    @tool(
+        "guest_config_revert", annotations=MUTATION,
+        description="Restore every setting recorded in the guest's guest-config.json to the value it had before this tool changed it, delete the LSA autologon secret if it was absent, and remove the state file. Restarts only when restart=true. Requires confirm_vm.",
+    )
+    async def guest_config_revert(
+        vm_name: str, confirm_vm: str, restart: bool = False
+    ) -> dict[str, Any]:
+        return await _invoke(service.guest_config_revert, vm_name, confirm_vm, restart=restart)
+
+    @tool(
         "lab_init", annotations=MUTATION,
         description="Install or verify fixed lab tools in C:\\DriverLab and create package/run/evidence directories. Never executes a payload. Requires confirm_vm.",
     )
