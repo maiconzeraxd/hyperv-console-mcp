@@ -36,6 +36,16 @@ def test_relative_lab_roots_are_rejected_at_startup(tmp_path: Path, name: str) -
         Settings.from_env({"LOCALAPPDATA": str(tmp_path), name: "relative\\directory"})
 
 
+def test_the_shared_service_is_the_default_and_can_be_turned_off(tmp_path: Path) -> None:
+    """One owner by default; a private copy is opt-in, and only an explicit false."""
+    assert Settings.from_env({"LOCALAPPDATA": str(tmp_path)}).shared_service is True
+    assert Settings.from_env({
+        "LOCALAPPDATA": str(tmp_path), "HYPERV_MCP_SHARED_SERVICE": "false",
+    }).shared_service is False
+    with pytest.raises(ValidationError, match="HYPERV_MCP_SHARED_SERVICE"):
+        Settings.from_env({"LOCALAPPDATA": str(tmp_path), "HYPERV_MCP_SHARED_SERVICE": "maybe"})
+
+
 def test_the_safe_profile_is_the_default_and_enables_nothing(tmp_path: Path) -> None:
     settings = Settings.from_env({"LOCALAPPDATA": str(tmp_path)})
     assert settings.profile == "safe"

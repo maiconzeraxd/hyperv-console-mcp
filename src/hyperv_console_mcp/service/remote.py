@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import inspect
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -126,7 +127,8 @@ def dispatch(service: Any, request: Mapping[str, Any]) -> Envelope:
             # called with the wrong shape needs to read.
             return _error("invalid_argument", f"{method}: {exc}")
     try:
-        result = function(*args, **kwargs)
+        with _actor(request.get("actor")):
+            result = function(*args, **kwargs)
     except HyperVError as exc:
         return _error(exc.code, str(exc), exc.fix)
     except Exception as exc:  # noqa: BLE001 — the boundary never leaks a traceback
@@ -135,6 +137,20 @@ def dispatch(service: Any, request: Mapping[str, Any]) -> Envelope:
         return {"ok": encode(result)}
     except TypeError as exc:
         return _error("internal_error", f"{method} returned a value that cannot cross: {exc}")
+
+
+def _actor(name: Any) -> AbstractContextManager[None]:
+    """The client's name for the duration of its call.
+
+    The event bus and the approval gate both read the actor from a context
+    variable in the *service's* process, so a client that wants its operations
+    recorded as its own — and a dashboard call not to prompt itself for
+    approval — has to say who it is in the envelope.
+    """
+    if not isinstance(name, str) or not name.strip():
+        return nullcontext()
+    from ..events import EVENTS
+    return EVENTS.actor(name.strip()[:64])
 
 
 def _signature(function: Any) -> Any:
@@ -172,9 +188,10 @@ class ServiceProxy:
     policy a client could edit.
     """
 
-    def __init__(self, transport: Transport, settings: Any = None) -> None:
+    def __init__(self, transport: Transport, settings: Any = None, *, actor: str = "mcp") -> None:
         self._transport = transport
         self.settings = settings
+        self.actor = actor
 
     def __getattr__(self, name: str) -> Callable[..., Any]:
         if name.startswith("_"):
@@ -183,6 +200,7 @@ class ServiceProxy:
         def call(*args: Any, **kwargs: Any) -> Any:
             response = self._transport({
                 "method": name,
+                "actor": self.actor,
                 "args": encode(list(args)),
                 "kwargs": encode(dict(kwargs)),
             })

@@ -37,6 +37,10 @@ async def check(label: str, extra: dict[str, str], expected: int) -> dict:
         HYPERV_MCP_ALLOW_SCREENSHOTS="false",
         HYPERV_MCP_ALLOW_DEBUGGER="false",
         HYPERV_MCP_ALLOW_MEDIA="false",
+        # A private service, because the smoke runs with its own policy: a shared
+        # host would keep that policy after the smoke exits, and the next window
+        # would find itself read-only. tests/live_service_host.py covers the split.
+        HYPERV_MCP_SHARED_SERVICE="false",
     )
     environment.update(extra)
     parameters = StdioServerParameters(

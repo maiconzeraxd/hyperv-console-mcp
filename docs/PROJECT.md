@@ -1189,6 +1189,44 @@ and four threads proving two callers never run inside the service at once). Suit
 1 skipped. Not exercised live: the pipe has only been driven by tests in this process, not yet by
 an MCP server and a dashboard in two processes at once.
 
+### 2026-10-29 — v0.3 phase 5: the server and the window are clients of one host
+
+- **`ensure_running`.** A client that finds no host starts one detached
+  (`python -m hyperv_console_mcp.service.host`, `DETACHED_PROCESS`, output to
+  `%LOCALAPPDATA%\HyperVConsoleMCP\service\service.log`) and waits for the pipe, rather than
+  running a second service inside itself: two owners would mean two workers, two serial sessions
+  and a dashboard that cannot see what the AI opened. `HYPERV_MCP_SHARED_SERVICE=false` keeps the
+  private copy for a test or a one-off run, and `HYPERV_MCP_SERVICE_PIPE` names another pipe.
+- **The actor travels in the envelope.** The event bus and the approval gate read the actor from a
+  context variable in the *service's* process, so a client now says who it is per call.
+  `dispatch` sets it for the duration, which is what makes a dashboard call record itself as
+  `dashboard` and not prompt itself for approval while an AI call still does.
+- **The host publishes.** `hyperv-service` wraps its backend in `EventSink`, so bridge operations
+  publish from the process that runs them; the window reads `service.event_snapshot()` instead of a
+  local bus that would always be empty, and keeps the JSONL reader for history.
+- **Known limitation, stated rather than hidden.** The host reads its policy once at startup, so
+  whichever client starts it decides the environment for both — an MCP host launched with a
+  read-only environment would make the window read-only too. The access file (one level per VM) is
+  the answer the roadmap is moving toward, and the launcher will start the host with the operator's
+  environment rather than a client's.
+
+Tests: `tests/test_service_remote.py` gained the actor crossing the envelope (and a blank one
+falling back to `mcp`), a dashboard call not asking itself for approval while an `mcp` call still
+does, and the surface sweep now requires a call parenthesis so a module path (`service.host`) is not
+mistaken for a method. `tests/test_service_pipe.py` gained `ensure_running` joining a host that is
+already serving and refusing to spawn another. `tests/test_config.py` covers the
+`HYPERV_MCP_SHARED_SERVICE` default, its explicit false, and a refusal for anything else.
+`tests/test_dashboard.py` now runs with a private service, because the rendering test must not
+reach the machine the suite runs on. Suite: 720 passing, 1 skipped.
+
+Validated live with `tests/live_service_host.py --vm NORTH-Test`: a real `hyperv-service` on its own
+pipe, a real MCP stdio client pointed at it through `HYPERV_MCP_SERVICE_PIPE`, `hyperv_host_status`
+succeeding, `vm_list`/`vm_get` refused with `access_denied` because the shell was not elevated, and a
+**second** client then reading the six operation events those three calls produced. That is the
+defect this slice exists to fix, observed rather than inferred. Not exercised live: the dashboard
+window itself against the shared host (it is still tkinter and needs a display), and the approval
+gate across two processes with a real click.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,

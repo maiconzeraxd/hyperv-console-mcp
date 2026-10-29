@@ -136,3 +136,18 @@ def test_two_callers_never_run_inside_the_service_at_once() -> None:
         instance.close()
     assert len(results) == 4
     assert counter.overlaps == 0
+
+
+def test_ensure_running_uses_the_host_that_is_already_there(
+    host: ServiceHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A client joins the one owner; it never starts a second behind it."""
+    from hyperv_console_mcp.service import host as host_module
+
+    def refuse() -> None:
+        raise AssertionError("a host was started although one was already serving")
+
+    monkeypatch.setattr(host_module, "_spawn", refuse)
+    client = host_module.ensure_running(host.name)
+    assert client.available()
+    assert ServiceProxy(client).list_vms()["vms"][0]["name"] == VM

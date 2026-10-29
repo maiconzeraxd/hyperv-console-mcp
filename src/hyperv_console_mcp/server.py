@@ -880,9 +880,17 @@ def create_server(
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(message)s")
-    from .events import EVENTS, EventSink
-    backend = EventSink(create_backend(), EVENTS)
-    create_server(HyperVService(backend, Settings.from_env())).run(transport="stdio")
+    settings = Settings.from_env()
+    if not settings.shared_service:
+        from .events import EVENTS, EventSink
+        service = HyperVService(EventSink(create_backend(), EVENTS), settings)
+    else:
+        from .service.host import ensure_running
+        from .service.remote import ServiceProxy
+        # A thin client of the one host that owns the workers and the sessions,
+        # so a KD or serial session this server opens is visible to the window.
+        service = ServiceProxy(ensure_running(), settings)
+    create_server(service).run(transport="stdio")
 
 
 if __name__ == "__main__":

@@ -40,6 +40,11 @@ def _local_root(child: str, values: Mapping[str, str] | None = None) -> Path:
     return Path(base) / "HyperVConsoleMCP" / child
 
 
+def local_root(child: str) -> Path:
+    """The app's own directory for one kind of file, under ``%LOCALAPPDATA%``."""
+    return _local_root(child)
+
+
 def _path(values: Mapping[str, str], name: str, default: Path) -> Path:
     value = values.get(name, "").strip()
     return Path(value).expanduser() if value else default
@@ -149,6 +154,10 @@ class Settings:
     access_path: Path | None = None
     profile: str = "safe"
     toolsets: frozenset[str] = DEFAULT_TOOLSETS["safe"]
+    # One background host owns the workers, the sessions and the events, so the
+    # window can see what the AI is doing. A client that sets this false runs its
+    # own copy instead, which is what a test or a one-off script wants.
+    shared_service: bool = True
     allow_power: bool = False
     allow_checkpoints: bool = False
     allow_guest: bool = False
@@ -216,6 +225,11 @@ class Settings:
             access_path=path,
             profile=profile,
             toolsets=_toolsets(env, profile),
+            shared_service=(
+                _boolean(env, "HYPERV_MCP_SHARED_SERVICE")
+                if env.get("HYPERV_MCP_SHARED_SERVICE", "").strip()
+                else True
+            ),
             allow_power=capability("HYPERV_MCP_ALLOW_POWER"),
             allow_checkpoints=capability("HYPERV_MCP_ALLOW_CHECKPOINTS"),
             allow_guest=capability("HYPERV_MCP_ALLOW_GUEST"),

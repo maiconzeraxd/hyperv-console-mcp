@@ -191,8 +191,10 @@ def test_every_service_method_a_client_calls_exists_on_the_service() -> None:
     would become a silent ``invalid_argument`` at run time, so the surface is
     checked here instead.
     """
-    server = _called_names(PACKAGE / "server.py", r"service\.([a-z_]+)")
-    dashboard = _called_names(PACKAGE / "dashboard.py", r"self\.service\.([a-z_]+)")
+    # The parenthesis keeps a module path (``service.host``) out of the sweep:
+    # only a call is a call.
+    server = _called_names(PACKAGE / "server.py", r"service\.([a-z_]+)\(")
+    dashboard = _called_names(PACKAGE / "dashboard.py", r"self\.service\.([a-z_]+)\(")
     assert server and dashboard
     # ``settings`` is a local attribute, not a remote method; everything else a
     # client touches must exist on the façade.
@@ -202,6 +204,49 @@ def test_every_service_method_a_client_calls_exists_on_the_service() -> None:
         if name.startswith("_") or not hasattr(instance, name)
     )
     assert unknown == []
+
+
+class ActorProbe:
+    """A service method that reports which actor the bus recorded."""
+
+    def publish(self) -> str:
+        from hyperv_console_mcp.events import EVENTS
+
+        return EVENTS.publish("probe", "started", correlation_id="probe").actor
+
+
+def test_the_envelope_says_who_is_calling(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The actor lives in the service's process, so the client must send it."""
+    monkeypatch.setenv("HYPERV_MCP_EVENT_DIRECTORY", str(tmp_path / "events"))
+    probe = ActorProbe()
+    assert dispatch(probe, {"method": "publish"})["ok"] == "mcp"
+    assert dispatch(probe, {"method": "publish", "actor": "dashboard"})["ok"] == "dashboard"
+    assert dispatch(probe, {"method": "publish", "actor": "  "})["ok"] == "mcp"
+
+
+def test_a_dashboard_call_does_not_prompt_itself_for_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window is not asked to approve the click that came from the window."""
+    monkeypatch.setenv("HYPERV_MCP_REQUIRE_DASHBOARD_APPROVAL", "true")
+    monkeypatch.delenv("HYPERV_MCP_PROFILE", raising=False)
+    asked: list[str] = []
+    monkeypatch.setattr(
+        "hyperv_console_mcp.ipc.request_approval",
+        lambda operation, *args, **kwargs: asked.append(operation),
+    )
+
+    class Gate:
+        def mutate(self) -> str:
+            from hyperv_console_mcp.events import require_dashboard_approval
+
+            require_dashboard_approval("vm_power", VM)
+            return "ok"
+
+    assert dispatch(Gate(), {"method": "mutate", "actor": "dashboard"})["ok"] == "ok"
+    assert asked == []
+    assert dispatch(Gate(), {"method": "mutate", "actor": "mcp"})["ok"] == "ok"
+    assert asked == ["vm_power"]
 
 
 class Recorder:

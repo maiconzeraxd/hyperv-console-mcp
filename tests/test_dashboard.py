@@ -71,6 +71,9 @@ def test_no_shipped_module_names_a_vm_or_a_pipe() -> None:
 
 def test_dashboard_pages_render_with_fake_backend(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERV_MCP_EVENT_DIRECTORY", str(tmp_path / "events"))
+    # A private copy, because this test is about rendering: a shared host would
+    # bypass the fake backend and talk to the machine the suite runs on.
+    monkeypatch.setenv("HYPERV_MCP_SHARED_SERVICE", "false")
     monkeypatch.setattr(
         "hyperv_console_mcp.dashboard.create_backend", lambda *args, **kwargs: UiBackend()
     )

@@ -296,12 +296,12 @@ class Dashboard(tk.Tk):
         self.withdraw()
         self.cancelled = False
         self.settings = Settings.from_env()
-        self.backend = EventSink(create_backend(), EVENTS)
-        self.service = HyperVService(self.backend, self.settings)
+        self.service, self.backend = self._open_service()
         self.vm_name = self._choose_vm(vm_name)
         if not self.vm_name:
             self.cancelled = True
-            self.backend.close()
+            if self.backend is not None:
+                self.backend.close()
             self.destroy()
             return
         # Derived from the VM rather than fixed: two VMs configured from the
@@ -334,6 +334,21 @@ class Dashboard(tk.Tk):
         self.after(100, self._process_queue)
         self.after(500, self.refresh)
         self.after(2000, self._refresh_events)
+
+    def _open_service(self) -> tuple[Any, Any]:
+        """The shared service, or a private copy when the run must not disturb one.
+
+        The window is a client of the same host the MCP server talks to, so a KD
+        or serial session the AI opens is visible here. A private copy owns its
+        own backend, which is what this returns second — and why the caller has
+        to close it and a proxy's caller does not.
+        """
+        if not self.settings.shared_service:
+            backend = EventSink(create_backend(), EVENTS)
+            return HyperVService(backend, self.settings), backend
+        from .service.host import ensure_running
+        from .service.remote import ServiceProxy
+        return ServiceProxy(ensure_running(), self.settings, actor="dashboard"), None
 
     def _choose_vm(self, requested: str | None) -> str:
         """The VM this window is for: asked for, discovered, or chosen here."""
@@ -919,6 +934,8 @@ class Dashboard(tk.Tk):
             self.status_var.set(f"Running {name}…")
         def work() -> None:
             try:
+                # In a private copy the actor is set here; through the proxy the
+                # envelope carries it, and this only names the local bus.
                 with EVENTS.actor("dashboard"):
                     result = function()
                 self.queue.put(("result", (name, result, callback, None)))
@@ -1074,7 +1091,7 @@ class Dashboard(tk.Tk):
             return
         def read() -> None:
             records = self.event_reader.read_new()
-            records.extend(EVENTS.snapshot()["events"])
+            records.extend(self.service.event_snapshot()["events"])
             self.queue.put(("events", records))
         threading.Thread(target=read, daemon=True, name="hvmcp-event-reader").start()
         self.after(1500, self._refresh_events)
@@ -1131,7 +1148,8 @@ class Dashboard(tk.Tk):
             return
         self.running = False
         self.broker.close()
-        self.backend.close()
+        if self.backend is not None:
+            self.backend.close()
         self.destroy()
 
 

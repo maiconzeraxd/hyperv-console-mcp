@@ -23,10 +23,12 @@ import ctypes
 import json
 import os
 import struct
+import subprocess
 import sys
 import threading
 import time
 from ctypes import wintypes
+from pathlib import Path
 from typing import Any, Mapping
 
 from .. import ipc
@@ -44,7 +46,16 @@ SERVICE_LOCK = threading.Lock()
 
 
 def pipe_name(suffix: str = "") -> str:
-    """The service pipe for this user, so two users on one host never collide."""
+    """The service pipe for this user, so two users on one host never collide.
+
+    ``HYPERV_MCP_SERVICE_PIPE`` names another pipe on purpose, which is what a
+    second session that must not share state with the first uses; the suffix is
+    the test-only way to get a pipe nothing else can be listening on.
+    """
+    if not suffix:
+        override = os.environ.get("HYPERV_MCP_SERVICE_PIPE", "").strip()
+        if override:
+            return override
     return f"{SERVICE_PIPE_PREFIX}{ipc._current_user_sid()}{suffix}"
 
 
@@ -244,9 +255,64 @@ def transport(name: str | None = None) -> Transport:
     return ServiceClient(name)
 
 
+START_TIMEOUT_SECONDS = 20.0
+_START_LOCK = threading.Lock()
+
+
+def ensure_running(name: str | None = None, *, timeout: float = START_TIMEOUT_SECONDS) -> ServiceClient:
+    """The client for this user's service, starting the host if nothing serves it.
+
+    A client that finds no host starts one rather than running a second service
+    inside itself: two owners would mean two workers, two serial sessions and two
+    KD sessions, and a dashboard that cannot see what the AI opened.
+    """
+    client = ServiceClient(name)
+    if client.available():
+        return client
+    if os.name != "nt":
+        raise PolicyError("The shared service pipe is available only on Windows.")
+    with _START_LOCK:
+        if client.available():  # another thread in this process won the race
+            return client
+        _spawn()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if client.available():
+                return client
+            time.sleep(0.1)
+    raise PolicyError(
+        f"The shared Hyper-V service did not answer within {int(timeout)} seconds. "
+        f"Start it by hand with `hyperv-service` and read {service_log().name} for why."
+    )
+
+
+def service_log() -> Path:
+    from ..config import local_root
+    return local_root("service") / "service.log"
+
+
+def _spawn() -> None:
+    """Start the host detached, so it outlives the client that asked for it."""
+    log = service_log()
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("ab") as stream:
+        subprocess.Popen(
+            [sys.executable, "-m", "hyperv_console_mcp.service.host"],
+            stdin=subprocess.DEVNULL,
+            stdout=stream,
+            stderr=stream,
+            close_fds=True,
+            creationflags=(
+                getattr(subprocess, "DETACHED_PROCESS", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            ),
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run the host in the foreground, which is what a background launcher starts."""
     from ..config import Settings
+    from ..events import EVENTS, EventSink
     from ..hostwmi import create_backend
     from . import HyperVService
 
@@ -257,7 +323,9 @@ def main(argv: list[str] | None = None) -> int:
     name = None
     if len(arguments) == 2 and arguments[0] == "--pipe":
         name = arguments[1]
-    service = HyperVService(create_backend(), Settings.from_env())
+    # The event bus is the host's too: bridge operations publish from here, so a
+    # client's activity page shows the work the AI is doing in another process.
+    service = HyperVService(EventSink(create_backend(), EVENTS), Settings.from_env())
     host = ServiceHost(service, name=name)
     host.start()
     print(f"hyperv-service: serving on {host.name}", flush=True)
@@ -278,6 +346,8 @@ __all__ = [
     "MAX_MESSAGE_BYTES",
     "ServiceClient",
     "ServiceHost",
+    "ensure_running",
     "pipe_name",
+    "service_log",
     "transport",
 ]

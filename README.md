@@ -2,7 +2,7 @@
 
 A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/) server for **Hyper-V on Windows**. It combines VM management, checkpoints, PowerShell Direct diagnostics, synthetic keyboard/mouse input, console screenshots without VMConnect, installation media, serial consoles, and serial WinDbg preparation and a live kd.exe kernel-debugging session in one stdio server.
 
-**Alpha status:** 716 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
+**Alpha status:** 720 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
 
 ## Highlights
 
@@ -113,6 +113,8 @@ Media operations use an existing DVD drive and require the VM to be Off. `media_
 
 Start the native dashboard with `python -I scripts\run_dashboard.py` or, after installation, `hyperv-dashboard`. `--vm <name>` picks the VM up front; without it the window opens the only VM Hyper-V reports and asks from a list when there is more than one, so no VM name is built into the program. It uses the same service and policies as MCP and exposes activity, console, recovery, media, serial/debugging, guest access and lab pages. Optional per-request approval of AI mutations is documented in [the dashboard guide](docs/DASHBOARD.md).
 
+The MCP server and the dashboard are clients of one background service, so a KD or serial session the AI opens is the session the window shows, and the activity page lists what the other process did. A client that finds no host starts one (`hyperv-service`, or `hyperv-service --pipe NAME`) and joins it; `HYPERV_MCP_SHARED_SERVICE=false` keeps a private copy for a run that must not disturb a live one, and `HYPERV_MCP_SERVICE_PIPE` names a different pipe. The host reads its policy once at startup, so whichever client starts it decides the environment for both — set the level per VM in the access file rather than relying on a client's environment.
+
 The lab workflow initializes fixed guest directories, stages hash-verified packages and collects evidence. Package sources and evidence downloads are confined to `HYPERV_MCP_LAB_ROOT` and `HYPERV_MCP_EVIDENCE_ROOT`. Without the lab profile, running a package is a separate manual guest action requiring an exact run-specific approval phrase; with `HYPERV_MCP_PROFILE=lab`, `lab_run`/`lab_cycle` generate that phrase, checkpoint first and classify the outcome as `ok`, `failed`, `not_verified`, `bugcheck`, `hang` or `timeout`. See [the lab guide](docs/LAB.md); no driver or mapper is bundled or run by this repository.
 
 ## Performance and debugging
@@ -167,6 +169,7 @@ Live checks that do mutate a VM exist as separate scripts and never run in the p
 |---|---|
 | `tests/live_readonly.py` | host, VM, console and debugger status, no changes |
 | `tests/live_mcp_readonly.py` | the same through a real MCP stdio client |
+| `tests/live_service_host.py` | a real host in another process, an MCP client over its pipe, and a second client reading the events the first produced |
 | `tests/live_ssh.py` | SSH provisioning, transport round trip, deprovision |
 | `tests/live_lab_publish.py` | atomic package staging, host-side verification and the publish refusal |
 | `tests/live_guest_automation.py` | autologon + toggles, thumbnail screenshot, revert |
