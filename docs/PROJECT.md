@@ -745,3 +745,26 @@ VM Off, `vm_secure_boot` through WMI and through the bridge were compared on `en
 and **the answers were equal** (`secure_boot: On`, `enabled: true`); `vm_firmware` confirmed
 `Secure Boot On` while it was set, and the VM was returned to `Off` and started before the run
 ended. Not validated live: the refusal paths (generation 1, VM running), which are unit tests.
+
+### 2026-10-29 — v0.3 phase 4: creating a checkpoint is two calls, not one
+
+- **`CreateSnapshot` takes no name.** Its `SnapshotSettings` parameter is a single string
+  (CIM type 8, not an array — passing a list is refused with "Tipos incompatíveis"), and the
+  provider ignored every embedded instance ever put in it: the checkpoint always came out as
+  ``<vm> - (dd/mm/yyyy - hh:mm:ss)``. The name is applied afterwards with
+  ``ModifySystemSettings`` on the new setting's ``ElementName``, which is what
+  ``Rename-VMSnapshot`` does, and that call returns 0 with no job.
+- **The rename belongs to the management service**, not the snapshot service — the snapshot
+  service has no `ModifySystemSettings`.
+- **`CreateSnapshot` names no id.** `ResultingSnapshot` comes back null, so the new checkpoint
+  is found by comparing the listing before and after, waiting up to the same 300 s the bridge
+  waits for `Checkpoint-VM -Passthru`.
+- **The setting is re-read before it is reported**, because the row the wait found still
+  carries the provider's default name.
+
+Live validation (elevated, `NORTH-Test`, running): a checkpoint created through WMI and one
+created through the bridge came back with the **same keys** and the same `notes`, the two
+names the caller asked for, and parent ids chained one to the other — the fields that differ
+(`id`, `creation_time`, `parent_snapshot_id`) are the ones that must. Both were destroyed
+afterwards and the VM's count returned to the 12 it started with. Not validated live: the
+refusal paths, which are unit tests.

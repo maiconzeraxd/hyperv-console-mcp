@@ -5,20 +5,23 @@ is the snapshot one. Its ``InstanceID`` is ``Microsoft:<snapshot id>`` — the i
 ``Get-VMSnapshot`` reports — and its ``Parent`` names the checkpoint before it,
 which is the chain the cmdlet shows.
 
-Creating one stays on the bridge for now. The provider takes the checkpoint's
-name in ``SnapshotSettings``, an embedded-instance string, and ignored every
-encoding tried on the live host: CIM XML with and without the prolog and the key
-property, the instance object itself, and the MOF of a cloned setting. A
-checkpoint made from Python therefore always carries the provider's default
-name, which is not what the tool promises. Listing, applying and destroying need
-no name and are served from here.
+Creating one is two calls, not one. ``CreateSnapshot`` takes the name in
+``SnapshotSettings``, but that parameter is a single string and the provider
+ignored every embedded instance tried in it on the live host: the checkpoint
+always came out with Hyper-V's default name (``<vm> - (dd/mm/yyyy - hh:mm:ss)``).
+The name is therefore applied afterwards, with ``ModifySystemSettings`` on the
+new setting's ``ElementName`` — which is what ``Rename-VMSnapshot`` does — and
+that call does work. ``CreateSnapshot`` answers no id, so the new checkpoint is
+found by comparing the list before and after.
 """
 
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from xml.sax.saxutils import escape
 
 from .connection import Connection, WmiFailure, wql_literal
 from .jobs import await_job
@@ -26,6 +29,15 @@ from .vm import find_vm
 
 _SNAPSHOT = "Microsoft:Hyper-V:Snapshot:Realized"
 _FIELDS = "InstanceID, ElementName, CreationTime, Notes, Parent"
+
+# Msvm_VirtualSystemSnapshotService.CreateSnapshot's SnapshotType, whose ValueMap
+# is 2, 3 and a vendor range: 2 is a full checkpoint, 3 is disk only. The bridge
+# passes no type to Checkpoint-VM, and a full one is what that default makes.
+_FULL = 2
+# The bridge waits up to 300 s for a new checkpoint to be listed, because
+# Checkpoint-VM -Passthru can return before Hyper-V publishes it.
+_WAIT_SECONDS = 300.0
+_POLL_SECONDS = 0.25
 
 # A CIM DATETIME: 20261029014417.778334-000, where the trailing group is the
 # offset in minutes from UTC and "-000" means "UTC, offset unknown".
@@ -41,6 +53,80 @@ def checkpoint_list(connection: Connection, payload: dict[str, Any]) -> dict[str
         describe(row) for row in _snapshots(connection, str(vm.get("Name") or ""))
     ]
     return {"vm": vm.get("ElementName"), "checkpoints": checkpoints, "count": len(checkpoints)}
+
+
+def checkpoint_create(connection: Connection, payload: dict[str, Any]) -> dict[str, Any]:
+    """Take a checkpoint and give it the caller's name.
+
+    The order matters: the provider's default name is applied first and the
+    caller's name second, because there is no way to pass one into
+    ``CreateSnapshot``. A rename that fails leaves a checkpoint under the
+    default name, so the error says which id it is.
+    """
+    vm = find_vm(connection, str(payload.get("vm") or ""))
+    identifier = str(vm.get("Name") or "")
+    wanted = str(payload.get("name") or "")
+    known = {str(row.get("InstanceID") or "") for row in _snapshots(connection, identifier)}
+    response = connection.call(
+        _service(connection),
+        "CreateSnapshot",
+        AffectedSystem=str(vm.get("__PATH") or ""),
+        SnapshotSettings="",
+        SnapshotType=_FULL,
+    )
+    await_job(connection, response)
+    created = _wait_for_new(connection, identifier, known)
+    _rename(connection, created, wanted)
+    return {"checkpoint": describe(_reread(connection, created))}
+
+
+def _wait_for_new(
+    connection: Connection, identifier: str, known: set[str]
+) -> dict[str, Any]:
+    """The checkpoint the call just made, which the provider does not name."""
+    deadline = time.monotonic() + _WAIT_SECONDS
+    while True:
+        fresh = [row for row in _snapshots(connection, identifier) if _key(row) not in known]
+        if len(fresh) == 1:
+            return fresh[0]
+        if len(fresh) > 1:
+            raise WmiFailure(
+                f"Expected one new checkpoint on '{identifier}'; found {len(fresh)}."
+            )
+        if time.monotonic() >= deadline:
+            raise WmiFailure(
+                f"The checkpoint was created but is still not listed after {_WAIT_SECONDS:.0f}s."
+            )
+        time.sleep(_POLL_SECONDS)
+
+
+def _rename(connection: Connection, snapshot: dict[str, Any], name: str) -> None:
+    """``Rename-VMSnapshot`` is this one call, on the setting's ElementName."""
+    response = connection.call(
+        _management_service(connection),
+        "ModifySystemSettings",
+        SystemSettings=_rename_xml(snapshot, name),
+    )
+    await_job(connection, response)
+
+
+def _rename_xml(snapshot: dict[str, Any], name: str) -> str:
+    return (
+        '<INSTANCE CLASSNAME="Msvm_VirtualSystemSettingData">'
+        f'<PROPERTY NAME="InstanceID" TYPE="string"><VALUE>{escape(_key(snapshot))}</VALUE></PROPERTY>'
+        f'<PROPERTY NAME="ElementName" TYPE="string"><VALUE>{escape(name)}</VALUE></PROPERTY>'
+        "</INSTANCE>"
+    )
+
+
+def _reread(connection: Connection, snapshot: dict[str, Any]) -> dict[str, Any]:
+    """The setting as it is now — the rename may not have reached this copy."""
+    path = str(snapshot.get("__PATH") or "")
+    return connection.get(path) if path else snapshot
+
+
+def _key(row: dict[str, Any]) -> str:
+    return str(row.get("InstanceID") or "")
 
 
 def checkpoint_restore(connection: Connection, payload: dict[str, Any]) -> dict[str, Any]:
@@ -109,6 +195,17 @@ def _service(connection: Connection) -> str:
     if len(rows) != 1:
         raise WmiFailure(
             f"Expected one snapshot service on this host; found {len(rows)}.", code="wmi_unavailable"
+        )
+    return str(rows[0]["__PATH"])
+
+
+def _management_service(connection: Connection) -> str:
+    """Renaming a setting is the management service's call, not the snapshot one."""
+    rows = connection.query("SELECT * FROM Msvm_VirtualSystemManagementService")
+    if len(rows) != 1:
+        raise WmiFailure(
+            f"Expected one management service on this host; found {len(rows)}.",
+            code="wmi_unavailable",
         )
     return str(rows[0]["__PATH"])
 

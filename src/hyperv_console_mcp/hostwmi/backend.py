@@ -37,6 +37,7 @@ HANDLERS: dict[str, Handler] = {
     "vm_secure_boot": firmware.vm_secure_boot,
     "vm_thumbnail": thumbnail.vm_thumbnail,
     "checkpoint_list": checkpoint.checkpoint_list,
+    "checkpoint_create": checkpoint.checkpoint_create,
     "checkpoint_restore": checkpoint.checkpoint_restore,
     "checkpoint_delete": checkpoint.checkpoint_delete,
     "media_list": media.media_list,

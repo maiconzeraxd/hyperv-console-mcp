@@ -13,9 +13,10 @@ from typing import Any
 
 import pytest
 
-from hyperv_console_mcp.errors import BackendError
 from hyperv_console_mcp.hostwmi import WmiBackend
+from hyperv_console_mcp.hostwmi import checkpoint as checkpoint_module
 from hyperv_console_mcp.hostwmi.checkpoint import (
+    checkpoint_create,
     checkpoint_delete,
     checkpoint_list,
     checkpoint_restore,
@@ -25,9 +26,15 @@ from hyperv_console_mcp.hostwmi.connection import WmiFailure
 VM_ID = "D5AD7D1D-5CB3-441F-A9D7-138640C8F61A"
 FIRST = "0377C557-9387-4502-B43C-C373EFD8F88A"
 SECOND = "1551D234-08A6-45F7-9AAA-D4F57389DDBD"
+NEW = "0C3EED96-37A4-474F-A3D9-86A46F46F77F"
 SERVICE_PATH = (
     r"\\HOST\root\virtualization\v2:Msvm_VirtualSystemSnapshotService."
     'CreationClassName="Msvm_VirtualSystemSnapshotService",Name="vssnapsvc",'
+    'SystemCreationClassName="Msvm_ComputerSystem",SystemName="HOST"'
+)
+MANAGEMENT_PATH = (
+    r"\\HOST\root\virtualization\v2:Msvm_VirtualSystemManagementService."
+    'CreationClassName="Msvm_VirtualSystemManagementService",Name="vmms",'
     'SystemCreationClassName="Msvm_ComputerSystem",SystemName="HOST"'
 )
 ISO = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{7}[+-]\d{2}:\d{2}")
@@ -206,11 +213,100 @@ def test_a_host_without_the_snapshot_service_is_unavailable() -> None:
     assert caught.value.code == "wmi_unavailable"
 
 
-def test_the_backend_serves_listing_but_leaves_creating_on_the_bridge() -> None:
+def test_the_backend_serves_listing() -> None:
     backend = WmiBackend(connect=FakeConnection)
     assert backend.invoke("checkpoint_list", {"vm": "NORTH-Test"})["count"] == 2
-    # The provider ignores the name in SnapshotSettings, so creating one here
-    # would answer with the wrong name; the worker keeps that operation.
-    with pytest.raises(BackendError) as caught:
-        backend.invoke("checkpoint_create", {"vm": "NORTH-Test", "name": "x"})
-    assert caught.value.code == "wmi_unsupported"
+
+
+class CreatingConnection(FakeConnection):
+    """A provider that creates a checkpoint with its own default name.
+
+    That is what the live one does: ``CreateSnapshot`` answers no id and takes
+    no name, so the checkpoint appears in the next listing under
+    ``<vm> - (dd/mm/yyyy - hh:mm:ss)``.
+    """
+
+    def __init__(self, *, appears: bool = True, rename: bool = True) -> None:
+        super().__init__(snapshots=[])
+        self.appears = appears
+        self.renames = rename
+        self.renamed: list[str] = []
+        self.created = False
+
+    def query(self, wql: str, *, namespace: str = "") -> list[dict[str, Any]]:
+        self.queries.append(wql)
+        if "FROM Msvm_VirtualSystemManagementService" in wql:
+            return [{"__PATH": MANAGEMENT_PATH}]
+        if "Snapshot:Realized" in wql:
+            if self.created and self.appears and not self.snapshots:
+                self.snapshots = [_row(NEW, "NORTH-Test - (29/10/2026 - 16:56:29)", "20261029195629.012744-180")]
+            return list(self.snapshots)
+        return super().query(wql, namespace=namespace)
+
+    def get(self, path: str, *, namespace: str = "") -> dict[str, Any]:
+        if "ConcreteJob" in path:
+            return {"JobState": 7}
+        row = next(item for item in self.snapshots if item["__PATH"] == path)
+        if self.renamed:
+            row["ElementName"] = self.renamed[-1]
+        return row
+
+    def call(self, path: str, method: str, **parameters: Any) -> dict[str, Any]:
+        self.calls.append((path, method, parameters))
+        if method == "CreateSnapshot":
+            self.created = True
+        if method == "ModifySystemSettings":
+            self.renamed.append(_element_name(parameters["SystemSettings"]))
+        return {"ReturnValue": 4096, "Job": f"{path}:Msvm_ConcreteJob.InstanceID=\"x\""}
+
+
+def _element_name(xml: str) -> str:
+    from xml.etree import ElementTree
+
+    for prop in ElementTree.fromstring(xml):
+        if prop.get("NAME") == "ElementName":
+            return prop.find("VALUE").text or ""
+    raise AssertionError("the embedded instance carries no ElementName")
+
+
+def test_create_takes_the_name_from_a_rename_not_from_the_call() -> None:
+    """CreateSnapshot ignores the name, so the checkpoint is renamed afterwards."""
+    connection = CreatingConnection()
+    result = checkpoint_create(connection, {"vm": "NORTH-Test", "name": "Before-NORTH-probe"})
+    assert [method for _, method, _ in connection.calls] == ["CreateSnapshot", "ModifySystemSettings"]
+    assert connection.renamed == ["Before-NORTH-probe"]
+    assert result["checkpoint"]["name"] == "Before-NORTH-probe"
+    assert result["checkpoint"]["id"] == NEW.lower()
+
+
+def test_create_sends_no_settings_and_a_full_snapshot() -> None:
+    connection = CreatingConnection()
+    checkpoint_create(connection, {"vm": "NORTH-Test", "name": "x"})
+    parameters = connection.calls[0][2]
+    assert parameters["SnapshotSettings"] == ""
+    assert parameters["SnapshotType"] == 2
+
+
+def test_the_rename_is_on_the_management_service_not_the_snapshot_one() -> None:
+    """ModifySystemSettings belongs to the management service; the snapshot one
+    has no such method."""
+    connection = CreatingConnection()
+    checkpoint_create(connection, {"vm": "NORTH-Test", "name": "x"})
+    assert connection.calls[1][0] == MANAGEMENT_PATH
+
+
+def test_create_reports_the_setting_as_it_is_now() -> None:
+    """The row the create call found still carries the default name."""
+    connection = CreatingConnection()
+    result = checkpoint_create(connection, {"vm": "NORTH-Test", "name": "Before-NORTH-probe"})
+    assert result["checkpoint"]["name"] == "Before-NORTH-probe"
+
+
+def test_a_checkpoint_that_never_appears_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bridge waits 300 s for it; the wait is shortened here, not skipped."""
+    monkeypatch.setattr(checkpoint_module, "_WAIT_SECONDS", 0.0)
+    connection = CreatingConnection(appears=False)
+    with pytest.raises(WmiFailure) as caught:
+        checkpoint_create(connection, {"vm": "NORTH-Test", "name": "x"})
+    assert "still not listed" in str(caught.value)
+
