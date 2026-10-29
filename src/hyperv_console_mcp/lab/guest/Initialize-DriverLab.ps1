@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$Root = 'C:\DriverLab')
+param([string]$Root = 'C:\DriverLab')
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 if ([IO.Path]::GetFullPath($Root) -ne 'C:\DriverLab') { throw 'The lab root is fixed at C:\DriverLab.' }

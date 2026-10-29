@@ -70,7 +70,8 @@ function Read-LabManifest {
     }
     $paths = @{}
     foreach ($entry in @($manifest.files)) {
-        $parts = Get-LabRelativePath -Path ([string]$entry.path)
+        # Validation only: Get-LabRelativePath throws for absolute, escaping, or malformed paths.
+        $null = Get-LabRelativePath -Path ([string]$entry.path)
         if ($paths.ContainsKey($entry.path) -or [Int64]$entry.size -lt 0 -or $entry.sha256 -notmatch '^[0-9a-f]{64}$') {
             throw 'The manifest has a duplicate or invalid file entry.'
         }

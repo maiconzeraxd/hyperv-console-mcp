@@ -41,6 +41,17 @@ jobs:
             $allErrors | ForEach-Object { Write-Error $_.Message }
             exit 1
           }
+      - name: Analyze PowerShell with PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          try { Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop } catch { Write-Host "PSGallery already trusted or unavailable: $($_.Exception.Message)" }
+          Install-Module PSScriptAnalyzer -Force -AllowClobber -Confirm:$false -Scope CurrentUser
+          $results = Invoke-ScriptAnalyzer -Path src -Recurse -Severity Error, Warning
+          if ($results.Count) {
+            $results | Format-Table RuleName, Severity, ScriptName, Line, Message -AutoSize | Out-String | Write-Host
+            exit 1
+          }
+          Write-Host 'PSScriptAnalyzer: no errors or warnings.'
       - name: Run tests
         run: python -m pytest
       - name: Check MCP stdio and disabled mutations

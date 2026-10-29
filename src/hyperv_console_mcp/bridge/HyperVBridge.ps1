@@ -168,7 +168,14 @@ function Get-ExactCheckpoint {
     return $snapshots[0]
 }
 
-function New-GuestCredential {
+function ConvertTo-GuestCredential {
+    # The guest password arrives inside the bridge request JSON; it is never read from
+    # disk, an environment variable, or a command line, so the plaintext conversion is
+    # the only way to build the PSCredential PowerShell Direct needs.
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
+        'PSAvoidUsingConvertToSecureStringWithPlainText', '',
+        Justification = 'Plaintext comes from the request payload and never touches disk or argv.'
+    )]
     param([Parameter(Mandatory)]$Request)
     $secure = ConvertTo-SecureString $Request.password -AsPlainText -Force
     return [PSCredential]::new([string]$Request.username, $secure)
@@ -186,12 +193,12 @@ function Invoke-GuestQuery {
         [Parameter(Mandatory)][scriptblock]$Query,
         [Alias('ArgumentList')][object[]]$Arguments = @()
     )
-    $credential = New-GuestCredential -Request $Request
+    $credential = ConvertTo-GuestCredential -Request $Request
     return Invoke-Command -VMName $Vm.Name -Credential $credential -ArgumentList $Arguments -ScriptBlock $Query |
         Select-Object -Property * -ExcludeProperty PSComputerName, RunspaceId, PSShowComputerName
 }
 
-function Start-BackgroundVmPower {
+function Invoke-BackgroundVmPower {
     param([Parameter(Mandatory)]$Vm, [Parameter(Mandatory)][string]$Action)
     $job = switch ($Action) {
         'shutdown' { Stop-VM -VM $Vm -Confirm:$false -AsJob }
@@ -298,7 +305,7 @@ function Invoke-BridgeOperation {
             # Graceful shutdown/save can outlive the bridge timeout, so they are handed to a
             # background Hyper-V job and tracked through operation_status.
             if ($action -in @('shutdown', 'save')) {
-                $accepted = Start-BackgroundVmPower -Vm $vm -Action $action
+                $accepted = Invoke-BackgroundVmPower -Vm $vm -Action $action
                 $result = @{
                     accepted = $true
                     operation_id = $accepted.operation_id
