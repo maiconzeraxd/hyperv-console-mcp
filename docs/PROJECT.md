@@ -1151,6 +1151,44 @@ the fix it was handed. Suite: 689 passing, 1 skipped. Not exercised live: every 
 reached through a unit path, because each one needs a specific host or guest state (no credential,
 no sshd, a running VM) that the live host was not put into for this change.
 
+### 2026-10-29 — v0.3 phase 5: one service, one owner, one pipe
+
+- **The boundary.** `service/remote.py` holds everything about crossing a process that does not
+  need a pipe: a request names a public method and carries its arguments, a response carries either
+  the encoded result or the error's code, message and fix. `encode`/`decode` round-trip the four
+  types JSON would flatten (`Screenshot`, `bytes`, `Path`, `tuple`) and *refuse* anything else with
+  a `TypeError` instead of stringifying it. `dispatch` refuses a private name rather than looking it
+  up — `_call` and `_approve` would run an operation with the policy checks the caller was supposed
+  to go through, and `backend` would hand the pipe a second door to the host — and binds arguments
+  to the signature *before* running, so a wrong-shape call names the offending argument instead of
+  failing halfway through a mutation.
+- **The pipe.** `service/host.py` is the actual Windows channel, with the approval broker's
+  hardening reused: a security descriptor for the current user's SID only,
+  `FILE_FLAG_FIRST_PIPE_INSTANCE` on the first instance so a second host fails instead of quietly
+  sharing the name, `PIPE_REJECT_REMOTE_CLIENTS`, and `_verify_server_process` before a client sends
+  anything. Framing is a length prefix, because a screenshot is megabytes and a message-mode read
+  that outgrows its buffer fails with `ERROR_MORE_DATA` — that was the first bug the pipe tests
+  found. `SERVICE_LOCK` keeps one operation at a time inside the service, which is what its managers
+  already assume. `hyperv-service` runs the host in the foreground; a client that finds no host is
+  told to start one.
+- **The service owns what cannot cross.** `capture_screenshot` no longer takes a capture object: a
+  remote client cannot pass a live window handle over a pipe, and should not — the desktop being
+  captured is the host's — so `ServiceBase` builds `VMConnectCapture` where the host runs.
+  `event_snapshot` likewise: the operation bus is the owner's, and a client reading its own copy
+  would get an empty snapshot the moment the service moved to another process.
+- **`{code, fix}` survives the trip.** `error_from` rebuilds the exception class from the code, so a
+  `PolicyError` crosses as a `PolicyError` and the fix arrives intact for the client to act on.
+
+Tests: `tests/test_service_remote.py` (the codec's four types and its refusal, a screenshot
+surviving, an error keeping its code and fix, private and unknown methods refused, arguments named
+before the run, no traceback leaked, a source sweep that every method the server and dashboard call
+exists on the service, and the envelope keeping keyword arguments and types);
+`tests/test_service_pipe.py`, Windows-only (a call and a refusal across the pipe, a second host
+refusing the name, a client with no host told how to start one, a 2 MB result crossing the buffer,
+and four threads proving two callers never run inside the service at once). Suite: 716 passing,
+1 skipped. Not exercised live: the pipe has only been driven by tests in this process, not yet by
+an MCP server and a dashboard in two processes at once.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,

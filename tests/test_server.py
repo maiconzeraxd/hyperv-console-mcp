@@ -261,8 +261,9 @@ def test_screenshot_returns_metadata_png_and_audit(server, tmp_path, monkeypatch
     service = HyperVService(
         FakeBackend(),
         Settings(allowed_vms=frozenset({"NORTH-Test"}), allow_screenshots=True),
+        capture=FakeCapture(),
     )
-    server_with_capture = create_server(service, FakeCapture())
+    server_with_capture = create_server(service)
     service.audit = AuditLogger(tmp_path / "audit.jsonl")
     result = anyio.run(
         server_with_capture.call_tool,

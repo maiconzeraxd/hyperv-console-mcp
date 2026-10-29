@@ -15,7 +15,6 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, Field
 
 from . import __version__
-from .capture import VMConnectCapture
 from .config import TOOLSETS, Settings
 from .errors import HyperVError
 from .hostwmi import create_backend
@@ -154,10 +153,8 @@ async def _invoke(function: Callable[..., T], *args: Any, **kwargs: Any) -> T:
 
 def create_server(
     service: HyperVService | None = None,
-    capture: VMConnectCapture | None = None,
 ) -> MCPServer:
     service = service or HyperVService(create_backend(), Settings.from_env())
-    capture = capture or VMConnectCapture()
     mcp = MCPServer(
         name="hyperv-console-mcp",
         version=__version__,
@@ -560,13 +557,12 @@ def create_server(
     async def vm_inject_nmi(vm_name: str, confirm_vm: str) -> dict[str, Any]:
         return await _invoke(service.vm_inject_nmi, vm_name, confirm_vm)
 
-    @tool("events_snapshot", annotations=READ_ONLY, description="Read recent operation lifecycle events from this MCP instance, without commands, passwords, typed text, or file contents.")
+    @tool("events_snapshot", annotations=READ_ONLY, description="Read recent operation lifecycle events from the shared service, without commands, passwords, typed text, or file contents.")
     async def events_snapshot(after_sequence: int = 0) -> dict[str, Any]:
-        from .events import EVENTS
         if not isinstance(after_sequence, int) or isinstance(after_sequence, bool) or after_sequence < 0:
             from .errors import ValidationError
             raise ValidationError("after_sequence must be a non-negative integer.")
-        return EVENTS.snapshot(after_sequence)
+        return await _invoke(service.event_snapshot, after_sequence)
 
     @tool(
         "console_info", annotations=READ_ONLY,
@@ -867,7 +863,7 @@ def create_server(
         max_width: int = 1600,
     ) -> CallToolResult:
         def perform() -> Any:
-            return service.capture_screenshot(capture, vm_name, source, region, max_width)
+            return service.capture_screenshot(vm_name, source, region, max_width)
 
         screenshot = await _invoke(perform)
         metadata_text = json.dumps(screenshot.metadata, ensure_ascii=False)

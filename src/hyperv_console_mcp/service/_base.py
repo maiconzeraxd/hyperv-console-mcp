@@ -109,12 +109,27 @@ class ServiceBase:
         settings: Settings | None = None,
         audit: AuditLogger | None = None,
         serial: SerialManager | None = None,
+        capture: Any = None,
     ) -> None:
         self.backend = backend
         self.settings = settings or Settings()
         self.audit = audit or AuditLogger(self.settings.audit_log)
         self.serial = serial if serial is not None else SerialManager()
         self.kd = KdManager()
+        if capture is None:
+            from ..capture import VMConnectCapture
+            capture = VMConnectCapture()
+        self.capture = capture
+
+    def event_snapshot(self, after: int = 0) -> dict[str, Any]:
+        """The operation events this process has seen, which is the host's.
+
+        The server used to read its own bus; now that the service can live in
+        another process, the caller asks the owner instead of a copy that would
+        always be empty.
+        """
+        from ..events import EVENTS
+        return EVENTS.snapshot(after)
 
     def _vm(self, name: str) -> str:
         name = _text(name, "vm_name", 256)

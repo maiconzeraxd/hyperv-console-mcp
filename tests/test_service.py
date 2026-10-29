@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from hyperv_console_mcp.audit import AuditLogger
+from hyperv_console_mcp.capture import Screenshot
 from hyperv_console_mcp.config import Settings
 from hyperv_console_mcp.errors import (
     BackendError,
@@ -500,7 +501,7 @@ def test_the_thumbnail_screenshot_needs_no_vmconnect_window(
         "NORTH-Test", 2, 2, rgb565_pixels([(255, 0, 0)] * 4)
     )
 
-    shot = enabled.capture_screenshot(None, "NORTH-Test")
+    shot = enabled.capture_screenshot("NORTH-Test")
 
     assert shot.png.startswith(b"\x89PNG")
     assert shot.metadata["coordinates_match_mouse"] is True
@@ -517,16 +518,44 @@ def test_a_vm_without_a_video_head_is_reported_not_captured(
     }
 
     with pytest.raises(CaptureError, match="no video head"):
-        enabled.capture_screenshot(None, "NORTH-Test")
+        enabled.capture_screenshot("NORTH-Test")
 
     assert [call[0] for call in backend.calls] == ["console_info"]
+
+
+def test_the_service_owns_the_capture_object(backend: FakeBackend) -> None:
+    """A client cannot hand a live window handle across the pipe, so it does not try.
+
+    The desktop being captured is the host's, and the object that captures it is
+    built where the host runs rather than passed in per call.
+    """
+
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, int]] = []
+
+        def capture(self, vm_name: str, *, region: str, max_width: int) -> Screenshot:
+            self.calls.append((vm_name, region, max_width))
+            return Screenshot(b"fake png", {"vm": vm_name})
+
+    capture = FakeCapture()
+    service = HyperVService(
+        backend,
+        Settings(allowed_vms=frozenset({"NORTH-Test"}), allow_screenshots=True),
+        capture=capture,
+    )
+
+    shot = service.capture_screenshot("NORTH-Test", "vmconnect", "client", 1280)
+
+    assert shot == Screenshot(b"fake png", {"vm": "NORTH-Test"})
+    assert capture.calls == [("NORTH-Test", "client", 1280)]
 
 
 def test_an_unknown_screenshot_source_is_rejected_before_any_capture(
     enabled: HyperVService, backend: FakeBackend
 ) -> None:
     with pytest.raises(ValidationError, match="source"):
-        enabled.capture_screenshot(None, "NORTH-Test", "desktop")
+        enabled.capture_screenshot("NORTH-Test", "desktop")
 
     assert backend.calls == []
 

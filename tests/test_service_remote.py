@@ -94,6 +94,19 @@ def test_a_screenshot_survives_the_boundary() -> None:
     assert result == Screenshot(png=b"\x89PNG-bytes", metadata={"source": "thumbnail"})
 
 
+def test_the_event_snapshot_crosses_the_boundary() -> None:
+    """The bus belongs to whoever owns the service, so a client asks it.
+
+    A client reading its own bus would always get an empty snapshot once the
+    service moved to another process, and the activity page would go quiet.
+    """
+    from hyperv_console_mcp.events import EVENTS
+
+    snapshot = proxy().event_snapshot()
+    assert isinstance(snapshot["events"], list)
+    assert snapshot["latest_sequence"] == EVENTS.snapshot()["latest_sequence"]
+
+
 def test_an_error_keeps_its_code_and_fix() -> None:
     target = service(allow_guest=False, levels={VM.casefold(): "control"})
     with pytest.raises(PolicyError) as caught:

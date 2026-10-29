@@ -274,9 +274,14 @@ class ConsoleService(ServiceBase):
             )
 
     def capture_screenshot(
-        self, capture: Any, vm_name: str, source: str = "thumbnail",
+        self, vm_name: str, source: str = "thumbnail",
         region: str = "window", max_width: int = 1600,
     ) -> Any:
+        """The capture object lives here rather than with the caller.
+
+        A remote client cannot pass a live window handle over the service
+        boundary, and it should not: the desktop being captured is the host's.
+        """
         if source == "thumbnail":
             return self.capture_thumbnail(vm_name, max_width)
         if source != "vmconnect":
@@ -287,7 +292,7 @@ class ConsoleService(ServiceBase):
         with self._approve("console_screenshot", name, {"source": "vmconnect", "region": region}):
             return self._local_action(
                 "console_screenshot", name,
-                lambda: capture.capture(name, region=region, max_width=max_width),
+                lambda: self.capture.capture(name, region=region, max_width=max_width),
             )
 
     def console_wait_for_change(
