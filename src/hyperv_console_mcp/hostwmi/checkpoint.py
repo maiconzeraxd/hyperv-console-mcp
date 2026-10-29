@@ -25,6 +25,7 @@ from xml.sax.saxutils import escape
 
 from .connection import Connection, WmiFailure, wql_literal
 from .jobs import await_job
+from .timefmt import local_iso
 from .vm import find_vm
 
 _SNAPSHOT = "Microsoft:Hyper-V:Snapshot:Realized"
@@ -242,5 +243,4 @@ def _local_time(value: Any) -> str | None:
         tzinfo=timezone(timedelta(minutes=offset)),
     )
     local = moment.astimezone()
-    zone = local.strftime("%z")
-    return f"{local.strftime('%Y-%m-%dT%H:%M:%S')}.{local.microsecond:06d}0{zone[:3]}:{zone[3:]}"
+    return local_iso(local)
