@@ -21,6 +21,14 @@ MAX_PACKAGE_FILES = 512
 CHUNK_BYTES = 4 * 1024 * 1024
 GUEST_ROOT = r"C:\DriverLab"
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,63}")
+# Package paths must stay portable ASCII so the Python and PowerShell canonical
+# serializers can agree byte for byte.
+_PATH_SEGMENT = re.compile(r"[A-Za-z0-9._-]+")
+_RESERVED_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+})
 
 
 def identifier(value: str, label: str) -> str:
@@ -95,15 +103,16 @@ class DriverLabTransfer:
         text = relative.as_posix()
         if (
             not relative.parts or relative.is_absolute() or ".." in relative.parts
-            or any("\\" in part or ":" in part or not part for part in relative.parts)
-            or not text.isascii() or len(text) > 240
-            or any(ord(character) < 32 or character in '<>"|?*' for character in text)
-            or any(part.endswith((" ", ".")) or part.split(".", 1)[0].upper() in {
-                "CON", "PRN", "AUX", "NUL", *(f"COM{number}" for number in range(1, 10)),
-                *(f"LPT{number}" for number in range(1, 10)),
-            } for part in relative.parts)
+            or text != entry.get("path") or len(text) > 240
         ):
             raise ValidationError("The manifest contains an unsafe or non-portable relative path.")
+        for part in relative.parts:
+            if (
+                part in {".", ".."} or _PATH_SEGMENT.fullmatch(part) is None
+                or part.endswith(".")
+                or part.split(".", 1)[0].upper() in _RESERVED_NAMES
+            ):
+                raise ValidationError("The manifest contains an unsafe or non-portable relative path.")
         return text
 
     @staticmethod

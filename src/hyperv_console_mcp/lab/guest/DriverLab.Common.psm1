@@ -1,6 +1,9 @@
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+$script:LabReservedNames = @('CON', 'PRN', 'AUX', 'NUL') +
+    @(1..9 | ForEach-Object { "COM$_" }) + @(1..9 | ForEach-Object { "LPT$_" })
+
 function Assert-LabIdentifier {
     param([Parameter(Mandatory)][string]$Value, [Parameter(Mandatory)][string]$Name)
     if ($Value -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{0,63}$') { throw "$Name is invalid." }
@@ -20,12 +23,18 @@ function Assert-LabChild {
 }
 function Get-LabRelativePath {
     param([Parameter(Mandatory)][string]$Path)
-    if ([string]::IsNullOrWhiteSpace($Path) -or [IO.Path]::IsPathRooted($Path) -or $Path.Contains('\')) {
+    if ([string]::IsNullOrWhiteSpace($Path) -or [IO.Path]::IsPathRooted($Path) -or
+        $Path.Contains('\') -or $Path.Length -gt 240) {
         throw 'Manifest paths must be relative POSIX paths.'
     }
     $parts = @($Path.Split('/'))
     foreach ($part in $parts) {
-        if (-not $part -or $part -eq '.' -or $part -eq '..' -or $part.Contains(':')) { throw 'Unsafe manifest relative path.' }
+        # Same charset the host enforces: keeps every manifest path portable and ASCII.
+        if ($part -cnotmatch '^[A-Za-z0-9._-]+$') { throw 'Unsafe manifest relative path.' }
+        if ($part -ceq '.' -or $part -ceq '..' -or $part.EndsWith('.')) { throw 'Unsafe manifest relative path.' }
+        if ($script:LabReservedNames -contains $part.Split('.')[0].ToUpperInvariant()) {
+            throw 'Unsafe manifest relative path.'
+        }
     }
     return $parts
 }
@@ -38,15 +47,43 @@ function Get-LabFileHash {
         finally { $sha.Dispose() }
     } finally { $stream.Dispose() }
 }
+function ConvertTo-LabJsonString {
+    # Python's json.dumps(ensure_ascii=False) escapes only quote, backslash and control
+    # characters. ConvertTo-Json on PowerShell 5.1 also escapes & ' < > as & and
+    # friends, which would make the two canonical hashes differ.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+    $builder = [Text.StringBuilder]::new()
+    [void]$builder.Append('"')
+    foreach ($character in $Value.ToCharArray()) {
+        $code = [int]$character
+        switch ($code) {
+            0x22 { [void]$builder.Append('\"'); continue }
+            0x5C { [void]$builder.Append('\\'); continue }
+            0x08 { [void]$builder.Append('\b'); continue }
+            0x0C { [void]$builder.Append('\f'); continue }
+            0x0A { [void]$builder.Append('\n'); continue }
+            0x0D { [void]$builder.Append('\r'); continue }
+            0x09 { [void]$builder.Append('\t'); continue }
+            default {
+                if ($code -lt 0x20) { [void]$builder.Append('\u' + $code.ToString('x4')) }
+                else { [void]$builder.Append($character) }
+            }
+        }
+    }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
 function ConvertTo-LabCanonicalJson {
     param([Parameter(Mandatory)]$Value)
     if ($null -eq $Value) { return 'null' }
     if ($Value -is [bool]) { return $(if ($Value) { 'true' } else { 'false' }) }
-    if ($Value -is [string]) { return ConvertTo-Json -InputObject $Value -Compress }
+    if ($Value -is [string]) { return ConvertTo-LabJsonString -Value $Value }
     if ($Value -is [ValueType]) { return [Convert]::ToString($Value, [Globalization.CultureInfo]::InvariantCulture) }
     if ($Value -is [System.Collections.IDictionary]) {
-        $members = foreach ($key in @($Value.Keys) | Sort-Object) {
-            (ConvertTo-Json -InputObject ([string]$key) -Compress) + ':' + (ConvertTo-LabCanonicalJson -Value $Value[$key])
+        $keys = [string[]]@($Value.Keys)
+        [Array]::Sort($keys, [StringComparer]::Ordinal)
+        $members = foreach ($key in $keys) {
+            (ConvertTo-LabJsonString -Value $key) + ':' + (ConvertTo-LabCanonicalJson -Value $Value[$key])
         }
         return '{' + ($members -join ',') + '}'
     }
