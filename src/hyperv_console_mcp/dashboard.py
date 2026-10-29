@@ -15,7 +15,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
-from .backend import PowerShellBackend
+from .backend import GuestSplitBackend
 from .config import Settings
 from .errors import HyperVError
 from .events import EVENTS, EventLogReader, EventSink
@@ -134,7 +134,7 @@ class Dashboard(tk.Tk):
         super().__init__()
         self.vm_name = vm_name
         self.settings = Settings.from_env()
-        self.backend = EventSink(PowerShellBackend(), EVENTS)
+        self.backend = EventSink(GuestSplitBackend(), EVENTS)
         self.service = HyperVService(self.backend, self.settings)
         self.queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.pending: dict[str, queue.Queue[bool]] = {}

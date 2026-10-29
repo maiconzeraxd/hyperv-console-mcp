@@ -14,7 +14,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
 from . import __version__
-from .backend import PowerShellBackend
+from .backend import GuestSplitBackend
 from .capture import VMConnectCapture
 from .config import Settings
 from .errors import HyperVError
@@ -40,7 +40,7 @@ def create_server(
     service: HyperVService | None = None,
     capture: VMConnectCapture | None = None,
 ) -> MCPServer:
-    service = service or HyperVService(PowerShellBackend(), Settings.from_env())
+    service = service or HyperVService(GuestSplitBackend(), Settings.from_env())
     capture = capture or VMConnectCapture()
     mcp = MCPServer(
         name="hyperv-console-mcp",
@@ -510,7 +510,7 @@ def create_server(
 def main() -> None:
     logging.basicConfig(level=logging.INFO, stream=sys.stderr, format="%(levelname)s %(message)s")
     from .events import EVENTS, EventSink
-    backend = EventSink(PowerShellBackend(), EVENTS)
+    backend = EventSink(GuestSplitBackend(), EVENTS)
     create_server(HyperVService(backend, Settings.from_env())).run(transport="stdio")
 
 

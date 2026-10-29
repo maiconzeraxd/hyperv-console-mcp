@@ -27,6 +27,46 @@ class HyperVBackend:
         raise NotImplementedError
 
 
+# Every guest-side bridge operation shares this prefix; the host-side SSH
+# operations are named ssh_* and stay on the host worker.
+GUEST_PREFIX = "guest_"
+
+
+class GuestSplitBackend:
+    """Two workers, so a long guest command cannot block host and console calls.
+
+    Guest operations keep their own persistent worker and therefore their own
+    PowerShell Direct session per VM; everything else stays on the host worker.
+    Both workers start lazily, so a session that never touches the guest runs
+    exactly one process.
+    """
+
+    def __init__(
+        self,
+        host: HyperVBackend | None = None,
+        guest: HyperVBackend | None = None,
+        *,
+        script_path: Path | None = None,
+        executable: str = "powershell.exe",
+    ) -> None:
+        self.host = host if host is not None else PowerShellBackend(script_path, executable)
+        self.guest = guest if guest is not None else PowerShellBackend(script_path, executable)
+
+    def worker(self, operation: str) -> HyperVBackend:
+        return self.guest if operation.startswith(GUEST_PREFIX) else self.host
+
+    def invoke(
+        self, operation: str, payload: Mapping[str, Any], *, timeout: float | None = None
+    ) -> dict[str, Any]:
+        return self.worker(operation).invoke(operation, payload, timeout=timeout)
+
+    def close(self) -> None:
+        for worker in (self.host, self.guest):
+            close = getattr(worker, "close", None)
+            if callable(close):
+                close()
+
+
 class PowerShellBackend:
     """Reuses one finite, non-interactive PowerShell worker for low latency."""
 

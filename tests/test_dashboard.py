@@ -31,7 +31,7 @@ class UiBackend:
 
 def test_dashboard_pages_render_with_fake_backend(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERV_MCP_EVENT_DIRECTORY", str(tmp_path / "events"))
-    monkeypatch.setattr("hyperv_console_mcp.dashboard.PowerShellBackend", UiBackend)
+    monkeypatch.setattr("hyperv_console_mcp.dashboard.GuestSplitBackend", UiBackend)
     try:
         app = Dashboard("NORTH-Test")
     except Exception as exc:
