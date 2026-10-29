@@ -48,7 +48,7 @@ def await_job(
     if code == COMPLETED:
         return
     if code != JOB_STARTED:
-        raise _failure(code)
+        raise failure(code)
     path = str(response.get("Job") or "")
     if not path:
         raise WmiFailure("The provider reported a running job but named none.")
@@ -68,7 +68,8 @@ def await_job(
         time.sleep(JOB_POLL_SECONDS)
 
 
-def _failure(code: int) -> WmiFailure:
+def failure(code: int) -> WmiFailure:
+    """The provider's refusal code as the error it names."""
     known = RETURN_CODES.get(code)
     if known is None:
         return WmiFailure(f"The provider refused the operation with code {code}.")

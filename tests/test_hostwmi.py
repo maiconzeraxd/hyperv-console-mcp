@@ -107,9 +107,10 @@ def test_a_migrated_operation_reaches_the_handler() -> None:
 def test_an_unmigrated_operation_is_refused_as_unsupported() -> None:
     backend = WmiBackend(connect=lambda: _connection())
     with pytest.raises(BackendError) as caught:
-        # The PowerShell job registry has no CIM equivalent, so this operation
-        # stays on the worker for good — a stable example of "not migrated".
-        backend.invoke("operation_status", {"operation_id": "0" * 32})
+        # Guest work is not CIM at all — it runs inside the guest over PowerShell
+        # Direct or SSH — so it stays on the worker for good, which makes it a
+        # stable example of "not migrated".
+        backend.invoke("guest_exec", {"vm": "NORTH-Test", "command": "whoami"})
     assert caught.value.code == "wmi_unsupported"
 
 
@@ -119,7 +120,7 @@ def test_constructing_the_backend_never_touches_com() -> None:
 
     backend = WmiBackend(connect=explode)
     with pytest.raises(BackendError) as caught:
-        backend.invoke("operation_status", {})
+        backend.invoke("guest_exec", {"vm": "NORTH-Test", "command": "whoami"})
     assert caught.value.code == "wmi_unsupported"
 
 

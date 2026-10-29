@@ -807,3 +807,44 @@ came back with their `record_id`, their local `time` with seven fractional digit
 parser are exercised against real XML. **Not validated live: a real bugcheck.** No guest has
 crashed on this host in the window, so the code and parameter fields have only unit tests;
 producing one would mean crashing `NORTH-Test`, which is a deliberate operator decision.
+
+### 2026-10-29 — v0.3 phase 4: a shutdown and a save that outlive the call
+
+These are the two power actions a single call cannot finish, so they were the last two on the
+bridge. They are now started from WMI and reported by `operation_status`, which is the same
+two-call contract the bridge has.
+
+- **A graceful shutdown is the shutdown component, not a state change.** `RequestStateChange`
+  carries 4 ("Shut Down") in its `ValueMap`, but the method's documentation says that value is
+  valid in Hyper-V V1 only. The V2 path is
+  `Msvm_ShutdownComponent.InitiateShutdown(Force, Reason)`, found by `SystemName` — the VM's
+  own id — because the component's `Name` is localized ("Desligamento" on this host).
+- **Saving state is `RequestedState` 6, not the value the documentation names.** The page
+  calls 32773 "Saving"; this host refuses it with 32775, and so it refuses 32774, 32776, 32777,
+  32778 and 32780. Fast save (32779) is refused with a localized "não há suporte para o
+  pedido" (0x80070032). **6 — CIM's "Offline" — is what saves the VM**, and the `EnabledState`
+  afterwards is 6 (Saved) as well. Probed value by value on the live host.
+- **The status is read when it is asked for, not remembered.** The bridge keeps a PowerShell
+  job; here the operation keeps the object that carries it — the provider's job for a save,
+  the VM's id for a shutdown — and `operation_status` reads it at that moment. No watcher
+  thread, so nothing runs while the server is idle.
+- **A settled operation stays settled.** Once the VM has reached the target the answer is
+  latched, so starting the VM again afterwards does not turn a completed shutdown back into a
+  running one.
+- **A shutdown that never arrives is a failure, not a hang.** There is no job to fail, so the
+  entry carries a 1800 s deadline; past it the status is `failed` with the state the VM was
+  found in, which is what a guest ignoring the request would otherwise hide.
+- **The registry is bounded at 50**, dropping finished entries before live ones, as the bridge
+  does.
+
+Live validation (elevated, `NORTH-Test`, running): `save` through WMI and through the bridge
+were compared as whole dictionaries — the `vm_power` answers have the **same keys** and the
+`operation_status` answers are **identical**; both ended `completed`/`succeeded: true` with the
+VM `Saved`. `shutdown` through WMI ended `completed` with the VM `Off`. The VM was started
+again after each and left Running. **One difference, deliberate:** the bridge's `vm` snapshot
+in its `vm_power` answer reports the state *after* the transition started (`Saved`, in the run
+above) because it converts the object once the job is running; this reports the state the call
+found (`Running`), which is deterministic instead of a race.
+
+Not validated live: the deadline path and the "VM is not Running" refusal, which are unit
+tests.

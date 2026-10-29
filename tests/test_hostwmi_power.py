@@ -14,10 +14,12 @@ import pytest
 from hyperv_console_mcp.hostwmi import WmiBackend
 from hyperv_console_mcp.hostwmi.connection import WmiFailure
 from hyperv_console_mcp.hostwmi.jobs import JOB_FAILURES, RETURN_CODES, await_job
-from hyperv_console_mcp.hostwmi.power import REQUESTED_STATES, vm_power
+from hyperv_console_mcp.hostwmi.power import REQUESTED_STATES, SHUTDOWN_REASON, vm_power
 
 VM_ID = "D5AD7D1D-5CB3-441F-A9D7-138640C8F61A"
+VM_PATH = f'\\\\HOST\\root\\virtualization\\v2:Msvm_ComputerSystem.Name="{VM_ID}"'
 JOB_PATH = f'\\\\HOST\\root\\virtualization\\v2:Msvm_ConcreteJob.InstanceID="{VM_ID}"'
+COMPONENT_PATH = f'\\\\HOST\\root\\virtualization\\v2:Msvm_ShutdownComponent.InstanceID="{VM_ID}\\\\1"'
 
 
 class FakeConnection:
@@ -37,8 +39,10 @@ class FakeConnection:
         self.enabled_state = enabled_state
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.gets: list[str] = []
+        self.queries: list[str] = []
 
     def query(self, wql: str, *, namespace: str = "") -> list[dict[str, Any]]:
+        self.queries.append(wql)
         if "FROM Msvm_ComputerSystem" in wql:
             return [
                 {
@@ -71,8 +75,25 @@ class FakeConnection:
         return {"JobState": state, "ErrorDescription": self.description}
 
     def call(self, path: str, method: str, **parameters: Any) -> dict[str, Any]:
-        self.calls.append((method, parameters))
+        self.calls.append((path, method, parameters))
         return self.response
+
+
+class BackgroundConnection(FakeConnection):
+    """The VM plus the shutdown component a graceful stop is asked through."""
+
+    def __init__(self, *, component: bool = True, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.component = component
+
+    def query(self, wql: str, *, namespace: str = "") -> list[dict[str, Any]]:
+        if "FROM Msvm_ShutdownComponent" in wql:
+            self.queries.append(wql)
+            if not self.component:
+                return []
+            # Name is the localized label; SystemName is the VM's id.
+            return [{"Name": "Desligamento", "SystemName": VM_ID, "__PATH": COMPONENT_PATH}]
+        return super().query(wql, namespace=namespace)
 
 
 @pytest.mark.parametrize(
@@ -82,7 +103,7 @@ class FakeConnection:
 def test_each_action_asks_for_its_documented_state(action: str, requested: int) -> None:
     connection = FakeConnection()
     vm_power(connection, {"vm": "NORTH-Test", "action": action})
-    assert connection.calls == [("RequestStateChange", {"RequestedState": requested})]
+    assert connection.calls == [(VM_PATH, "RequestStateChange", {"RequestedState": requested})]
 
 
 def test_resume_asks_for_enabled_not_for_resuming() -> None:
@@ -161,12 +182,60 @@ def test_a_running_job_that_names_no_path_is_an_error() -> None:
 
 
 @pytest.mark.parametrize("action", ["shutdown", "save"])
-def test_background_actions_stay_on_the_bridge(action: str) -> None:
-    connection = FakeConnection()
+def test_a_stopped_vm_is_refused_before_a_background_action(action: str) -> None:
+    connection = BackgroundConnection(enabled_state=3)
     with pytest.raises(WmiFailure) as caught:
         vm_power(connection, {"vm": "NORTH-Test", "action": action})
-    assert caught.value.code == "wmi_unsupported"
+    assert caught.value.code == "invalid_state"
     assert connection.calls == []
+
+
+def test_a_shutdown_asks_the_shutdown_component() -> None:
+    """RequestedState 4 is V1-only, so the component is the V2 path."""
+    connection = BackgroundConnection()
+    result = vm_power(connection, {"vm": "NORTH-Test", "action": "shutdown"})
+    assert connection.calls == [
+        (COMPONENT_PATH, "InitiateShutdown", {"Force": False, "Reason": SHUTDOWN_REASON})
+    ]
+    assert result["accepted"] is True
+    assert result["action"] == "shutdown"
+    assert result["state"] == "running"
+    assert len(result["operation_id"]) == 32
+    assert result["vm"]["state"] == "Running"
+
+
+def test_the_shutdown_component_is_found_by_the_vm_id_not_its_name() -> None:
+    """Its Name is localized — "Desligamento" on this host."""
+    connection = BackgroundConnection()
+    vm_power(connection, {"vm": "NORTH-Test", "action": "shutdown"})
+    assert any(
+        "FROM Msvm_ShutdownComponent WHERE SystemName = " in wql for wql in connection.queries
+    )
+
+
+def test_a_vm_without_a_shutdown_component_is_refused() -> None:
+    connection = BackgroundConnection(component=False)
+    with pytest.raises(WmiFailure) as caught:
+        vm_power(connection, {"vm": "NORTH-Test", "action": "shutdown"})
+    assert caught.value.code == "not_found"
+    assert connection.calls == []
+
+
+def test_a_save_asks_for_the_saving_state() -> None:
+    """6 is CIM's "Offline"; Hyper-V reads it as Saved, and the VM ends in 6."""
+    connection = BackgroundConnection(response={"ReturnValue": 4096, "Job": JOB_PATH})
+    result = vm_power(connection, {"vm": "NORTH-Test", "action": "save"})
+    assert connection.calls == [(VM_PATH, "RequestStateChange", {"RequestedState": 6})]
+    assert result["accepted"] is True
+    assert result["action"] == "save"
+
+
+@pytest.mark.parametrize("action", ["shutdown", "save"])
+def test_a_refused_background_action_keeps_its_code(action: str) -> None:
+    connection = BackgroundConnection(response={"ReturnValue": 32775})
+    with pytest.raises(WmiFailure) as caught:
+        vm_power(connection, {"vm": "NORTH-Test", "action": action})
+    assert caught.value.code == "invalid_state"
 
 
 def test_an_unknown_action_is_refused_before_any_call() -> None:
