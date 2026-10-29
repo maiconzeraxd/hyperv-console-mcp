@@ -23,6 +23,9 @@ dependencies = ["mcp>=2.3,<3", "Pillow>=10,<13"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "build>=1.2,<2", "ruff==0.17.3"]
+# Optional guest transport. paramiko is imported lazily, so `auto`/`psdirect`
+# users never need it installed.
+ssh = ["paramiko>=3.4,<4"]
 
 [project.scripts]
 hyperv-console-mcp = "hyperv_console_mcp.server:main"
@@ -36,7 +39,7 @@ version = { attr = "hyperv_console_mcp.__version__" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-hyperv_console_mcp = ["bridge/*.ps1", "lab/guest/*.ps1", "lab/guest/*.psm1"]
+hyperv_console_mcp = ["bridge/*.ps1", "lab/guest/*.ps1", "lab/guest/*.psm1", "transport/*.ps1"]
 
 [tool.ruff]
 src = ["src"]

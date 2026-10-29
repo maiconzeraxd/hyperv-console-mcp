@@ -92,13 +92,15 @@ def test_auto_and_explicit_psdirect_both_select_power_shell_direct(backend: Fake
 
 
 def test_an_explicit_ssh_choice_never_falls_back_silently(backend: FakeBackend) -> None:
-    with pytest.raises(PolicyError, match="SSH transport is configured but not available"):
+    with pytest.raises(PolicyError, match="guest_ssh_provision"):
         select_transport(settings(guest_transport="ssh"), backend, "NORTH-Test")
 
 
 def test_a_per_vm_override_wins_over_the_default(backend: FakeBackend) -> None:
+    # The override selects SSH for that VM only, so it demands provisioning
+    # instead of quietly using the default transport.
     overrides = {"north-test": "ssh"}
-    with pytest.raises(PolicyError, match="not available in this build"):
+    with pytest.raises(PolicyError, match="not provisioned"):
         select_transport(
             settings(guest_transport="auto", guest_transport_overrides=overrides),
             backend,

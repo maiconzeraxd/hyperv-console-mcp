@@ -80,6 +80,7 @@ class Settings:
     serial_log_root: Path = field(default_factory=lambda: _local_root("serial"))
     iso_root: Path = field(default_factory=lambda: _local_root("media"))
     transfer_root: Path = field(default_factory=lambda: _local_root("transfers"))
+    ssh_root: Path = field(default_factory=lambda: _local_root("ssh"))
     lab_root: Path = field(default_factory=lambda: _local_root("lab") / "packages")
     evidence_root: Path = field(default_factory=lambda: _local_root("evidence"))
     event_directory: Path = field(default_factory=lambda: _local_root("events"))
@@ -127,6 +128,7 @@ class Settings:
             transfer_root=_absolute_path(
                 env, "HYPERV_MCP_TRANSFER_ROOT", _local_root("transfers", env)
             ),
+            ssh_root=_absolute_path(env, "HYPERV_MCP_SSH_ROOT", _local_root("ssh", env)),
             lab_root=_absolute_path(
                 env, "HYPERV_MCP_LAB_ROOT", _local_root("lab", env) / "packages"
             ),
