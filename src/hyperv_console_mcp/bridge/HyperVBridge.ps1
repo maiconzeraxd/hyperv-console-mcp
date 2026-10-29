@@ -1242,6 +1242,23 @@ function Invoke-BridgeOperation {
                         $sent = Send-KeyChord -Keyboard $keyboard -Keys @($action.keys | ForEach-Object { [string]$_ })
                         $entry = @{ keys_sent = $sent; completed = $true }
                     }
+                    'key_state' {
+                        if ($null -eq $keyboard) { $keyboard = Get-InputDevice -Vm $vm -ClassName 'Msvm_Keyboard' }
+                        $arguments = @{ KeyCode = Convert-KeyName -Name ([string]$action.key) }
+                        $method = if ([bool]$action.down) { 'PressKey' } else { 'ReleaseKey' }
+                        Invoke-InputMethod -Device $keyboard -Method $method -Arguments $arguments
+                        $entry = @{ key = [string]$action.key; down = [bool]$action.down; completed = $true }
+                    }
+                    'mouse_buttons' {
+                        if ($null -eq $mouse) { $mouse = Get-InputDevice -Vm $vm -ClassName 'Msvm_SyntheticMouse' }
+                        $states = @([bool]$action.left, [bool]$action.right, [bool]$action.middle)
+                        for ($button = 0; $button -lt $states.Count; $button++) {
+                            Invoke-InputMethod -Device $mouse -Method 'SetButtonState' -Arguments @{
+                                ButtonIndex = [uint32]($button + 1); ButtonState = [uint32]$states[$button]
+                            }
+                        }
+                        $entry = @{ left = $states[0]; right = $states[1]; middle = $states[2]; completed = $true }
+                    }
                     'ctrl_alt_delete' {
                         if ($null -eq $keyboard) { $keyboard = Get-InputDevice -Vm $vm -ClassName 'Msvm_Keyboard' }
                         Invoke-InputMethod -Device $keyboard -Method 'TypeCtrlAltDel'

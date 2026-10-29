@@ -889,3 +889,55 @@ function Get-VMFirmware {
 """
     result = invoke_with_mocks(tmp_path, mocks, "vm_firmware", {"vm": "NORTH-Test"})
     assert result["preferred_boot_device"] == "Drive:0"
+
+
+def test_console_batch_carries_key_and_button_actions(tmp_path: Path) -> None:
+    """The consolidated console tool sends key_state and mouse_buttons in one batch.
+
+    Those two actions used to be their own bridge operations. Now that one
+    ``console_input`` tool carries every action, they have to reach the same WMI
+    methods from inside the ordered batch.
+    """
+    log = tmp_path / "input.log"
+    mocks = """
+function Get-VM {
+    param($Name)
+    [pscustomobject]@{
+        Name = 'NORTH-Test'; State = 'Running'; Generation = 2
+        Id = [guid]'11111111-2222-3333-4444-555555555555'
+    }
+}
+function Get-CimInstance {
+    param($Namespace, $ClassName, $Filter)
+    [pscustomobject]@{ ClassName = $ClassName }
+}
+function Get-CimAssociatedInstance {
+    param($InputObject, $Association, $ResultClassName)
+    [pscustomobject]@{ ClassName = $ResultClassName; Id = $ResultClassName }
+}
+function Invoke-CimMethod {
+    param($InputObject, $MethodName, $Arguments)
+    $pairs = $Arguments.GetEnumerator() | Sort-Object Key |
+        ForEach-Object { "$($_.Key)=$($_.Value)" }
+    Add-Content -LiteralPath '<log>' -Value (
+        "$($InputObject.ClassName) $MethodName " + ($pairs -join ',')
+    )
+    [pscustomobject]@{ ReturnValue = 0 }
+}
+""".replace("<log>", str(log).replace("'", "''"))
+    result = invoke_with_mocks(tmp_path, mocks, "console_batch", {
+        "vm": "NORTH-Test",
+        "actions": [
+            {"type": "key_state", "key": "shift", "down": True},
+            {"type": "mouse_buttons", "left": True, "right": False, "middle": True},
+            {"type": "key_state", "key": "shift", "down": False},
+        ],
+    })
+    assert result["actions_completed"] == 3
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "Msvm_Keyboard PressKey KeyCode=16",
+        "Msvm_SyntheticMouse SetButtonState ButtonIndex=1,ButtonState=1",
+        "Msvm_SyntheticMouse SetButtonState ButtonIndex=2,ButtonState=0",
+        "Msvm_SyntheticMouse SetButtonState ButtonIndex=3,ButtonState=1",
+        "Msvm_Keyboard ReleaseKey KeyCode=16",
+    ]
