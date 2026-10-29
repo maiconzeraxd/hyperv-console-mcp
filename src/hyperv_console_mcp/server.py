@@ -550,6 +550,27 @@ def create_server(
         )
 
     @tool(
+        "lab_driver_service", annotations=MUTATION,
+        description="Install, start, stop or remove a test kernel-driver service in the guest, or read "
+        "the services this tool installed. image_path must be a .sys file already staged under "
+        r"C:\DriverLab" "; start_type is demand, system, boot or auto. Signature enforcement is never "
+        "bypassed: a driver the guest refuses is reported with its Win32 error and NTSTATUS. Reading "
+        "the state needs no confirmation; the other actions require confirm_vm.",
+    )
+    async def lab_driver_service(
+        vm_name: str,
+        action: Literal["install", "start", "stop", "remove", "status"],
+        service_name: str = "",
+        confirm_vm: str = "",
+        image_path: str = "",
+        start_type: Literal["demand", "system", "boot", "auto"] = "demand",
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.lab_driver_service, vm_name, action, service_name, confirm_vm,
+            image_path, start_type,
+        )
+
+    @tool(
         "lab_guest_configure", annotations=MUTATION,
         description="Prepare the guest for driver work: test signing, kernel debugging, crash dump mode and HVCI/VBS off, each recorded in guest-config.json and revertible with guest_config_revert. Toggles are tri-state. Secure Boot is checked first; secure_boot_off=true only works while the VM is Off. Requires confirm_vm.",
     )

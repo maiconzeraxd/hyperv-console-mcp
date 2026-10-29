@@ -36,7 +36,7 @@ GATED_TOOLS = frozenset({
     "guest_ssh_provision", "guest_ssh_deprovision",
     "guest_credential", "guest_autologon_configure", "guest_config_revert",
     "lab_init", "lab_stage", "lab_collect", "lab_run", "lab_cycle",
-    "lab_guest_configure", "lab_verifier",
+    "lab_guest_configure", "lab_verifier", "lab_driver_service",
     "vm_inject_nmi",
     "console_input",
     "media_mount", "media_eject",

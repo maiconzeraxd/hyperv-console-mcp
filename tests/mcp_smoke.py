@@ -21,7 +21,7 @@ from mcp.client.stdio import stdio_client
 # tool table in README.md and with tests/test_server.py.
 CONFIGURATIONS = (
     ("safe", {}, 29),
-    ("all toolsets", {"HYPERV_MCP_TOOLSETS": "all"}, 54),
+    ("all toolsets", {"HYPERV_MCP_TOOLSETS": "all"}, 55),
 )
 
 

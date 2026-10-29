@@ -168,6 +168,38 @@ class LabService(ServiceBase):
         with self._approve("lab_verifier", name, summary):
             return guest_verifier.apply(self, name, action, drivers=names, flags=mask)
 
+    def lab_driver_service(
+        self,
+        vm_name: str,
+        action: str,
+        service_name: str,
+        confirm_vm: str,
+        image_path: str = "",
+        start_type: str = "demand",
+    ) -> dict[str, Any]:
+        """Install, start, stop or remove a test kernel-driver service.
+
+        The image must already be staged under the guest's lab root, and nothing
+        here bypasses signature enforcement: a driver the guest refuses to load
+        is reported with the code it was refused with. Reading the state needs
+        no confirmation; every other action needs ``confirm_vm``.
+        """
+        from ..transport import guest_driver_service
+        name = self._guest_vm(vm_name)
+        # Validate before the approval card is drawn, so the summary is exactly
+        # what the guest will be told.
+        options = guest_driver_service.request(action, service_name, image_path, start_type)
+        if action == "status":
+            return guest_driver_service.apply(self, name, **options)
+        self._confirm(confirm_vm, name, "confirm_vm")
+        with self._approve("lab_driver_service", name, {
+            **options,
+            "image_root": guest_driver_service.IMAGE_ROOT,
+            "state_file": guest_driver_service.GUEST_STATE_PATH,
+            "bypasses_signature_enforcement": False,
+        }):
+            return guest_driver_service.apply(self, name, **options)
+
     def lab_guest_configure(
         self,
         vm_name: str,
