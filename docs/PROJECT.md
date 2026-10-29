@@ -768,3 +768,42 @@ names the caller asked for, and parent ids chained one to the other — the fiel
 (`id`, `creation_time`, `parent_snapshot_id`) are the ones that must. Both were destroyed
 afterwards and the VM's count returned to the 12 it started with. Not validated live: the
 refusal paths, which are unit tests.
+
+### 2026-10-29 — v0.3 phase 4: the crash record, read from the event log
+
+This is the one operation in the package that is not WMI: Hyper-V's own record of a guest
+crash lives in the `Microsoft-Windows-Hyper-V-Worker-Admin` channel, and pywin32's event-log
+API reads it without a PowerShell round trip and without parsing translated text.
+
+- **Event 18590, seven named fields.** The template on this host was read off the provider
+  (`Get-WinEvent -ListProvider 'Microsoft-Windows-Hyper-V-Worker'`, 786 events) rather than
+  assumed: `VmName`, `VmId`, `VmErrorCode0` … `VmErrorCode4`, all `win:HexInt64`. The bridge
+  reads the same seven by *position*; this reads them by *name*, which makes a reordered
+  template a non-event.
+- **The channel renders these events as `<UserData>`, not `<EventData>`.** That was the one
+  surprise: `Get-WinEvent -ListProvider` shows a `<data name="VmName"/>` template for 18500
+  as well, yet the event as the channel stores it is
+  `<UserData><VmlEventLog><VmName>NORTH-Test</VmName>…`. A reader that only knew
+  `<Data Name="...">` would have answered an empty payload for every real event on this host.
+  Both renderings are read; the real 18500 XML is a fixture in the tests.
+- **The window is XPath, not `Get-Date`.** `TimeCreated[timediff(@SystemTime) <= N]` is what
+  `Get-WinEvent -FilterHashtable -StartTime` becomes, and it keeps the query free of a
+  formatted local date.
+- **A host without the channel answers no events**, as the bridge does — the guest-side
+  event 1001 fallback still runs.
+- **The stamp keeps all seven fractional digits.** `ToString('o')` prints .NET's 100 ns unit
+  as the seventh; `datetime` stops at six, so `timefmt.local_iso` grew a `tick` argument and
+  the digit is carried through instead of being padded with a zero.
+- **The VM is matched by `ElementName`.** On the CIM side `Name` is the VM's GUID and the
+  event carries the friendly name; `find_vm` matches the friendly one and the event is
+  filtered against it.
+
+Live validation (elevated, `NORTH-Test`): the WMI and the bridge answers for
+`host_crash_events` were compared as whole dictionaries over a 720-hour window and were
+**equal** — both empty, because this host has no 18590 in 90 days. The reader itself was then
+run over real events of the same channel (id 18500, the id swapped in the probe): five events
+came back with their `record_id`, their local `time` with seven fractional digits and the
+`-03:00` offset, and the VM's `vm_name` and `vm_id` — so the query, the rendering and the
+parser are exercised against real XML. **Not validated live: a real bugcheck.** No guest has
+crashed on this host in the window, so the code and parameter fields have only unit tests;
+producing one would mean crashing `NORTH-Test`, which is a deliberate operator decision.
