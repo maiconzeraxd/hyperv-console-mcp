@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import os
 import re
 import time
 import uuid
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -18,6 +20,19 @@ from .errors import HyperVError, PolicyError, ValidationError
 from .serial import SerialManager
 
 MAX_GUEST_FILE_BYTES = 8 * 1024 * 1024
+COMMAND_PREVIEW_LINES = 20
+# Every MCP tool annotated MUTATION must request approval here, once per call.
+GATED_TOOLS = frozenset({
+    "vm_power", "checkpoint_create", "checkpoint_restore", "checkpoint_delete",
+    "guest_exec", "guest_write_file",
+    "lab_init", "lab_stage", "lab_collect",
+    "console_type_text", "console_press_keys", "console_key_state",
+    "console_mouse_buttons", "console_batch", "console_ctrl_alt_delete",
+    "console_mouse_move", "console_click", "console_scroll",
+    "media_mount", "media_eject",
+    "serial_connect", "serial_send", "serial_disconnect",
+    "debug_serial_prepare", "debug_guest_prepare",
+})
 KEY_NAMES = frozenset(
     {
         "ctrl", "shift", "alt", "win", "enter", "escape", "tab", "space",
@@ -64,6 +79,17 @@ def _confined_path(value: str, label: str, root: Path, suffix: str) -> str:
     if full == base or not full.is_relative_to(base):
         raise PolicyError(f"{label} must remain under the configured root: {base}")
     return str(full)
+
+
+def _command_summary(command: str) -> dict[str, Any]:
+    """Informed, secret-free preview of a guest command for the approval dialog."""
+    lines = command.splitlines() or [""]
+    return {
+        "command_preview": "\n".join(lines[:COMMAND_PREVIEW_LINES]),
+        "command_lines": len(lines),
+        "command_truncated": len(lines) > COMMAND_PREVIEW_LINES,
+        "command_sha256": hashlib.sha256(command.encode("utf-8")).hexdigest(),
+    }
 
 
 class HyperVService:
@@ -122,6 +148,13 @@ class HyperVService:
         if audit:
             self.audit.record(operation, vm_name, "success")
         return result
+
+    def _approve(
+        self, operation: str, vm_name: str, summary: dict[str, Any] | None = None
+    ) -> AbstractContextManager[None]:
+        """One dashboard approval per tool call; nested mutations inherit it."""
+        from .events import approval_scope
+        return approval_scope(operation, vm_name, summary)
 
     def _local_action(
         self, operation: str, vm_name: str, action: Callable[[], T]
@@ -215,9 +248,12 @@ class HyperVService:
             )
         if action in {"turn_off", "reset"}:
             self._confirm(confirm_vm or "", name, "confirm_vm")
-        return self._run(
-            f"vm_power.{action}", "vm_power", {"vm": name, "action": action}, vm_name=name
-        )
+        with self._approve("vm_power", name, {
+            "action": action, "forced": action in {"turn_off", "reset"},
+        }):
+            return self._run(
+                f"vm_power.{action}", "vm_power", {"vm": name, "action": action}, vm_name=name
+            )
 
     def operation_status(self, operation_id: str) -> dict[str, Any]:
         """Track a background power operation started by shutdown or save."""
@@ -239,10 +275,11 @@ class HyperVService:
             vm_name, self.settings.allow_checkpoints, "HYPERV_MCP_ALLOW_CHECKPOINTS"
         )
         checkpoint_name = _text(name, "name", 128)
-        return self._run(
-            "checkpoint_create", "checkpoint_create",
-            {"vm": vm, "name": checkpoint_name}, vm_name=vm,
-        )
+        with self._approve("checkpoint_create", vm, {"checkpoint_name": checkpoint_name}):
+            return self._run(
+                "checkpoint_create", "checkpoint_create",
+                {"vm": vm, "name": checkpoint_name}, vm_name=vm,
+            )
 
     @staticmethod
     def _snapshot_id(snapshot_id: str) -> str:
@@ -262,10 +299,11 @@ class HyperVService:
         snapshot = self._snapshot_id(snapshot_id)
         self._confirm(confirm_vm, vm, "confirm_vm")
         self._confirm(confirm_snapshot_id, snapshot, "confirm_snapshot_id")
-        return self._run(
-            "checkpoint_restore", "checkpoint_restore",
-            {"vm": vm, "snapshot_id": snapshot}, vm_name=vm,
-        )
+        with self._approve("checkpoint_restore", vm, {"snapshot_id": snapshot}):
+            return self._run(
+                "checkpoint_restore", "checkpoint_restore",
+                {"vm": vm, "snapshot_id": snapshot}, vm_name=vm,
+            )
 
     def delete_checkpoint(
         self, vm_name: str, snapshot_id: str, confirm_vm: str, confirm_snapshot_id: str
@@ -276,10 +314,11 @@ class HyperVService:
         snapshot = self._snapshot_id(snapshot_id)
         self._confirm(confirm_vm, vm, "confirm_vm")
         self._confirm(confirm_snapshot_id, snapshot, "confirm_snapshot_id")
-        return self._run(
-            "checkpoint_delete", "checkpoint_delete",
-            {"vm": vm, "snapshot_id": snapshot}, vm_name=vm,
-        )
+        with self._approve("checkpoint_delete", vm, {"snapshot_id": snapshot}):
+            return self._run(
+                "checkpoint_delete", "checkpoint_delete",
+                {"vm": vm, "snapshot_id": snapshot}, vm_name=vm,
+            )
 
     def _guest(self, vm_name: str) -> dict[str, str]:
         vm = self._write(vm_name, self.settings.allow_guest, "HYPERV_MCP_ALLOW_GUEST")
@@ -298,7 +337,8 @@ class HyperVService:
         payload = self._guest(vm_name)
         payload["command"] = _text(command, "command", 131_072)
         payload["max_output_chars"] = self.settings.max_output_chars
-        return self._run("guest_exec", "guest_exec", payload, vm_name=vm_name)
+        with self._approve("guest_exec", payload["vm"], _command_summary(payload["command"])):
+            return self._run("guest_exec", "guest_exec", payload, vm_name=payload["vm"])
 
     def guest_status(self, vm_name: str) -> dict[str, Any]:
         return self._run(
@@ -432,13 +472,19 @@ class HyperVService:
             overwrite=overwrite,
             create_parent=create_parent,
         )
-        return self._run("guest_write_file", "guest_write_file", payload, vm_name=vm_name)
+        summary = {
+            "path": path, "bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(), "overwrite": overwrite,
+        }
+        with self._approve("guest_write_file", payload["vm"], summary):
+            return self._run("guest_write_file", "guest_write_file", payload, vm_name=payload["vm"])
 
     def lab_init(self, vm_name: str, confirm_vm: str) -> dict[str, Any]:
         from .lab.cli import initialize
         name = self._guest(vm_name)["vm"]
         self._confirm(confirm_vm, name, "confirm_vm")
-        return initialize(self, name)
+        with self._approve("lab_init", name, {"guest_root": r"C:\DriverLab", "installs_tools": True}):
+            return initialize(self, name)
 
     def lab_diagnostics(self, vm_name: str) -> dict[str, Any]:
         from .lab.cli import diagnostics
@@ -447,8 +493,8 @@ class HyperVService:
     def lab_stage(self, vm_name: str, source_directory: str, package_id: str | None = None) -> dict[str, Any]:
         from pathlib import Path
 
-        from .lab.transfer import DriverLabTransfer, build_manifest
-        self._guest(vm_name)
+        from .lab.transfer import DriverLabTransfer, build_manifest, manifest_hash
+        name = self._guest(vm_name)["vm"]
         root = self.settings.lab_root.expanduser().resolve()
         source = Path(os.path.abspath(os.path.expandvars(os.path.expanduser(
             _text(source_directory, "source_directory", 32_768)
@@ -458,7 +504,15 @@ class HyperVService:
                 f"The lab source must be a subdirectory of HYPERV_MCP_LAB_ROOT ({root})."
             )
         manifest = build_manifest(source, package_id)
-        return DriverLabTransfer(self).stage(vm_name, source, manifest)
+        summary = {
+            "package_id": manifest["package_id"],
+            "source": str(source),
+            "files": len(manifest["files"]),
+            "bytes": sum(int(entry["size"]) for entry in manifest["files"]),
+            "manifest_sha256": manifest_hash(manifest),
+        }
+        with self._approve("lab_stage", name, summary):
+            return DriverLabTransfer(self).stage(name, source, manifest)
 
     def lab_verify(self, vm_name: str, package_id: str, expected_manifest_sha256: str) -> dict[str, Any]:
         from .lab.transfer import DriverLabTransfer
@@ -469,10 +523,16 @@ class HyperVService:
         include_kernel_dump: bool = False,
     ) -> dict[str, Any]:
         from .lab.transfer import DriverLabTransfer
+        name = self._guest(vm_name)["vm"]
         output = self.settings.evidence_root.expanduser().resolve()
-        return DriverLabTransfer(self).collect(
-            vm_name, package_id, run_id, output, include_kernel_dump=include_kernel_dump,
-        )
+        summary = {
+            "package_id": package_id, "run_id": run_id,
+            "output_root": str(output), "include_kernel_dump": bool(include_kernel_dump),
+        }
+        with self._approve("lab_collect", name, summary):
+            return DriverLabTransfer(self).collect(
+                name, package_id, run_id, output, include_kernel_dump=include_kernel_dump,
+            )
 
     def console_info(self, vm_name: str) -> dict[str, Any]:
         name = self._vm(vm_name)
@@ -483,9 +543,10 @@ class HyperVService:
             vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
         )
         value = _ascii_keyboard_text(_text(text, "text", 16_384, allow_empty=True))
-        result = self._run(
-            "console_type_text", "console_type_text", {"vm": vm, "text": value}, vm_name=vm
-        )
+        with self._approve("console_type_text", vm, {"characters": len(value)}):
+            result = self._run(
+                "console_type_text", "console_type_text", {"vm": vm, "text": value}, vm_name=vm
+            )
         result["characters_requested"] = len(value)
         return result
 
@@ -500,9 +561,10 @@ class HyperVService:
         normalized = [key.casefold() for key in keys]
         if any(key not in KEY_NAMES for key in normalized) or len(set(normalized)) != len(normalized):
             raise ValidationError("keys contains an unsupported or duplicate key name.")
-        return self._run(
-            "console_press_keys", "console_press_keys", {"vm": vm, "keys": normalized}, vm_name=vm
-        )
+        with self._approve("console_press_keys", vm, {"keys": normalized}):
+            return self._run(
+                "console_press_keys", "console_press_keys", {"vm": vm, "keys": normalized}, vm_name=vm
+            )
 
     def console_key_state(self, vm_name: str, key: str, down: bool) -> dict[str, Any]:
         vm = self._write(
@@ -515,10 +577,11 @@ class HyperVService:
             raise ValidationError("key is not a supported key name.")
         if not isinstance(down, bool):
             raise ValidationError("down must be a boolean value.")
-        return self._run(
-            "console_key_state", "console_key_state",
-            {"vm": vm, "key": normalized, "down": down}, vm_name=vm,
-        )
+        with self._approve("console_key_state", vm, {"key": normalized, "down": down}):
+            return self._run(
+                "console_key_state", "console_key_state",
+                {"vm": vm, "key": normalized, "down": down}, vm_name=vm,
+            )
 
     def console_mouse_buttons(
         self,
@@ -532,10 +595,13 @@ class HyperVService:
         )
         if not all(isinstance(value, bool) for value in (left, right, middle)):
             raise ValidationError("Mouse button states must be boolean values.")
-        return self._run(
-            "console_mouse_buttons", "console_mouse_buttons",
-            {"vm": vm, "left": left, "right": right, "middle": middle}, vm_name=vm,
-        )
+        with self._approve("console_mouse_buttons", vm, {
+            "left": left, "right": right, "middle": middle,
+        }):
+            return self._run(
+                "console_mouse_buttons", "console_mouse_buttons",
+                {"vm": vm, "left": left, "right": right, "middle": middle}, vm_name=vm,
+            )
 
     def console_wait(self, milliseconds: int) -> dict[str, Any]:
         duration = _integer(milliseconds, "milliseconds", 1, 30_000)
@@ -543,10 +609,11 @@ class HyperVService:
         return {"waited_ms": duration}
 
     def console_batch(self, vm_name: str, actions: list[dict[str, Any]]) -> dict[str, Any]:
-        self._vm(vm_name)
+        vm = self._write(
+            vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
+        )
         if not isinstance(actions, list) or not 1 <= len(actions) <= 32:
             raise ValidationError("actions must contain between one and 32 console actions.")
-        results = []
         allowed_fields = {
             "text": {"text"}, "keys": {"keys"}, "click": {"button", "x", "y"},
             "move": {"x", "y"}, "scroll": {"delta"}, "wait": {"milliseconds"},
@@ -605,32 +672,40 @@ class HyperVService:
                     raise ValidationError("The cumulative console batch wait budget is 30000 ms.")
                 arguments["milliseconds"] = duration
             prepared.append((index, kind, arguments))
-        results = []
-        for index, kind, arguments in prepared:
-            if kind == "text":
-                result = self.console_type_text(vm_name, arguments["text"])
-            elif kind == "keys":
-                result = self.console_press_keys(vm_name, arguments["keys"])
-            elif kind == "click":
-                result = self.console_click(
-                    vm_name, arguments.get("button", "left"), arguments.get("x"), arguments.get("y")
-                )
-            elif kind == "move":
-                result = self.console_mouse_move(vm_name, arguments["x"], arguments["y"])
-            elif kind == "scroll":
-                result = self.console_scroll(vm_name, arguments["delta"])
-            elif kind == "wait":
-                result = self.console_wait(arguments["milliseconds"])
-            else:
-                result = self.console_ctrl_alt_delete(vm_name)
-            results.append({"index": index, "type": kind, "result": result})
-        return {"vm": vm_name, "actions_completed": len(results), "results": results}
+        # One approval covers the whole batch; the per-action calls inherit it.
+        with self._approve("console_batch", vm, {
+            "actions": [kind for _, kind, _ in prepared],
+            "action_count": len(prepared),
+        }):
+            results = []
+            for index, kind, arguments in prepared:
+                if kind == "text":
+                    result = self.console_type_text(vm, arguments["text"])
+                elif kind == "keys":
+                    result = self.console_press_keys(vm, arguments["keys"])
+                elif kind == "click":
+                    result = self.console_click(
+                        vm, arguments.get("button", "left"), arguments.get("x"), arguments.get("y")
+                    )
+                elif kind == "move":
+                    result = self.console_mouse_move(vm, arguments["x"], arguments["y"])
+                elif kind == "scroll":
+                    result = self.console_scroll(vm, arguments["delta"])
+                elif kind == "wait":
+                    result = self.console_wait(arguments["milliseconds"])
+                else:
+                    result = self.console_ctrl_alt_delete(vm)
+                results.append({"index": index, "type": kind, "result": result})
+        return {"vm": vm, "actions_completed": len(results), "results": results}
 
     def console_ctrl_alt_delete(self, vm_name: str) -> dict[str, Any]:
         vm = self._write(
             vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
         )
-        return self._run("console_ctrl_alt_delete", "console_ctrl_alt_delete", {"vm": vm}, vm_name=vm)
+        with self._approve("console_ctrl_alt_delete", vm):
+            return self._run(
+                "console_ctrl_alt_delete", "console_ctrl_alt_delete", {"vm": vm}, vm_name=vm
+            )
 
     def console_mouse_move(self, vm_name: str, x: int, y: int) -> dict[str, Any]:
         vm = self._write(
@@ -641,7 +716,8 @@ class HyperVService:
             "x": _integer(x, "x", 0, 32_767),
             "y": _integer(y, "y", 0, 32_767),
         }
-        return self._run("console_mouse_move", "console_mouse_move", payload, vm_name=vm)
+        with self._approve("console_mouse_move", vm, {"x": payload["x"], "y": payload["y"]}):
+            return self._run("console_mouse_move", "console_mouse_move", payload, vm_name=vm)
 
     def console_click(
         self, vm_name: str, button: str = "left", x: int | None = None, y: int | None = None
@@ -658,16 +734,20 @@ class HyperVService:
             payload.update(
                 x=_integer(x, "x", 0, 32_767), y=_integer(y, "y", 0, 32_767)
             )
-        return self._run("console_click", "console_click", payload, vm_name=vm)
+        summary = {"button": button, "x": payload.get("x"), "y": payload.get("y")}
+        with self._approve("console_click", vm, summary):
+            return self._run("console_click", "console_click", payload, vm_name=vm)
 
     def console_scroll(self, vm_name: str, delta: int) -> dict[str, Any]:
         vm = self._write(
             vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
         )
-        return self._run(
-            "console_scroll", "console_scroll",
-            {"vm": vm, "delta": _integer(delta, "delta", -100_000, 100_000)}, vm_name=vm,
-        )
+        amount = _integer(delta, "delta", -100_000, 100_000)
+        with self._approve("console_scroll", vm, {"delta": amount}):
+            return self._run(
+                "console_scroll", "console_scroll",
+                {"vm": vm, "delta": amount}, vm_name=vm,
+            )
 
     def authorize_screenshot(self, vm_name: str) -> str:
         return self._write(
@@ -678,10 +758,11 @@ class HyperVService:
         self, capture: Any, vm_name: str, region: str = "window", max_width: int = 1600
     ) -> Any:
         name = self.authorize_screenshot(vm_name)
-        return self._local_action(
-            "console_screenshot", name,
-            lambda: capture.capture(name, region=region, max_width=max_width),
-        )
+        with self._approve("console_screenshot", name, {"region": region}):
+            return self._local_action(
+                "console_screenshot", name,
+                lambda: capture.capture(name, region=region, max_width=max_width),
+            )
 
     def debug_serial_status(self, vm_name: str) -> dict[str, Any]:
         name = self._vm(vm_name)
@@ -705,10 +786,11 @@ class HyperVService:
                 "pipe_name must contain only letters, digits, dot, underscore, or hyphen."
             )
         self._confirm(confirm_vm, vm, "confirm_vm")
-        return self._run(
-            "debug_serial_prepare", "debug_serial_prepare",
-            {"vm": vm, "pipe_name": pipe_name}, vm_name=vm,
-        )
+        with self._approve("debug_serial_prepare", vm, {"pipe_name": pipe_name}):
+            return self._run(
+                "debug_serial_prepare", "debug_serial_prepare",
+                {"vm": vm, "pipe_name": pipe_name}, vm_name=vm,
+            )
 
     def debug_guest_prepare(self, vm_name: str, confirm_vm: str) -> dict[str, Any]:
         vm = self._write(
@@ -719,15 +801,16 @@ class HyperVService:
             raise PolicyError(
                 "Guest debug preparation requires guest credentials in the server environment."
             )
-        return self._run(
-            "debug_guest_prepare", "debug_guest_prepare",
-            {
-                "vm": vm,
-                "username": self.settings.guest_username,
-                "password": self.settings.guest_password,
-            },
-            vm_name=vm,
-        )
+        with self._approve("debug_guest_prepare", vm, {"bcd_debug": "COM1/115200"}):
+            return self._run(
+                "debug_guest_prepare", "debug_guest_prepare",
+                {
+                    "vm": vm,
+                    "username": self.settings.guest_username,
+                    "password": self.settings.guest_password,
+                },
+                vm_name=vm,
+            )
 
     def serial_status(self, vm_name: str) -> dict[str, Any]:
         name = self._vm(vm_name)
@@ -756,9 +839,10 @@ class HyperVService:
             raise ValidationError("pipe_name must exactly match the path configured on the VM's COM1 port.")
         if str(status.get("state", "")).casefold() != "running":
             raise ValidationError("The VM must be Running before attaching to its serial pipe.")
-        return self._serial_action(
-            "serial_connect", vm, lambda: self.serial.connect(vm, name, log)
-        )
+        with self._approve("serial_connect", vm, {"pipe_name": name, "log_path": log}):
+            return self._serial_action(
+                "serial_connect", vm, lambda: self.serial.connect(vm, name, log)
+            )
 
     def serial_read(self, vm_name: str, tail_chars: int = 32_768) -> dict[str, Any]:
         vm = self._write(
@@ -777,15 +861,20 @@ class HyperVService:
         if not isinstance(append_newline, bool):
             raise ValidationError("append_newline must be a boolean value.")
         data = value + ("\r\n" if append_newline else "")
-        return self._serial_action("serial_send", vm, lambda: self.serial.send(vm, data))
+        # Typed text may be a password, so the dialog sees only its size.
+        with self._approve("serial_send", vm, {
+            "characters": len(data), "append_newline": append_newline,
+        }):
+            return self._serial_action("serial_send", vm, lambda: self.serial.send(vm, data))
 
     def serial_disconnect(self, vm_name: str) -> dict[str, Any]:
         vm = self._write(
             vm_name, self.settings.allow_debugger, "HYPERV_MCP_ALLOW_DEBUGGER"
         )
-        return self._serial_action(
-            "serial_disconnect", vm, lambda: self.serial.disconnect(vm)
-        )
+        with self._approve("serial_disconnect", vm):
+            return self._serial_action(
+                "serial_disconnect", vm, lambda: self.serial.disconnect(vm)
+            )
 
     def _serial_log(self, path: str) -> str:
         return _confined_path(path, "log_path", self.settings.serial_log_root, ".log")
@@ -808,26 +897,32 @@ class HyperVService:
         path = _confined_path(iso_path, "iso_path", self.settings.iso_root, ".iso")
         if not isinstance(boot_first, bool):
             raise ValidationError("boot_first must be a boolean value.")
-        return self._run(
-            "media_mount", "media_mount",
-            {"vm": vm, "path": path, "controller_number": _integer(
-                controller_number, "controller_number", 0, 1
-            ), "controller_location": _integer(
-                controller_location, "controller_location", 0, 63
-            ), "boot_first": boot_first},
-            vm_name=vm,
-        )
+        number = _integer(controller_number, "controller_number", 0, 1)
+        location = _integer(controller_location, "controller_location", 0, 63)
+        summary = {
+            "iso_path": path, "boot_first": boot_first,
+            "controller_number": number, "controller_location": location,
+        }
+        with self._approve("media_mount", vm, summary):
+            return self._run(
+                "media_mount", "media_mount",
+                {"vm": vm, "path": path, "controller_number": number,
+                 "controller_location": location, "boot_first": boot_first},
+                vm_name=vm,
+            )
 
     def media_eject(
         self, vm_name: str, controller_location: int, confirm_vm: str, controller_number: int = 0
     ) -> dict[str, Any]:
         vm = self._write(vm_name, self.settings.allow_media, "HYPERV_MCP_ALLOW_MEDIA")
         self._confirm(confirm_vm, vm, "confirm_vm")
-        return self._run(
-            "media_eject", "media_eject",
-            {"vm": vm, "controller_number": _integer(
-                controller_number, "controller_number", 0, 1
-            ), "controller_location": _integer(
-                controller_location, "controller_location", 0, 63
-            )}, vm_name=vm,
-        )
+        number = _integer(controller_number, "controller_number", 0, 1)
+        location = _integer(controller_location, "controller_location", 0, 63)
+        with self._approve("media_eject", vm, {
+            "controller_number": number, "controller_location": location,
+        }):
+            return self._run(
+                "media_eject", "media_eject",
+                {"vm": vm, "controller_number": number, "controller_location": location},
+                vm_name=vm,
+            )

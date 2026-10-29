@@ -436,11 +436,16 @@ def test_local_serial_mutation_uses_the_dashboard_approval_gate(
     )
     monkeypatch.setenv("HYPERV_MCP_REQUIRE_DASHBOARD_APPROVAL", "true")
     monkeypatch.setenv("HYPERV_MCP_EVENT_DIRECTORY", str(tmp_path / "events"))
-    monkeypatch.setattr(
-        "hyperv_console_mcp.ipc.request_approval",
-        lambda operation, vm_name: (_ for _ in ()).throw(PolicyError("denied by test")),
-    )
+    requests: list[tuple[str, str, dict | None]] = []
+
+    def deny(operation, vm_name, summary=None):
+        requests.append((operation, vm_name, summary))
+        raise PolicyError("denied by test")
+
+    monkeypatch.setattr("hyperv_console_mcp.ipc.request_approval", deny)
     with pytest.raises(PolicyError, match="denied by test"):
         service.serial_send("NORTH-Test", "must not run")
     assert serial.calls == []
     assert backend.calls == []
+    # Typed text may be a password, so the dialog only learns its size.
+    assert requests == [("serial_send", "NORTH-Test", {"characters": 14, "append_newline": True})]

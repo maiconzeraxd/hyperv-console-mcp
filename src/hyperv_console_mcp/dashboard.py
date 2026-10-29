@@ -50,6 +50,85 @@ def _safe_json(value: Any) -> str:
     return json.dumps(sanitize(value), ensure_ascii=False, indent=2)
 
 
+def _format_summary(summary: Any) -> str:
+    """Render an approval summary for the dialog, with the command preview first."""
+    if not isinstance(summary, dict) or not summary:
+        return "No additional details were provided for this operation."
+    preview = summary.get("command_preview")
+    if not isinstance(preview, str):
+        return json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True)
+    rest = {key: value for key, value in summary.items() if key != "command_preview"}
+    return "\n".join([
+        "Command preview (the guest runs exactly this):",
+        "",
+        preview,
+        "",
+        json.dumps(rest, ensure_ascii=False, indent=2, sort_keys=True),
+    ])
+
+
+class _ApprovalDialog(tk.Toplevel):
+    """Modal, scrollable approval prompt carrying the request's own summary."""
+
+    def __init__(self, master: tk.Misc, request: dict[str, Any]) -> None:
+        super().__init__(master)
+        self.result = False
+        self.title("AI requests approval")
+        self.configure(bg=COLORS["background"])
+        self.transient(master)
+        self.resizable(True, True)
+        self.protocol("WM_DELETE_WINDOW", self._decide_false)
+        self.bind("<Escape>", lambda _event: self._decide_false())
+
+        frame = ttk.Frame(self, padding=14)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(
+            frame, text=f"Operation: {request.get('operation') or 'unknown'}",
+            font=("Segoe UI Semibold", 12),
+        ).pack(anchor="w")
+        ttk.Label(frame, text=f"VM: {request.get('vm_name') or 'host'}").pack(anchor="w")
+        ttk.Label(
+            frame, wraplength=760,
+            text=(
+                "The MCP server is waiting for this one operation. No payload, command, "
+                "or credential is sent through this broker; the summary below comes from "
+                "the tool that asked."
+            ),
+        ).pack(anchor="w", pady=(8, 6))
+
+        body_frame = ttk.Frame(frame)
+        body_frame.pack(side="top", fill="both", expand=True)
+        body = tk.Text(
+            body_frame, wrap="word", height=18, width=92, bg=COLORS["panel"],
+            fg=COLORS["text"], relief="flat", padx=10, pady=8,
+        )
+        scroll = ttk.Scrollbar(body_frame, orient="vertical", command=body.yview)
+        body.configure(yscrollcommand=scroll.set)
+        body.insert("1.0", _format_summary(request.get("summary")))
+        body.configure(state="disabled")
+        scroll.pack(side="right", fill="y")
+        body.pack(side="left", fill="both", expand=True)
+
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill="x", pady=(10, 0))
+        deny = ttk.Button(buttons, text="Deny", command=self._decide_false)
+        deny.pack(side="right")
+        approve = ttk.Button(buttons, text="Approve once", command=self._decide_true)
+        approve.pack(side="right", padx=(0, 8))
+        approve.focus_set()
+
+        self.update_idletasks()
+        self.grab_set()
+
+    def _decide_true(self) -> None:
+        self.result = True
+        self.destroy()
+
+    def _decide_false(self) -> None:
+        self.result = False
+        self.destroy()
+
+
 class Dashboard(tk.Tk):
     def __init__(self, vm_name: str) -> None:
         super().__init__()
@@ -654,7 +733,9 @@ class Dashboard(tk.Tk):
                         callback(result)
                 elif kind == "approval":
                     request = value
-                    approved = messagebox.askyesno("AI requests approval", f"Operation: {request['operation']}\nVM: {request['vm_name'] or 'host'}\n\nThe MCP server is waiting. Approve this one operation?\n\nReview the originating conversation for parameters. No payload, command or credentials are sent through this broker.", parent=self)
+                    dialog = _ApprovalDialog(self, request)
+                    self.wait_window(dialog)
+                    approved = dialog.result
                     with self.pending_lock:
                         pending = self.pending.get(request["request_id"])
                     if pending:

@@ -22,6 +22,7 @@ _MAX_EVENTS = 1000
 _MAX_MESSAGE = 512
 _actor: ContextVar[str] = ContextVar("hyperv_event_actor", default="mcp")
 _operation_depth: ContextVar[int] = ContextVar("hyperv_event_operation_depth", default=0)
+_approval_granted: ContextVar[bool] = ContextVar("hyperv_approval_granted", default=False)
 
 
 def utc_now() -> str:
@@ -165,13 +166,46 @@ class ProgressReporter:
         )
 
 
-def require_dashboard_approval(operation: str, vm_name: str | None) -> None:
-    if os.environ.get("HYPERV_MCP_REQUIRE_DASHBOARD_APPROVAL", "false").strip().casefold() not in {
-        "1", "true", "yes", "on"
-    } or _actor.get() == "dashboard":
+def _approval_required() -> bool:
+    enabled = os.environ.get(
+        "HYPERV_MCP_REQUIRE_DASHBOARD_APPROVAL", "false"
+    ).strip().casefold() in {"1", "true", "yes", "on"}
+    return enabled and _actor.get() != "dashboard"
+
+
+def require_dashboard_approval(
+    operation: str, vm_name: str | None, summary: dict[str, Any] | None = None
+) -> None:
+    """Ask the local dashboard before a mutation the tool did not already gate.
+
+    Inside `approval_scope` the answer is inherited: a tool that already obtained
+    one approval does not ask again for each file, chunk, or nested action.
+    """
+    if not _approval_required() or _approval_granted.get():
         return
     from .ipc import request_approval
-    request_approval(operation, vm_name)
+    request_approval(operation, vm_name, summary)
+
+
+@contextmanager
+def approval_scope(
+    operation: str, vm_name: str | None, summary: dict[str, Any] | None = None
+) -> Iterator[None]:
+    """Request exactly one dashboard approval for a whole tool call.
+
+    Nested mutations (per-file writes, per-chunk assembly, batch console actions)
+    run under the same approval instead of producing one prompt each.
+    """
+    if not _approval_required() or _approval_granted.get():
+        yield
+        return
+    from .ipc import request_approval
+    request_approval(operation, vm_name, summary)
+    token = _approval_granted.set(True)
+    try:
+        yield
+    finally:
+        _approval_granted.reset(token)
 
 
 class EventSink:
@@ -182,22 +216,14 @@ class EventSink:
         self.bus = bus
 
     def invoke(self, operation: str, payload: Any, *, timeout: float | None = None) -> dict[str, Any]:
+        # Approval is requested by the service at tool level, never per bridge
+        # operation, so one lab_stage does not ask once per file and chunk.
         vm_name = str(payload.get("vm", "")) or None
         with self.bus.operation(operation, vm_name):
-            if operation in MUTATING_OPERATIONS:
-                require_dashboard_approval(operation, vm_name)
             return self.backend.invoke(operation, payload, timeout=timeout)
 
     def close(self) -> None:
         self.backend.close()
 
 
-MUTATING_OPERATIONS = frozenset({
-    "vm_power", "checkpoint_create", "checkpoint_restore", "checkpoint_delete",
-    "guest_exec", "guest_write_file", "guest_assemble_file", "guest_publish_package",
-    "console_type_text",
-    "console_press_keys", "console_key_state", "console_mouse_buttons",
-    "console_ctrl_alt_delete", "console_mouse_move", "console_click", "console_scroll",
-    "media_mount", "media_eject", "debug_serial_prepare", "debug_guest_prepare",
-})
 EVENTS = EventBus()
