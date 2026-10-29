@@ -16,13 +16,24 @@
 
 The Python backend holds one local Windows PowerShell worker open. Requests are UTF-8 JSON lines and responses are base64-encoded JSON lines. A lock serializes each request/response pair so a failed or timed-out request cannot be confused with another tool call. The worker is discarded after a transport failure or timeout. Stdout is exclusively MCP protocol data; diagnostics go to stderr.
 
-PowerShell Direct still constructs a remoting session per guest command. It is the safe initial transport for isolated guests, but it is not claimed to be faster than a persistent SSH session. Do not enable SSH solely for OOBE or kernel debugging: neither use case can depend on a running guest userland.
+PowerShell Direct keeps one `New-PSSession -VMName` per VM inside the worker and reuses it for every guest request; a session that is no longer `Opened`, or whose VM uptime went down (a reboot), is dropped and rebuilt. File copies go over that session with `Copy-Item -ToSession`/`-FromSession` and are SHA-256 verified on both sides, so the file content never travels as base64 inside a JSON line. It is still the safe default for isolated guests, and it is still not claimed to be faster than a persistent SSH session: that claim needs the measurement below. Do not enable SSH solely for OOBE or kernel debugging: neither use case can depend on a running guest userland.
 
 Serial-console reads do not occupy the PowerShell worker. Each attachment owns a cancellable Windows named-pipe handle and a dedicated reader thread. It retains at most 1,048,576 characters in memory and appends output to the caller-selected local `.log` file. This prevents a quiet or disconnected COM pipe from stalling unrelated VM operations.
 
 ## Benchmarks
 
 The test suite includes a real persistent-worker test using a local fake PowerShell bridge, so the measurement does not touch Hyper-V. Run it with `pytest -s tests/test_persistent_backend.py`. The cold request includes PowerShell startup; the following nine requests reuse that process. On the development host, one measured run took 0.153 seconds cold and 0.002 seconds for nine warm calls. These are fake-worker figures, not a claim about Hyper-V or guest latency. A future SSH adapter must be compared on the same hardware and workload before being made the default.
+
+## Measuring a real transport
+
+`scripts/bench_transport.py` measures the configured transport against a disposable VM: ten small guest commands, then an upload and a download for each requested size (1 MiB and 100 MiB by default). It reports the median/min/max of the command sample and the seconds and MiB/s of each transfer, and the JSON result carries the host name, the OS build, the VM and the date, because a number without those is not a measurement.
+
+```
+set HYPERV_MCP_LIVE_TEST_VM=LAB-Test
+python scripts/bench_transport.py --vm LAB-Test --json-out bench.json
+```
+
+It writes and removes `C:\DriverLab\Bench\` inside the guest, so only point it at a VM you can throw away. **No live numbers have been recorded yet**: the script has not been run against a VM in this delivery, and this document deliberately does not guess at what it would print.
 
 ## Recommended measurement matrix
 
@@ -33,6 +44,6 @@ The test suite includes a real persistent-worker test using a local fake PowerSh
 
 Do not use an external switch for a disposable driver-test VM just to obtain a marginal transport improvement. Isolation takes precedence over latency.
 
-## Planned next optimization
+## Next step
 
-A persistent PowerShell Direct runspace can reduce guest-command overhead, but adds session lifetime, cancellation, and secret-lifetime complexity. It should only replace the simple implementation after a measured benchmark and explicit error-handling tests.
+The transport now reuses one session per VM, which was the first half of the "planned optimization" that used to be listed here. The remaining questions are the ones only a live run can answer: how much the session actually saves per command, whether `Copy-Item` over VMBus saturates at 1 MiB or 100 MiB, and whether a second worker is needed so a long `guest_exec` does not delay `vm_get` and the console tools.
