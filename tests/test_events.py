@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
+
 from hyperv_console_mcp.errors import PolicyError
 from hyperv_console_mcp.events import EventBus, EventSink
 from hyperv_console_mcp.ipc import ApprovalBroker, request_approval

@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import anyio
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import ImageContent, TextContent
+from test_service import FakeBackend
+
 from hyperv_console_mcp.audit import AuditLogger
 from hyperv_console_mcp.capture import Screenshot
 from hyperv_console_mcp.config import Settings
 from hyperv_console_mcp.server import create_server
 from hyperv_console_mcp.service import HyperVService
-from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import ImageContent, TextContent
-from test_service import FakeBackend
 
 
 @pytest.fixture
@@ -29,11 +30,12 @@ def server() -> tuple[object, FakeBackend]:
 def test_all_tools_are_discoverable(server) -> None:
     mcp, _ = server
     tools = {tool.name: tool for tool in anyio.run(mcp.list_tools)}
-    assert len(tools) == 44
+    assert len(tools) == 45
     assert tools["vm_list"].input_schema["type"] == "object"
     assert tools["vm_list"].input_schema.get("required", []) == []
     assert "password" not in tools["guest_exec"].input_schema["properties"]
     assert tools["vm_list"].annotations.read_only_hint is True
+    assert tools["operation_status"].annotations.read_only_hint is True
     assert tools["checkpoint_restore"].annotations.destructive_hint is True
     assert set(tools["vm_power"].input_schema["properties"]["action"]["enum"]) == {
         "start", "shutdown", "save", "pause", "resume", "turn_off", "reset"

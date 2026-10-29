@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
+
 from hyperv_console_mcp.backend import PowerShellBackend
 from hyperv_console_mcp.errors import BackendError
 
@@ -159,3 +160,173 @@ function Get-VM { param($Name) throw [System.UnauthorizedAccessException]::new('
     with pytest.raises(BackendError) as error:
         invoke_with_mocks(tmp_path, mocks, "debug_serial_status", {"vm": "NORTH-Test"})
     assert error.value.code == "access_denied"
+
+
+# The guest query helper declares -Arguments. Four operations used to pass -ArgumentList,
+# which failed parameter binding before the guest scriptblock ever ran.
+BINDING_PROBE = """
+function Invoke-Command {
+    param($VMName, $Credential, $ArgumentList, $ScriptBlock)
+    $names = @($ScriptBlock.Ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+    [pscustomobject]@{
+        bound = $true
+        parameter_names = ($names -join ',')
+        argument_count = @($ArgumentList).Count
+    }
+}
+"""
+
+
+@pytest.mark.parametrize(
+    ("operation", "payload", "result_key", "parameter_names", "argument_count"),
+    [
+        (
+            "guest_read_file",
+            {"path": "C:\\DriverLab\\sample.bin", "max_bytes": 4096},
+            "file", "EncodedPath,MaximumBytes", 2,
+        ),
+        (
+            "guest_write_file",
+            {
+                "path": "C:\\DriverLab\\sample.bin", "content_base64": "AAECAw==",
+                "overwrite": False, "create_parent": False,
+            },
+            "file", "EncodedPath,Content,Overwrite,CreateParent", 4,
+        ),
+        (
+            "guest_read_chunk",
+            {"path": "C:\\DriverLab\\sample.bin", "offset": 0, "count": 4},
+            "chunk", "EncodedPath,Offset,Count", 3,
+        ),
+        (
+            "guest_assemble_file",
+            {
+                "path": "C:\\DriverLab\\Packages\\pkg\\driver.sys",
+                "parts_directory": "C:\\DriverLab\\Transfers\\t-1",
+                "part_count": 2, "expected_size": 8,
+                "expected_sha256": "0" * 64,
+            },
+            "file", "EncodedPath,EncodedParts,PartCount,ExpectedSize,ExpectedHash", 5,
+        ),
+    ],
+)
+def test_guest_file_operations_bind_every_argument(
+    tmp_path: Path,
+    operation: str,
+    payload: dict,
+    result_key: str,
+    parameter_names: str,
+    argument_count: int,
+) -> None:
+    result = invoke_with_mocks(
+        tmp_path, BINDING_PROBE, operation, {**GUEST_PAYLOAD, **payload}
+    )
+    bound = result[result_key]
+    assert bound["bound"] is True
+    assert bound["parameter_names"] == parameter_names
+    assert bound["argument_count"] == argument_count
+
+
+def test_guest_exec_reports_a_non_terminating_cmdlet_error_as_failure(tmp_path: Path) -> None:
+    result = invoke_with_mocks(
+        tmp_path, LOCAL_REMOTING, "guest_exec",
+        {**GUEST_PAYLOAD, "command": "Get-Item C:\\hvmcp-does-not-exist-8f2c"},
+    )
+    execution = result["execution"]
+    assert execution["success"] is False
+    assert execution["had_errors"] is True
+    assert execution["exit_code"] == 0
+    assert execution["error_records"]
+    assert any("hvmcp-does-not-exist-8f2c" in record for record in execution["error_records"])
+
+
+def test_guest_exec_keeps_native_stderr_from_failing_a_successful_command(
+    tmp_path: Path,
+) -> None:
+    result = invoke_with_mocks(
+        tmp_path, LOCAL_REMOTING, "guest_exec",
+        {**GUEST_PAYLOAD, "command": "& cmd.exe /c \"echo progress 1>&2 & exit /b 0\""},
+    )
+    execution = result["execution"]
+    assert execution["success"] is True
+    assert execution["had_errors"] is False
+    assert execution["error_records"] == []
+    assert "progress" in execution["output"]
+
+
+FULL_VM_MOCK = """
+function Get-VM {
+    param($Name)
+    [pscustomobject]@{
+        Name = 'NORTH-Test'; Id = [guid]'11111111-2222-3333-4444-555555555555'
+        State = [Microsoft.HyperV.PowerShell.VMState]::Running
+        Status = 'Operating normally'; Generation = 2; Version = [version]'10.0'
+        ProcessorCount = 2; MemoryStartup = [Int64]2147483648
+        MemoryAssigned = [Int64]2147483648; Uptime = [timespan]::FromMinutes(5)
+        CheckpointType = 'Production'; AutomaticCheckpointsEnabled = $true
+        AutomaticStartAction = 'StartIfRunning'; AutomaticStopAction = 'Save'
+    }
+}
+function Get-VMHardDiskDrive { param($VM) }
+function Get-VMDvdDrive { param($VM) }
+function Get-VMNetworkAdapter { param($VM) }
+function Get-VMSnapshot { param($VM) }
+function Stop-VM {
+    param($VM, [switch]$Save, [switch]$TurnOff, [switch]$Force, [switch]$Confirm, [switch]$AsJob)
+    # Forced power may stay synchronous; graceful stop/save must not block the worker.
+    if (-not $AsJob -and -not $TurnOff) { throw 'Stop-VM blocked the bridge; it must run as a background job.' }
+    [pscustomobject]@{
+        State = 'Running'
+        JobStateInfo = [pscustomobject]@{ Reason = $null }
+        ChildJobs = @()
+    }
+}
+"""
+
+
+def test_graceful_shutdown_is_accepted_without_blocking_the_worker(tmp_path: Path) -> None:
+    result = invoke_with_mocks(
+        tmp_path, FULL_VM_MOCK, "vm_power", {"vm": "NORTH-Test", "action": "shutdown"}
+    )
+    assert result["accepted"] is True
+    assert result["action"] == "shutdown"
+    assert result["state"] == "running"
+    assert len(result["operation_id"]) == 32
+    assert result["vm"]["name"] == "NORTH-Test"
+
+
+def test_operation_status_tracks_a_background_power_operation(tmp_path: Path) -> None:
+    escaped = str(BRIDGE).replace("'", "''")
+    wrapper = tmp_path / "MockBridge.ps1"
+    wrapper.write_text(
+        f"param([switch]$Server)\n{BASE_MOCKS}\n{FULL_VM_MOCK}\n& '{escaped}' -Server\n",
+        encoding="utf-8",
+    )
+    backend = PowerShellBackend(wrapper)
+    try:
+        accepted = backend.invoke(
+            "vm_power", {"vm": "NORTH-Test", "action": "save"}
+        )
+        status = backend.invoke(
+            "operation_status", {"operation_id": accepted["operation_id"]}
+        )
+        unknown = backend.invoke(
+            "operation_status", {"operation_id": "0" * 32}
+        )
+    finally:
+        backend.close()
+    assert accepted["accepted"] is True
+    assert status["operation_id"] == accepted["operation_id"]
+    assert status["state"] == "running"
+    assert status["succeeded"] is None
+    assert unknown["state"] == "unknown"
+
+
+def test_forced_power_stays_synchronous(tmp_path: Path) -> None:
+    result = invoke_with_mocks(
+        tmp_path, FULL_VM_MOCK, "vm_power", {"vm": "NORTH-Test", "action": "turn_off"}
+    )
+    assert result["accepted"] is False
+    assert result["operation_id"] is None
+    assert result["state"] == "completed"
+    assert result["vm"]["name"] == "NORTH-Test"

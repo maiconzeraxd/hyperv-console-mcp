@@ -6,7 +6,7 @@ A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/)
 
 ## Highlights
 
-- **44 MCP tools** with read-only/destructive annotations and structured results.
+- **45 MCP tools** with read-only/destructive annotations and structured results.
 - Inventory, pause/resume, bounded state waiting, power, checkpoints, and bounded guest file transfer.
 - Guest OS health, processes, services, and recent event logs through PowerShell Direct.
 - Hyper-V `Msvm_Keyboard` and `Msvm_SyntheticMouse`, explicit key/button states, and ordered console batches: works without guest networking.

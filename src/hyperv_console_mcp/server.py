@@ -94,6 +94,13 @@ def create_server(
     ) -> dict[str, Any]:
         return await _invoke(service.power, vm_name, action, confirm_vm)
 
+    @tool(
+        "operation_status", annotations=READ_ONLY,
+        description="Track a background power operation (shutdown or save) by the operation_id returned by vm_power.",
+    )
+    async def operation_status(operation_id: str) -> dict[str, Any]:
+        return await _invoke(service.operation_status, operation_id)
+
     @tool("checkpoint_list", annotations=READ_ONLY, description="List checkpoint IDs, names, parents, and creation times.")
     async def checkpoint_list(vm_name: str) -> dict[str, Any]:
         return await _invoke(service.list_checkpoints, vm_name)

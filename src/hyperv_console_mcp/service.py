@@ -219,6 +219,15 @@ class HyperVService:
             f"vm_power.{action}", "vm_power", {"vm": name, "action": action}, vm_name=name
         )
 
+    def operation_status(self, operation_id: str) -> dict[str, Any]:
+        """Track a background power operation started by shutdown or save."""
+        identifier = _text(operation_id, "operation_id", 64)
+        if re.fullmatch(r"[0-9a-fA-F]{32}", identifier) is None:
+            raise ValidationError("operation_id must be the 32-character identifier returned by vm_power.")
+        return self._run(
+            "operation_status", "operation_status", {"operation_id": identifier.lower()}
+        )
+
     def list_checkpoints(self, vm_name: str) -> dict[str, Any]:
         name = self._vm(vm_name)
         return self._run(

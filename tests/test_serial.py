@@ -9,6 +9,7 @@ import uuid
 from ctypes import wintypes
 
 import pytest
+
 from hyperv_console_mcp.serial import SerialManager
 
 

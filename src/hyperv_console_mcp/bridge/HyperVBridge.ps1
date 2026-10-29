@@ -11,6 +11,9 @@ $WarningPreference = 'SilentlyContinue'
 $InformationPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
+# Background Hyper-V jobs (graceful shutdown / save) survive across requests in this worker.
+$script:PowerOperations = @{}
+
 function Write-Response {
     param([Parameter(Mandatory)][hashtable]$Response)
     $json = ConvertTo-Json -InputObject $Response -Depth 8 -Compress
@@ -181,11 +184,82 @@ function Invoke-GuestQuery {
         [Parameter(Mandatory)]$Vm,
         [Parameter(Mandatory)]$Request,
         [Parameter(Mandatory)][scriptblock]$Query,
-        [object[]]$Arguments = @()
+        [Alias('ArgumentList')][object[]]$Arguments = @()
     )
     $credential = New-GuestCredential -Request $Request
     return Invoke-Command -VMName $Vm.Name -Credential $credential -ArgumentList $Arguments -ScriptBlock $Query |
         Select-Object -Property * -ExcludeProperty PSComputerName, RunspaceId, PSShowComputerName
+}
+
+function Start-BackgroundVmPower {
+    param([Parameter(Mandatory)]$Vm, [Parameter(Mandatory)][string]$Action)
+    $job = switch ($Action) {
+        'shutdown' { Stop-VM -VM $Vm -Confirm:$false -AsJob }
+        'save' { Stop-VM -VM $Vm -Save -Confirm:$false -AsJob }
+        default { throw "Unsupported background power action '$Action'." }
+    }
+    $id = [Guid]::NewGuid().ToString('N')
+    $script:PowerOperations[$id] = [pscustomobject]@{
+        id = $id
+        action = $Action
+        vm = $Vm.Name
+        job = $job
+        started_at = (Get-Date).ToString('o')
+    }
+    # Bounded history: drop the oldest finished entries beyond the last 50 operations.
+    if ($script:PowerOperations.Count -gt 50) {
+        $finished = @($script:PowerOperations.Values | Where-Object {
+            [string]$_.job.State -in @('Completed', 'Failed', 'Stopped')
+        } | Sort-Object -Property started_at)
+        $excess = $script:PowerOperations.Count - 50
+        foreach ($entry in ($finished | Select-Object -First $excess)) {
+            $script:PowerOperations.Remove($entry.id)
+        }
+    }
+    return [pscustomobject]@{
+        accepted = $true
+        operation_id = $id
+        action = $Action
+        vm = $Vm.Name
+        state = 'running'
+        started_at = $script:PowerOperations[$id].started_at
+    }
+}
+
+function Get-BackgroundOperationStatus {
+    param([Parameter(Mandatory)][string]$OperationId)
+    $entry = $script:PowerOperations[$OperationId]
+    if ($null -eq $entry) {
+        return [pscustomobject]@{
+            operation_id = $OperationId; state = 'unknown'; action = $null; vm = $null
+            succeeded = $null; error = $null; started_at = $null
+        }
+    }
+    $jobState = [string]$entry.job.State
+    $succeeded = $null
+    $errorMessage = $null
+    switch ($jobState) {
+        'Completed' { $succeeded = $true }
+        { $_ -in @('Failed', 'Stopped') } {
+            $succeeded = $false
+            $reasons = @(
+                $entry.job.JobStateInfo.Reason
+                $entry.job.ChildJobs | ForEach-Object { $_.JobStateInfo.Reason }
+            ) | Where-Object { $null -ne $_ }
+            if ($reasons.Count -gt 0) {
+                $errorMessage = ($reasons | ForEach-Object { $_.Message } | Select-Object -First 3) -join ' | '
+            }
+        }
+    }
+    return [pscustomobject]@{
+        operation_id = $entry.id
+        state = $jobState.ToLowerInvariant()
+        action = $entry.action
+        vm = $entry.vm
+        succeeded = $succeeded
+        error = $errorMessage
+        started_at = $entry.started_at
+    }
 }
 
 function Invoke-BridgeOperation {
@@ -220,17 +294,49 @@ function Invoke-BridgeOperation {
         }
         'vm_power' {
             $vm = Get-ExactVm -Name $request.vm
-            switch ([string]$request.action) {
-                'start' { Start-VM -VM $vm -Confirm:$false | Out-Null }
-                'shutdown' { Stop-VM -VM $vm -Confirm:$false | Out-Null }
-                'save' { Stop-VM -VM $vm -Save -Confirm:$false | Out-Null }
-                'pause' { Suspend-VM -VM $vm -Confirm:$false | Out-Null }
-                'resume' { Resume-VM -VM $vm -Confirm:$false | Out-Null }
-                'turn_off' { Stop-VM -VM $vm -TurnOff -Force -Confirm:$false | Out-Null }
-                'reset' { Restart-VM -VM $vm -Force -Confirm:$false | Out-Null }
-                default { throw 'Unsupported power action.' }
+            $action = [string]$request.action
+            # Graceful shutdown/save can outlive the bridge timeout, so they are handed to a
+            # background Hyper-V job and tracked through operation_status.
+            if ($action -in @('shutdown', 'save')) {
+                $accepted = Start-BackgroundVmPower -Vm $vm -Action $action
+                $result = @{
+                    accepted = $true
+                    operation_id = $accepted.operation_id
+                    action = $action
+                    state = 'running'
+                    started_at = $accepted.started_at
+                    vm = (Convert-Vm -Vm $vm)
+                }
+            } else {
+                switch ($action) {
+                    'start' { Start-VM -VM $vm -Confirm:$false | Out-Null }
+                    'pause' { Suspend-VM -VM $vm -Confirm:$false | Out-Null }
+                    'resume' { Resume-VM -VM $vm -Confirm:$false | Out-Null }
+                    'turn_off' { Stop-VM -VM $vm -TurnOff -Force -Confirm:$false | Out-Null }
+                    'reset' { Restart-VM -VM $vm -Force -Confirm:$false | Out-Null }
+                    default { throw 'Unsupported power action.' }
+                }
+                $result = @{
+                    accepted = $false
+                    operation_id = $null
+                    action = $action
+                    state = 'completed'
+                    started_at = $null
+                    vm = (Convert-Vm -Vm (Get-ExactVm -Name $request.vm))
+                }
             }
-            $result = @{ vm = (Convert-Vm -Vm (Get-ExactVm -Name $request.vm)); action = $request.action }
+        }
+        'operation_status' {
+            $status = Get-BackgroundOperationStatus -OperationId ([string]$request.operation_id)
+            $result = @{
+                operation_id = $status.operation_id
+                state = $status.state
+                action = $status.action
+                vm = $status.vm
+                succeeded = $status.succeeded
+                error = $status.error
+                started_at = $status.started_at
+            }
         }
         'checkpoint_list' {
             $vm = Get-ExactVm -Name $request.vm
@@ -344,6 +450,11 @@ function Invoke-BridgeOperation {
                     $errorMessage = ''
                     $success = $true
                     $exitCode = 0
+                    $errorRecords = @()
+                    $hadErrors = $false
+                    # Non-terminating cmdlet errors never change $LASTEXITCODE, so the only
+                    # reliable signal is the runspace error collection before/after.
+                    $errorCountBefore = $Error.Count
                     $previousPreference = $ErrorActionPreference
                     try {
                         # Native stderr must not become a terminating NativeCommandError on PS 5.1.
@@ -362,6 +473,20 @@ function Invoke-BridgeOperation {
                         $errorMessage = $_.Exception.Message
                     } finally {
                         $ErrorActionPreference = $previousPreference
+                        $added = $Error.Count - $errorCountBefore
+                        if ($added -gt 0) {
+                            $errorRecords = @($Error[0..($added - 1)] | Where-Object {
+                                # Native stderr records are output, not failures: a tool that
+                                # writes progress to stderr must still be able to succeed.
+                                $_.FullyQualifiedErrorId -notmatch '^NativeCommandError'
+                            } | ForEach-Object {
+                                $message = $_.ToString()
+                                if ($message.Length -gt 2000) { $message = $message.Substring(0, 2000) }
+                                $message
+                            })
+                        }
+                        $hadErrors = $errorRecords.Count -gt 0
+                        if ($hadErrors) { $success = $false }
                     }
                     $truncated = $output.Length -gt $MaximumCharacters
                     if ($truncated) { $output = $output.Substring(0, $MaximumCharacters) }
@@ -370,6 +495,8 @@ function Invoke-BridgeOperation {
                         exit_code = $exitCode
                         output = $output
                         error = $errorMessage
+                        had_errors = $hadErrors
+                        error_records = $errorRecords
                         output_truncated = $truncated
                     }
                 }
@@ -379,7 +506,7 @@ function Invoke-BridgeOperation {
             $vm = Get-ExactVm -Name $request.vm
             $encodedPath = Convert-ToBase64Text -Text ([string]$request.path)
             $guestResult = Invoke-GuestQuery -Vm $vm -Request $request `
-                -ArgumentList $encodedPath, ([int]$request.max_bytes) -Query {
+                -Arguments $encodedPath, ([int]$request.max_bytes) -Query {
                     param($EncodedPath, $MaximumBytes)
                     $path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedPath))
                     if (-not [IO.Path]::IsPathRooted($path)) { throw 'The guest path must be absolute.' }
@@ -403,7 +530,7 @@ function Invoke-BridgeOperation {
             $vm = Get-ExactVm -Name $request.vm
             $encodedPath = Convert-ToBase64Text -Text ([string]$request.path)
             $guestResult = Invoke-GuestQuery -Vm $vm -Request $request `
-                -ArgumentList $encodedPath, ([string]$request.content_base64),
+                -Arguments $encodedPath, ([string]$request.content_base64),
                     ([bool]$request.overwrite), ([bool]$request.create_parent) -Query {
                     param($EncodedPath, $Content, $Overwrite, $CreateParent)
                     $path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedPath))
@@ -440,7 +567,7 @@ function Invoke-BridgeOperation {
             $vm = Get-ExactVm -Name $request.vm
             $encodedPath = Convert-ToBase64Text -Text ([string]$request.path)
             $guestResult = Invoke-GuestQuery -Vm $vm -Request $request `
-                -ArgumentList $encodedPath, ([Int64]$request.offset), ([int]$request.count) -Query {
+                -Arguments $encodedPath, ([Int64]$request.offset), ([int]$request.count) -Query {
                     param($EncodedPath, $Offset, $Count)
                     $path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedPath))
                     if (-not [IO.Path]::IsPathRooted($path)) { throw 'The guest path must be absolute.' }
@@ -473,7 +600,7 @@ function Invoke-BridgeOperation {
             $encodedPath = Convert-ToBase64Text -Text ([string]$request.path)
             $encodedParts = Convert-ToBase64Text -Text ([string]$request.parts_directory)
             $guestResult = Invoke-GuestQuery -Vm $vm -Request $request `
-                -ArgumentList $encodedPath, $encodedParts, ([int]$request.part_count),
+                -Arguments $encodedPath, $encodedParts, ([int]$request.part_count),
                     ([Int64]$request.expected_size), ([string]$request.expected_sha256) -Query {
                     param($EncodedPath, $EncodedParts, $PartCount, $ExpectedSize, $ExpectedHash)
                     $path = [IO.Path]::GetFullPath([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedPath)))

@@ -22,7 +22,7 @@ classifiers = [
 dependencies = ["mcp>=2.3,<3", "Pillow>=10,<13"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10", "build>=1.2,<2", "ruff>=0.8,<1"]
+dev = ["pytest>=8,<10", "build>=1.2,<2", "ruff==0.17.3"]
 
 [project.scripts]
 hyperv-console-mcp = "hyperv_console_mcp.server:main"
@@ -37,6 +37,9 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 hyperv_console_mcp = ["bridge/*.ps1", "lab/guest/*.ps1", "lab/guest/*.psm1"]
+
+[tool.ruff]
+src = ["src"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]

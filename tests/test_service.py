@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from hyperv_console_mcp.audit import AuditLogger
 from hyperv_console_mcp.config import Settings
 from hyperv_console_mcp.errors import BackendError, PolicyError, ValidationError

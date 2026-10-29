@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 import pytest
+
 from hyperv_console_mcp.backend import PowerShellBackend
 from hyperv_console_mcp.errors import BackendError
 

@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 
 import pytest
+
 from hyperv_console_mcp.dashboard import Dashboard
 
 

@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import pytest
+
 from hyperv_console_mcp.backend import PowerShellBackend
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows PowerShell is required.")
