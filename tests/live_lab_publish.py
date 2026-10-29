@@ -33,9 +33,16 @@ from hyperv_console_mcp.lab.transfer import (
 from hyperv_console_mcp.service import HyperVService
 
 
-def _write(service: HyperVService, vm: str, path: str, data: bytes) -> None:
+def _write(
+    service: HyperVService, vm: str, path: str, data: bytes, *, overwrite: bool = False
+) -> None:
     service.guest_write_file(
-        vm, path, base64.b64encode(data).decode("ascii"), create_parent=True
+        vm,
+        path,
+        base64.b64encode(data).decode("ascii"),
+        create_parent=True,
+        overwrite=overwrite,
+        confirm_path=path if overwrite else None,
     )
 
 
@@ -71,6 +78,18 @@ def main() -> int:
             verified = transfer.verify(args.vm, package_id, staged["manifest_sha256"])
             print(json.dumps({"verify": verified}, indent=2))
             if not verified["verified"]:
+                failures += 1
+
+            # Verification must also refuse a published package that changed after
+            # it was approved, and name the file. The guest only reports facts, so
+            # this exercises the host-side comparison, not a guest verdict.
+            _write(
+                service, args.vm, rf"{staged['guest_path']}\driver.sys", b"swapped",
+                overwrite=True,
+            )
+            tampered = transfer.verify(args.vm, package_id, staged["manifest_sha256"])
+            print(json.dumps({"verify_tampered": tampered}, indent=2))
+            if tampered["verified"] or "driver.sys" not in str(tampered.get("reason", "")):
                 failures += 1
 
         # A staging directory holding a file the manifest does not describe must never

@@ -280,7 +280,14 @@ class SshTransport:
 
     @staticmethod
     def encoded_line(script: str) -> str:
-        return f"powershell -NoProfile -NonInteractive -EncodedCommand {_encoded_command(script)}"
+        # `-ExecutionPolicy Bypass` is for this one process, not the guest: the
+        # structured operations run `guest_operations.ps1` by path, and a guest
+        # left on Restricted refuses to load a script file even from an encoded
+        # command. The guest's own policy is never changed.
+        return (
+            "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass "
+            f"-EncodedCommand {_encoded_command(script)}"
+        )
 
     def _run_script(
         self, vm: str, script: str, *, timeout: float

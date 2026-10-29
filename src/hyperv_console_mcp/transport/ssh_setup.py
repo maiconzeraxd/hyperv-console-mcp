@@ -25,6 +25,7 @@ from typing import Any
 from ..errors import BackendError, PolicyError, ValidationError
 from .psdirect import PowerShellDirectTransport
 from .ssh import ERROR_MARKER, JSON_MARKER, SshTransport, ps_quote, vm_key
+from .ssh import GUEST_SCRIPT as OPERATIONS_SCRIPT
 
 SWITCH_NAME = "HyperV-MCP-Lab"
 ADAPTER_NAME = "HyperV-MCP-Lab"
@@ -348,6 +349,39 @@ def _upload_script(transport: PowerShellDirectTransport, vm: str) -> None:
     transport.put_file(vm, source, GUEST_SCRIPT, overwrite=True)
 
 
+def _upload_operations(transport: PowerShellDirectTransport, vm: str) -> None:
+    """Ship the structured-operations script the SSH transport runs by path.
+
+    Every `guest_*` operation over SSH is `powershell -File guest_operations.ps1`,
+    so the guest has to hold it. Provisioning uploaded only the setup script, and
+    the transport then failed with the remote shell's "not recognized as the name
+    of a cmdlet" — a message that says nothing about what is actually missing.
+    """
+    source = Path(__file__).with_name("guest_operations.ps1")
+    transport.put_file(vm, source, OPERATIONS_SCRIPT, overwrite=True)
+
+
+def operations_state(transport: PowerShellDirectTransport, vm: str) -> dict[str, Any]:
+    """Whether the guest holds the operations script, and whether it is current."""
+    local = Path(__file__).with_name("guest_operations.ps1")
+    expected = hashlib.sha256(local.read_bytes()).hexdigest()
+    try:
+        result = transport.call(
+            vm, "guest_read_file", {"path": OPERATIONS_SCRIPT, "max_bytes": 1_048_576}
+        )
+    except Exception as exc:  # noqa: BLE001 - reported, not raised: status must answer
+        return {"path": OPERATIONS_SCRIPT, "present": False,
+                "expected_sha256": expected, "error": str(exc)}
+    file = result.get("file") or {}
+    if file.get("status") != "ok":
+        return {"path": OPERATIONS_SCRIPT, "present": False, "expected_sha256": expected}
+    actual = str(file.get("sha256") or "")
+    return {
+        "path": OPERATIONS_SCRIPT, "present": True, "sha256": actual,
+        "matches": actual == expected, "expected_sha256": expected,
+    }
+
+
 def _probe(settings: Any, vm: str) -> dict[str, Any]:
     """Wait for sshd to answer; a failure is reported, never hidden."""
     transport = SshTransport(settings)
@@ -424,6 +458,7 @@ def provision(service: Any, vm: str, *, use_existing_adapter: bool = False) -> d
         directory = state_directory(settings, vm)
         public_key = ensure_keypair(directory)
         _upload_script(transport, vm)
+        _upload_operations(transport, vm)
         sshd_source = ""
         if settings.openssh_package:
             sshd_source = _upload_openssh(transport, vm, Path(settings.openssh_package))
@@ -510,6 +545,7 @@ def status(service: Any, vm: str) -> dict[str, Any]:
         guest = _marker_result(execution.output)
     except Exception as exc:
         guest = {"reachable": False, "error": str(exc)}
+    operations = operations_state(transport, vm)
     health: dict[str, Any] | None = None
     if state is not None:
         try:
@@ -521,6 +557,7 @@ def status(service: Any, vm: str) -> dict[str, Any]:
         "provisioned": state is not None,
         "state": state,
         "guest": guest,
+        "operations_script": operations,
         "ssh_health": health,
     }
 

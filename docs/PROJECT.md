@@ -940,7 +940,32 @@ to agree with `json.dumps`. When it disagreed, the caller learned nothing beyond
   (`test_package_verification_hashes_the_manifest_file_not_a_reserialization`) covers it.
 
 Tests: 626 passing, 1 skipped. New: verification asks the guest for a listing and runs no guest
-script; a swapped file is named in the refusal; the re-indented manifest is refused. Not validated
-live yet: `guest_package_list` over either transport, and the manual runner's tripwire (it needs an
-elevated guest console and a real package to execute).
+script; a swapped file is named in the refusal; the re-indented manifest is refused.
+
+**Live validation on `NORTH-Test`, and the two defects it exposed.** `tests/live_lab_publish.py`
+now also tampers with a published file and re-verifies. Over PowerShell Direct it staged and
+published `live.a9d908ba`, verified it (`files_verified: 2`), then rewrote `driver.sys` in the
+guest and got `verified: false, reason: "The published package failed verification: driver.sys"`.
+Running the same flow over SSH found that **structured guest operations had never actually run
+over SSH**, for two reasons that only appear on a real guest:
+
+- **`guest_operations.ps1` was never uploaded.** `guest_ssh_provision` shipped only the setup
+  script; the operations script was described as installed by provisioning and referenced by
+  absolute path, so the first `guest_write_file` died with the remote shell's "O termo
+  'C:\ProgramData\HyperVConsoleMCP\guest_operations.ps1' não é reconhecido como nome de cmdlet".
+  Provisioning now uploads it (`_upload_operations`), and `guest_ssh_status` reports
+  `operations_script: {path, present, sha256, matches, expected_sha256}` so a stale or missing copy
+  is visible instead of surfacing as a confusing shell error.
+- **The guest's execution policy blocked the script.** A guest left on `Restricted` refuses to load
+  a `.ps1` by path, even from an encoded command, so the next attempt failed with "a execução de
+  scripts foi desabilitada neste sistema". `SshTransport.encoded_line` now starts each call with
+  `-ExecutionPolicy Bypass` for that one process; the guest's own policy is never changed.
+
+Why it went unnoticed: the earlier live SSH run exercised `guest_exec` and `guest_status`, both of
+which build an inline script and never load the operations file. After the fixes the same flow
+passed over SSH (`transport: "ssh"`, `files_verified: 2`, then `driver.sys` named as the tampered
+file), and SSH was deprovisioned afterwards.
+
+Not validated live: the manual runner's tripwire (it needs an elevated guest console and a real
+package to execute). Tests: 629 passing, 1 skipped.
 

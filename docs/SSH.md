@@ -54,7 +54,11 @@ Nothing imports it unless a VM actually uses SSH.
    lab switch.
 6. **Default shell.** `HKLM:\SOFTWARE\OpenSSH\DefaultShell` is set to `powershell.exe`, so a
    command means the same thing on both transports.
-7. **Probe.** Connects once. If the guest does not answer, the state file is removed and the
+7. **Guest scripts.** Two files are copied to `C:\ProgramData\HyperVConsoleMCP`: the setup script
+   and `guest_operations.ps1`, which implements the structured `guest_*` operations. Every one of
+   them is `powershell -ExecutionPolicy Bypass -File guest_operations.ps1` in its own process, so
+   a guest left on `Restricted` still works and its own policy is never changed.
+8. **Probe.** Connects once. If the guest does not answer, the state file is removed and the
    call fails, so `auto` is never left preferring a dead transport.
 
 The private key never leaves its directory and is never returned by a tool.
@@ -63,6 +67,8 @@ The private key never leaves its directory and is never returned by a tool.
 
 `guest_ssh_status(vm_name)` is read-only: whether the VM is provisioned, the state file, the
 guest-side check, and the SSH health probe. It reports paths, never key material.
+`operations_script` says whether the guest holds `guest_operations.ps1` and whether its SHA-256
+matches the packaged one; `present: false` or `matches: false` means re-run provisioning.
 
 `guest_ssh_deprovision(vm_name, confirm_vm)` removes the guest firewall rule, the
 `authorized_keys` entry, the host-side state directory, and the VM adapter when this tool

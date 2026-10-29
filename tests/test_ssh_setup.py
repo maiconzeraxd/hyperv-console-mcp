@@ -20,6 +20,7 @@ import pytest
 from hyperv_console_mcp.config import Settings
 from hyperv_console_mcp.errors import BackendError
 from hyperv_console_mcp.transport import ssh_setup
+from hyperv_console_mcp.transport.psdirect import PowerShellDirectTransport
 from hyperv_console_mcp.transport.ssh import ERROR_MARKER, JSON_MARKER, vm_key
 
 VM = "LAB-Test"
@@ -45,6 +46,7 @@ class FakeBackend:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.guest_output = guest_output
         self.host_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyMaterialForTests"
+        self.guest_files: dict[str, bytes] = {}
 
     def invoke(self, operation: str, payload: dict[str, Any], *, timeout=None):
         self.calls.append((operation, dict(payload)))
@@ -69,10 +71,17 @@ class FakeBackend:
                     "removed": ["adapter", "host_address"]}
         if operation == "guest_put_file":
             content = Path(payload["local_path"]).read_bytes()
+            self.guest_files[payload["guest_path"]] = content
             return {"vm": payload["vm"], "file": {
                 "path": payload["guest_path"], "size": len(content),
                 "sha256": hashlib.sha256(content).hexdigest(),
             }}
+        if operation == "guest_read_file":
+            content = self.guest_files.get(payload["path"])
+            if content is None:
+                return {"file": {"path": payload["path"], "status": "not_found"}}
+            return {"file": {"path": payload["path"], "size": len(content),
+                             "sha256": hashlib.sha256(content).hexdigest(), "status": "ok"}}
         if operation == "guest_exec":
             output = self.guest_output
             if output is None:
@@ -270,6 +279,44 @@ def test_every_guest_mode_ships_the_setup_script_before_running_it(
     assert uploaded["overwrite"] is True
     # The script that was shipped is the one the command names.
     assert ssh_setup.GUEST_SCRIPT in backend.calls[execution][1]["command"]
+
+
+def test_provision_ships_the_operations_script_the_ssh_transport_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every structured `guest_*` call over SSH runs this file by path.
+
+    Regression: provisioning uploaded only the setup script, so the first
+    structured operation on a freshly provisioned guest died with the remote
+    shell's "not recognized as the name of a cmdlet" — a message that names
+    neither the missing file nor the fix.
+    """
+    backend = FakeBackend()
+    service = FakeService(backend, settings(tmp_path))
+    monkeypatch.setattr(ssh_setup, "_probe", lambda settings_value, vm: {"ok": True, "error": None})
+
+    ssh_setup.provision(service, VM)
+
+    uploaded = [payload["guest_path"] for operation, payload in backend.calls
+                if operation == "guest_put_file"]
+    assert ssh_setup.OPERATIONS_SCRIPT in uploaded
+    packaged = Path(ssh_setup.__file__).with_name("guest_operations.ps1").read_bytes()
+    assert backend.guest_files[ssh_setup.OPERATIONS_SCRIPT] == packaged
+
+
+def test_status_reports_whether_the_guest_holds_the_operations_script(tmp_path: Path) -> None:
+    backend = FakeBackend(guest_output=JSON_MARKER + base64.b64encode(
+        json.dumps({"mode": "Status", "sshd_status": "Absent"}).encode()
+    ).decode())
+    service = FakeService(backend, settings(tmp_path))
+
+    missing = ssh_setup.status(service, VM)
+    assert missing["operations_script"]["present"] is False
+
+    ssh_setup._upload_operations(PowerShellDirectTransport(backend, service.settings), VM)
+    present = ssh_setup.status(service, VM)
+    assert present["operations_script"]["present"] is True
+    assert present["operations_script"]["matches"] is True
 
 
 def test_a_reused_adapter_goes_back_to_the_switch_it_came_from(

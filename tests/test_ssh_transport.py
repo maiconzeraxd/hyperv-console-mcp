@@ -442,6 +442,21 @@ def test_a_short_script_stays_on_the_command_line(tmp_path: Path) -> None:
     assert len(client.commands[-1]) <= MAX_COMMAND_LINE
 
 
+def test_the_encoded_process_bypasses_the_guest_script_policy(tmp_path: Path) -> None:
+    """Every structured operation runs `guest_operations.ps1` by path.
+
+    Regression: the encoded command started with no `-ExecutionPolicy`, so on a
+    guest left on Restricted the file would not load — "a execução de scripts foi
+    desabilitada neste sistema" — and every `guest_*` call over SSH failed with
+    no hint that the policy, not the transport, was the problem. The bypass is
+    per process; the guest's own policy is never touched.
+    """
+    provision(tmp_path)
+    line = SshTransport(settings(tmp_path)).encoded_line("Get-Date")
+    assert "-ExecutionPolicy Bypass" in line
+    assert "-NoProfile" in line
+
+
 def test_a_hundred_kilobyte_command_is_uploaded_instead_of_encoded(
     tmp_path: Path,
 ) -> None:
