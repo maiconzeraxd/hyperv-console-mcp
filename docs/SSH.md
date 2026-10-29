@@ -72,7 +72,7 @@ created it. It does not remove a switch other VMs still use.
 
 ```
 guest_ssh_provision(vm_name="NORTH-Test", confirm_vm="NORTH-Test")
-guest_status(vm_name="NORTH-Test")          # "transport": "ssh"
+guest_report(vm_name="NORTH-Test")          # "transport": "ssh"
 ```
 
 A live check on a disposable VM, outside the pytest suite:

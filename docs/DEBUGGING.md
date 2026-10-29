@@ -1,7 +1,7 @@
 # Kernel debugging with WinDbg
 
 This page moved to **[WINDBG.md](WINDBG.md)**, which covers the whole path: choosing between
-KDNET and the COM1 named pipe, `debug_kdnet_prepare`/`debug_serial_prepare`, the `kd.exe`
+KDNET and the COM1 named pipe, `debug_setup` over KDNET or the COM1 pipe, the `kd.exe`
 session tools, symbol configuration, the bugcheck flow, and opening a saved dump.
 
 The short version: KDNET for frequent kernel work on the internal `HyperV-MCP-Lab` switch,

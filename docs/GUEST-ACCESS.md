@@ -17,7 +17,8 @@ current user's Windows Credential Manager, under the generic target `HyperVConso
   Python session. It is deliberately not an MCP tool, so the AI never types the password.
 - `guest_credential_status` reports `source` (`credential_manager` or `environment`), the user
   name, and whether PowerShell Direct and SSH accept the credential — never the secret.
-- `guest_password_rotate(vm_name, confirm_vm)` generates a strong random password, sets it in
+- `guest_credential(vm_name, action="rotate", confirm_vm)` generates a strong random
+  password, sets it in
   the guest over PowerShell Direct, proves a **fresh** session accepts it, and only then
   replaces the stored one. If the proof fails, the previous password is restored.
 
@@ -82,7 +83,7 @@ the audit log.
 ## 5. Checking it worked
 
 1. `guest_autologon_configure(..., restart=True)`, or reboot deliberately.
-2. Wait for the VM to settle (`vm_wait`, or `console_wait_for_change`).
+2. Wait for the VM to settle (`vm_get(wait_for=[...])`, or `console_wait_for_change`).
 3. `console_screenshot(source="thumbnail")` — no VMConnect window needed. A desktop with no
    logon tile is the proof.
 4. `guest_config_status` shows the applied values.

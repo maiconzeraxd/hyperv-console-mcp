@@ -332,4 +332,50 @@ Live validation on `NORTH-Test`:
 
 Not validated live: the crash classifier. No bugcheck was induced in this phase, so event 18590, the state polling and the `bugcheck`/`hang` split are covered only by unit tests; the earlier live evidence is the v0.2 cycle, which did not crash. The `auto` fallback is likewise exercised only against fakes — no real SSH session has been killed in the middle of a `lab_cycle`.
 
-Local validation: 372 passing tests, 1 skipped, clean Ruff, all 10 PowerShell files parse, PSScriptAnalyzer reports no errors or warnings on `src`. The tool surface is unchanged (79 tools), because phase 1 changed behaviour rather than tools.
+Local validation: 372 passing tests, 1 skipped, clean Ruff, all 10 PowerShell files parse, PSScriptAnalyzer reports no errors or warnings on `src`. The tool surface is unchanged (78 tools), because phase 1 changed behaviour rather than tools.
+
+### 2026-10-29 — v0.3 phase 2: a tool surface sized for a conversation
+
+Every schema a conversation never uses is a cost it pays anyway, so the server no longer
+advertises all of them. The surface went from 78 tools to 53, and a profile registers only
+its own families.
+
+- **Toolsets.** Eleven families — `core`, `guest`, `console`, `config`, `credentials`,
+  `media`, `serial`, `ssh`, `lab`, `kd`, `debug` — assigned by tool-name prefix. A profile
+  picks the default set, `HYPERV_MCP_TOOLSETS` replaces it outright (`all` means every
+  family), and an unknown name is refused at startup instead of silently ignored. A tool
+  outside the enabled families is never registered, so its schema never reaches the model.
+  The safe profile exposes 29 tools and the lab profile 40. `hyperv_host_status` now reports
+  which families are enabled and which are off, because otherwise a missing capability
+  surfaces as an unknown tool with no explanation.
+- **The roadmap's example list was extended.** `core,console,lab,kd,ssh,media` leaves the
+  guest transport and the guest configuration with no home, and one flat `core` would make it
+  impossible to hide PowerShell Direct while keeping host control. `guest`, `config`,
+  `credentials` and `debug` are separate families for that reason.
+- **Consolidation, without losing a capability.** `console_input` carries the whole input
+  vocabulary as an ordered list of discriminated actions and `kd_execution` /
+  `kd_breakpoint` carry break/go and set/clear/on-load. The same pattern was applied to the
+  other near-duplicates: `checkpoint` (create/restore/delete), `guest_report`
+  (status/processes/services/events), `guest_credential` (rotate/forget), `kd_inspect`
+  (stack/modules/analyze/dump), `debug_setup` (`transport` × `prepare`/`guest`/
+  `deprovision`), and `vm_get(wait_for=...)` absorbing `vm_wait`. Read-only tools stay
+  separate from mutating ones — `checkpoint_list`, `guest_credential_status` and
+  `debug_status` survive as their own tools — so a listing never turns into an approval
+  prompt.
+- **Two bridge actions the batch already had but no tool exposed.** `console_batch` gained
+  `key_state` and `mouse_buttons`, so a held modifier or an explicit button state is one
+  action in the same request instead of a tool that does not exist.
+- **Correction to the first cut of this phase.** The first version of the lab profile was
+  `core,guest,console,lab,kd`: it could run a package with a debugger but not prepare one
+  (`kd_attach` answers "Run debug_serial_prepare first", and that tool was not registered),
+  and it could apply `lab_guest_configure` but not revert it. The lab profile now includes
+  `config` and `debug`, paid for by the consolidations above, and a test asserts both.
+- **The approval gate names tools, not operations.** `GATED_TOOLS` is the set of
+  `MUTATION`-annotated tool names, and `_approve` is called with the tool name — the summary
+  carries the specific action (`{"action": "restore", "snapshot_id": …}`) so the dialog still
+  says what is about to happen. The audit log keeps the specific operation names.
+
+Local validation: 390 passing tests, 1 skipped, clean Ruff. The stdio smoke asserts 29 tools
+on the safe profile and 53 with `HYPERV_MCP_TOOLSETS=all`, with the disabled mutation blocked
+on both. Not validated live: no tool was called against `NORTH-Test` in this phase, because
+the change is to what is advertised, not to what the tools do.

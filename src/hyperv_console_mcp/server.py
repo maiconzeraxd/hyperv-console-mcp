@@ -6,17 +6,18 @@ import json
 import logging
 import sys
 from functools import partial
-from typing import Any, Callable, Literal, TypeVar
+from typing import Annotated, Any, Callable, Literal, TypeVar, Union
 
 import anyio
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from pydantic import BaseModel, Field
 
 from . import __version__
 from .backend import GuestSplitBackend
 from .capture import VMConnectCapture
-from .config import Settings
+from .config import TOOLSETS, Settings
 from .errors import HyperVError
 from .service import HyperVService
 
@@ -24,6 +25,109 @@ T = TypeVar("T")
 LOGGER = logging.getLogger("hyperv_console_mcp")
 READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True)
 MUTATION = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False)
+
+# Which family a tool belongs to, decided by its name. The order matters: the
+# specific prefixes must come before the general ones they extend.
+TOOLSET_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("vm_inject_nmi", "kd"),
+    ("guest_ssh_", "ssh"),
+    ("guest_credential", "credentials"),
+    ("guest_autologon_configure", "config"),
+    ("guest_config_", "config"),
+    ("guest_", "guest"),
+    ("console_", "console"),
+    ("media_", "media"),
+    ("serial_", "serial"),
+    ("debug_", "debug"),
+    ("kd_", "kd"),
+    ("lab_", "lab"),
+)
+
+
+def toolset_for(name: str) -> str:
+    """The toolset that owns ``name``; every tool belongs to exactly one."""
+    for prefix, toolset in TOOLSET_PREFIXES:
+        if name.startswith(prefix):
+            return toolset
+    return "core"
+
+
+class TextAction(BaseModel):
+    """Type printable ASCII, tab, CR or LF through the synthetic keyboard."""
+
+    type: Literal["text"]
+    text: str
+
+
+class KeysAction(BaseModel):
+    """Press and release a chord, for example ["ctrl", "s"] or ["enter"]."""
+
+    type: Literal["keys"]
+    keys: list[str]
+
+
+class KeyStateAction(BaseModel):
+    """Hold or release one key, for drags and modifier keys."""
+
+    type: Literal["key_state"]
+    key: str
+    down: bool
+
+
+class MouseButtonsAction(BaseModel):
+    """Set the synthetic mouse button states explicitly."""
+
+    type: Literal["mouse_buttons"]
+    left: bool = False
+    right: bool = False
+    middle: bool = False
+
+
+class MoveAction(BaseModel):
+    """Move to absolute guest-display pixels, not host-window coordinates."""
+
+    type: Literal["move"]
+    x: int
+    y: int
+
+
+class ClickAction(BaseModel):
+    """Click a button, optionally moving to guest-display x/y first."""
+
+    type: Literal["click"]
+    button: Literal["left", "right", "middle"] = "left"
+    x: int | None = None
+    y: int | None = None
+
+
+class ScrollAction(BaseModel):
+    """Apply a relative wheel delta; positive normally scrolls up."""
+
+    type: Literal["scroll"]
+    delta: int
+
+
+class WaitAction(BaseModel):
+    """Pause inside the batch; the cumulative wait budget is 30 s."""
+
+    type: Literal["wait"]
+    milliseconds: int
+
+
+class CtrlAltDeleteAction(BaseModel):
+    """Send the Hyper-V secure-attention sequence."""
+
+    type: Literal["ctrl_alt_delete"]
+
+
+ConsoleAction = Annotated[
+    Union[
+        TextAction, KeysAction, KeyStateAction, MouseButtonsAction,
+        MoveAction, ClickAction, ScrollAction, WaitAction, CtrlAltDeleteAction,
+    ],
+    Field(discriminator="type"),
+]
+
 
 
 async def _invoke(function: Callable[..., T], *args: Any, **kwargs: Any) -> T:
@@ -53,7 +157,14 @@ def create_server(
         ),
     )
 
+    enabled = service.settings.toolsets
+
     def tool(name: str, *, annotations: ToolAnnotations, description: str) -> Callable:
+        # A tool outside the enabled toolsets is never registered, so its schema
+        # never reaches the conversation. The decorator still returns the
+        # function, which keeps the definition readable.
+        if toolset_for(name) not in enabled:
+            return lambda function: function
         return mcp.tool(
             name=name,
             description=description,
@@ -61,26 +172,49 @@ def create_server(
             structured_output=True,
         )
 
-    @tool("hyperv_host_status", annotations=READ_ONLY, description="Read Hyper-V host and service health.")
+    def image_tool(name: str, *, annotations: ToolAnnotations, description: str) -> Callable:
+        if toolset_for(name) not in enabled:
+            return lambda function: function
+        return mcp.tool(
+            name=name,
+            description=description,
+            annotations=annotations,
+            structured_output=False,
+        )
+
+    @tool("hyperv_host_status", annotations=READ_ONLY, description="Read Hyper-V host and service health, plus which tool families this server exposes.")
     async def host_status() -> dict[str, Any]:
-        return await _invoke(service.host_status)
+        result = await _invoke(service.host_status)
+        # A capability that is not registered cannot be called, so the host
+        # report names the families that are off instead of leaving the model
+        # to guess why a tool it expects is missing.
+        result["toolsets"] = {
+            "enabled": sorted(enabled),
+            "disabled": sorted(TOOLSETS - enabled),
+        }
+        return result
 
     @tool("vm_list", annotations=READ_ONLY, description="List VMs visible through the optional allowlist.")
     async def vm_list() -> dict[str, Any]:
         return await _invoke(service.list_vms)
 
-    @tool("vm_get", annotations=READ_ONLY, description="Get VM state, devices, memory, network, and checkpoint count.")
-    async def vm_get(vm_name: str) -> dict[str, Any]:
-        return await _invoke(service.get_vm, vm_name)
-
     @tool(
-        "vm_wait", annotations=READ_ONLY,
-        description="Poll until a VM reaches one of the requested states. Returns matched=false on timeout and never changes power state.",
+        "vm_get", annotations=READ_ONLY,
+        description="Get VM state, devices, memory, network, and checkpoint count. With wait_for set "
+        "to a list of states, poll until the VM reaches one of them instead and report matched=false "
+        "on timeout; waiting never changes power state.",
     )
-    async def vm_wait(
-        vm_name: str, states: list[str], timeout_seconds: int = 60, poll_interval_ms: int = 500
+    async def vm_get(
+        vm_name: str,
+        wait_for: list[str] | None = None,
+        timeout_seconds: int = 60,
+        poll_interval_ms: int = 500,
     ) -> dict[str, Any]:
-        return await _invoke(service.vm_wait, vm_name, states, timeout_seconds, poll_interval_ms)
+        if wait_for:
+            return await _invoke(
+                service.vm_wait, vm_name, wait_for, timeout_seconds, poll_interval_ms
+            )
+        return await _invoke(service.get_vm, vm_name)
 
     @tool(
         "vm_power", annotations=MUTATION,
@@ -106,72 +240,62 @@ def create_server(
         return await _invoke(service.list_checkpoints, vm_name)
 
     @tool(
-        "checkpoint_create", annotations=MUTATION,
-        description="Create a manual checkpoint. Requires ALLOW_CHECKPOINTS and an allowlist.",
+        "checkpoint", annotations=MUTATION,
+        description="Create, restore or delete a checkpoint. action='create' takes name and requires "
+        "ALLOW_CHECKPOINTS; 'restore' discards later guest state; 'delete' merges the checkpoint's "
+        "disks and does not include its children. restore and delete need confirm_vm and "
+        "confirm_snapshot_id equal to the VM name and the checkpoint ID.",
     )
-    async def checkpoint_create(vm_name: str, name: str) -> dict[str, Any]:
-        return await _invoke(service.create_checkpoint, vm_name, name)
-
-    @tool(
-        "checkpoint_restore", annotations=MUTATION,
-        description="Restore a checkpoint, discarding later guest state. confirm_vm and confirm_snapshot_id must match exactly.",
-    )
-    async def checkpoint_restore(
-        vm_name: str, snapshot_id: str, confirm_vm: str, confirm_snapshot_id: str
+    async def checkpoint(
+        vm_name: str,
+        action: Literal["create", "restore", "delete"],
+        name: str | None = None,
+        snapshot_id: str | None = None,
+        confirm_vm: str | None = None,
+        confirm_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
-        return await _invoke(
-            service.restore_checkpoint, vm_name, snapshot_id, confirm_vm, confirm_snapshot_id
-        )
-
-    @tool(
-        "checkpoint_delete", annotations=MUTATION,
-        description="Delete one checkpoint and merge its disks. Child checkpoints are not recursively included. Requires exact confirmations.",
-    )
-    async def checkpoint_delete(
-        vm_name: str, snapshot_id: str, confirm_vm: str, confirm_snapshot_id: str
-    ) -> dict[str, Any]:
+        if action == "create":
+            if not name:
+                raise ToolError("validation_error: action='create' needs name.")
+            return await _invoke(service.create_checkpoint, vm_name, name)
+        if not snapshot_id:
+            raise ToolError(f"validation_error: action='{action}' needs snapshot_id.")
+        if action == "restore":
+            return await _invoke(
+                service.restore_checkpoint, vm_name, snapshot_id, confirm_vm, confirm_snapshot_id
+            )
         return await _invoke(
             service.delete_checkpoint, vm_name, snapshot_id, confirm_vm, confirm_snapshot_id
         )
 
     @tool(
-        "guest_status", annotations=READ_ONLY,
-        description="Read guest OS, boot time, memory, system-drive free space, and kernel debug settings through PowerShell Direct.",
+        "guest_report", annotations=READ_ONLY,
+        description="Read guest state through PowerShell Direct. what='status' reports OS, boot time, "
+        "memory, system-drive free space and kernel debug settings; 'processes' lists up to 200 "
+        "processes; 'services' lists up to 200 services, stopped ones only with include_stopped=true; "
+        "'events' reads recent System, Application, Security or Setup records. Requires ALLOW_GUEST "
+        "and guest credentials.",
     )
-    async def guest_status(vm_name: str) -> dict[str, Any]:
-        return await _invoke(service.guest_status, vm_name)
-
-    @tool(
-        "guest_processes", annotations=READ_ONLY,
-        description="List up to 200 guest processes, optionally filtered by process name. Requires ALLOW_GUEST and guest credentials.",
-    )
-    async def guest_processes(vm_name: str, name_contains: str = "") -> dict[str, Any]:
-        return await _invoke(service.guest_processes, vm_name, name_contains)
-
-    @tool(
-        "guest_services", annotations=READ_ONLY,
-        description="List up to 200 guest services filtered by name; stopped services are excluded by default.",
-    )
-    async def guest_services(
-        vm_name: str, name_contains: str = "", include_stopped: bool = False
-    ) -> dict[str, Any]:
-        return await _invoke(service.guest_services, vm_name, name_contains, include_stopped)
-
-    @tool(
-        "guest_events", annotations=READ_ONLY,
-        description="Read recent System, Application, Security, or Setup event records with optional event ID and level filters.",
-    )
-    async def guest_events(
+    async def guest_report(
         vm_name: str,
+        what: Literal["status", "processes", "services", "events"] = "status",
+        name_contains: str = "",
+        include_stopped: bool = False,
         log_name: Literal["System", "Application", "Security", "Setup"] = "System",
         max_events: int = 30,
         event_id: int | None = None,
         level: int | None = None,
         hours: int = 72,
     ) -> dict[str, Any]:
-        return await _invoke(
-            service.guest_events, vm_name, log_name, max_events, event_id, level, hours
-        )
+        if what == "processes":
+            return await _invoke(service.guest_processes, vm_name, name_contains)
+        if what == "services":
+            return await _invoke(service.guest_services, vm_name, name_contains, include_stopped)
+        if what == "events":
+            return await _invoke(
+                service.guest_events, vm_name, log_name, max_events, event_id, level, hours
+            )
+        return await _invoke(service.guest_status, vm_name)
 
     @tool(
         "guest_exec", annotations=MUTATION,
@@ -273,17 +397,18 @@ def create_server(
         return await _invoke(service.guest_credential_status, vm_name)
 
     @tool(
-        "guest_password_rotate", annotations=MUTATION,
-        description="Generate a new random guest password, set it over PowerShell Direct, prove a fresh session accepts it, and only then store it in the Windows Credential Manager. Restores the previous password if the new one fails. Requires confirm_vm.",
+        "guest_credential", annotations=MUTATION,
+        description="Maintain the stored guest credential. action='rotate' generates a new random "
+        "password, sets it over PowerShell Direct, proves a fresh session accepts it and only then "
+        "stores it in the Windows Credential Manager, restoring the previous password if the new one "
+        "fails; action='forget' deletes the stored credential without changing the guest password. "
+        "Both need confirm_vm.",
     )
-    async def guest_password_rotate(vm_name: str, confirm_vm: str) -> dict[str, Any]:
-        return await _invoke(service.guest_password_rotate, vm_name, confirm_vm)
-
-    @tool(
-        "guest_credential_forget", annotations=MUTATION,
-        description="Delete the stored guest credential from the Windows Credential Manager. Does not change the guest password. Requires confirm_vm.",
-    )
-    async def guest_credential_forget(vm_name: str, confirm_vm: str) -> dict[str, Any]:
+    async def guest_credential(
+        vm_name: str, action: Literal["rotate", "forget"], confirm_vm: str
+    ) -> dict[str, Any]:
+        if action == "rotate":
+            return await _invoke(service.guest_password_rotate, vm_name, confirm_vm)
         return await _invoke(service.guest_credential_forget, vm_name, confirm_vm)
 
     @tool(
@@ -437,41 +562,16 @@ def create_server(
         return await _invoke(service.console_info, vm_name)
 
     @tool(
-        "console_type_text", annotations=MUTATION,
-        description="Type printable ASCII, tab, CR, or LF through Msvm_Keyboard. Unicode/ABNT2 text is rejected; use guest_exec for Unicode and match the guest keyboard layout. No VMConnect focus is required.",
+        "console_input", annotations=MUTATION,
+        description="Send ordered input to the guest console in one bridge request: text, key "
+        "chords, explicit key or mouse-button states, mouse move/click/scroll, waits, and "
+        "Ctrl+Alt+Delete. A single action is a list of one. Text is limited to printable ASCII, "
+        "tab, CR and LF; use guest_exec for Unicode. The batch stops at the first failure. No "
+        "VMConnect focus is required. Requires ALLOW_CONSOLE.",
     )
-    async def console_type_text(vm_name: str, text: str) -> dict[str, Any]:
-        return await _invoke(service.console_type_text, vm_name, text)
-
-    @tool(
-        "console_press_keys", annotations=MUTATION,
-        description="Press and release a key chord (for example ['ctrl','s'] or ['enter']) using Hyper-V virtual-key codes.",
-    )
-    async def console_press_keys(vm_name: str, keys: list[str]) -> dict[str, Any]:
-        return await _invoke(service.console_press_keys, vm_name, keys)
-
-    @tool(
-        "console_key_state", annotations=MUTATION,
-        description="Explicitly press or release one supported key. Release held keys when finished; prefer console_press_keys for ordinary chords.",
-    )
-    async def console_key_state(vm_name: str, key: str, down: bool) -> dict[str, Any]:
-        return await _invoke(service.console_key_state, vm_name, key, down)
-
-    @tool(
-        "console_mouse_buttons", annotations=MUTATION,
-        description="Set explicit left, right, and middle synthetic-mouse button states for drag operations.",
-    )
-    async def console_mouse_buttons(
-        vm_name: str, left: bool = False, right: bool = False, middle: bool = False
-    ) -> dict[str, Any]:
-        return await _invoke(service.console_mouse_buttons, vm_name, left, right, middle)
-
-    @tool(
-        "console_batch", annotations=MUTATION,
-        description="Run up to 32 ordered text, key-chord, click, move, scroll, wait, or Ctrl+Alt+Delete actions in one bridge request. Stops at the first failure.",
-    )
-    async def console_batch(vm_name: str, actions: list[dict[str, Any]]) -> dict[str, Any]:
-        return await _invoke(service.console_batch, vm_name, actions)
+    async def console_input(vm_name: str, actions: list[ConsoleAction]) -> dict[str, Any]:
+        prepared = [action.model_dump(exclude_none=True) for action in actions]
+        return await _invoke(service.console_batch, vm_name, prepared)
 
     @tool(
         "console_wait_for_change", annotations=READ_ONLY,
@@ -488,36 +588,6 @@ def create_server(
         return await _invoke(
             service.console_wait_for_change, vm_name, timeout_ms, region, min_change
         )
-
-    @tool(
-        "console_ctrl_alt_delete", annotations=MUTATION,
-        description="Send the Hyper-V secure-attention sequence to the guest.",
-    )
-    async def console_ctrl_alt_delete(vm_name: str) -> dict[str, Any]:
-        return await _invoke(service.console_ctrl_alt_delete, vm_name)
-
-    @tool(
-        "console_mouse_move", annotations=MUTATION,
-        description="Move the synthetic mouse to absolute guest-display pixel coordinates, not host-window coordinates.",
-    )
-    async def console_mouse_move(vm_name: str, x: int, y: int) -> dict[str, Any]:
-        return await _invoke(service.console_mouse_move, vm_name, x, y)
-
-    @tool(
-        "console_click", annotations=MUTATION,
-        description="Click left, right, or middle. Optionally move to guest-display x/y first.",
-    )
-    async def console_click(
-        vm_name: str, button: Literal["left", "right", "middle"] = "left", x: int | None = None, y: int | None = None
-    ) -> dict[str, Any]:
-        return await _invoke(service.console_click, vm_name, button, x, y)
-
-    @tool(
-        "console_scroll", annotations=MUTATION,
-        description="Apply a relative synthetic-mouse wheel delta. Positive values normally scroll up.",
-    )
-    async def console_scroll(vm_name: str, delta: int) -> dict[str, Any]:
-        return await _invoke(service.console_scroll, vm_name, delta)
 
     @tool(
         "media_list", annotations=READ_ONLY,
@@ -596,64 +666,56 @@ def create_server(
         return await _invoke(service.serial_disconnect, vm_name)
 
     @tool(
-        "debug_serial_status", annotations=READ_ONLY,
-        description="Read Hyper-V COM port debug configuration and local WinDbg/KDNET availability.",
+        "debug_status", annotations=READ_ONLY,
+        description="Read kernel-debug setup for a VM. transport='serial' reports the Hyper-V COM port "
+        "debug configuration and local WinDbg availability; transport='kdnet' reports the prepared "
+        "port, host address, switch, firewall rule and whether the key is stored. Never returns the key.",
     )
-    async def debug_serial_status(vm_name: str) -> dict[str, Any]:
+    async def debug_status(
+        vm_name: str, transport: Literal["serial", "kdnet"] = "serial"
+    ) -> dict[str, Any]:
+        if transport == "kdnet":
+            return await _invoke(service.debug_kdnet_status, vm_name)
         return await _invoke(service.debug_serial_status, vm_name)
 
     @tool(
-        "debug_serial_prepare", annotations=MUTATION,
-        description="Configure COM1 kernel debugging over a local named pipe while the VM is Off. "
-        "Guest BCD settings are a separate Running-VM operation. Never stops or reboots automatically. Requires ALLOW_DEBUGGER and confirm_vm.",
+        "debug_setup", annotations=MUTATION,
+        description="Prepare or remove kernel debugging. transport='serial' with action='prepare' "
+        "points COM1 at a local named pipe while the VM is Off, and with action='guest' sets fixed "
+        "COM1/115200 BCD debugging over PowerShell Direct while it is Running. transport='kdnet' with "
+        "action='prepare' attaches the internal lab switch, allocates a UDP port in 50000-50039, sets "
+        "guest BCD, adds a host firewall rule for kd.exe on that port and stores the generated key; "
+        "with action='deprovision' it removes the rule, the key and the local state. A deliberate "
+        "later reboot is required. Requires ALLOW_DEBUGGER and confirm_vm.",
     )
-    async def debug_serial_prepare(
+    async def debug_setup(
         vm_name: str,
-        pipe_name: str,
+        transport: Literal["serial", "kdnet"],
         confirm_vm: str,
-    ) -> dict[str, Any]:
-        return await _invoke(service.debug_serial_prepare, vm_name, pipe_name, confirm_vm)
-
-    @tool(
-        "debug_guest_prepare", annotations=MUTATION,
-        description="Enable fixed COM1/115200 guest BCD debugging through PowerShell Direct while the VM is Running. "
-        "Requires ALLOW_DEBUGGER, guest credentials, and confirm_vm. A deliberate later reboot is required.",
-    )
-    async def debug_guest_prepare(vm_name: str, confirm_vm: str) -> dict[str, Any]:
-        return await _invoke(service.debug_guest_prepare, vm_name, confirm_vm)
-
-    @tool(
-        "debug_kdnet_status", annotations=READ_ONLY,
-        description="Read the KDNET setup of a VM: prepared port, host address, switch, firewall rule, "
-        "whether the key is in the Credential Manager, and whether kd is attached. Never returns the key.",
-    )
-    async def debug_kdnet_status(vm_name: str) -> dict[str, Any]:
-        return await _invoke(service.debug_kdnet_status, vm_name)
-
-    @tool(
-        "debug_kdnet_prepare", annotations=MUTATION,
-        description="Prepare KDNET on the internal lab switch: attach the VM adapter, allocate a UDP port "
-        "in 50000-50039, set the guest BCD debug settings over PowerShell Direct, add a host firewall rule "
-        "for kd.exe on that port only, and store the generated key in the Windows Credential Manager. "
-        "The key never appears in a result. Requires ALLOW_DEBUGGER and confirm_vm; reboot the guest afterwards.",
-    )
-    async def debug_kdnet_prepare(
-        vm_name: str,
-        confirm_vm: str,
+        action: Literal["prepare", "guest", "deprovision"] = "prepare",
+        pipe_name: str | None = None,
         port: int | None = None,
         use_existing_adapter: bool = False,
     ) -> dict[str, Any]:
+        if transport == "serial":
+            if action == "guest":
+                return await _invoke(service.debug_guest_prepare, vm_name, confirm_vm)
+            if action == "deprovision":
+                raise ToolError(
+                    "validation_error: serial debugging has no deprovision step; use kdnet."
+                )
+            if not pipe_name:
+                raise ToolError("validation_error: transport='serial' needs pipe_name.")
+            return await _invoke(service.debug_serial_prepare, vm_name, pipe_name, confirm_vm)
+        if action == "guest":
+            raise ToolError(
+                "validation_error: KDNET sets its guest BCD as part of action='prepare'."
+            )
+        if action == "deprovision":
+            return await _invoke(service.debug_kdnet_deprovision, vm_name, confirm_vm)
         return await _invoke(
             service.debug_kdnet_prepare, vm_name, confirm_vm, port, use_existing_adapter
         )
-
-    @tool(
-        "debug_kdnet_deprovision", annotations=MUTATION,
-        description="Remove the KDNET firewall rule, turn guest BCD debugging off, delete the stored key and "
-        "the local KDNET state. Detaches an attached kd session first. Requires ALLOW_DEBUGGER and confirm_vm.",
-    )
-    async def debug_kdnet_deprovision(vm_name: str, confirm_vm: str) -> dict[str, Any]:
-        return await _invoke(service.debug_kdnet_deprovision, vm_name, confirm_vm)
 
     @tool(
         "kd_attach", annotations=MUTATION,
@@ -688,31 +750,27 @@ def create_server(
         return await _invoke(service.kd_detach, vm_name)
 
     @tool(
-        "kd_break", annotations=MUTATION,
-        description="Break into a running target and wait for the kd prompt. Uses the console break-in first "
-        "and falls back to vm_inject_nmi when the target does not stop (nmi=false disables the fallback). "
-        "Requires ALLOW_DEBUGGER.",
+        "kd_execution", annotations=MUTATION,
+        description="Control target execution: action='break' stops a running target (console break-in "
+        "first, then vm_inject_nmi unless nmi=false), action='go' resumes it with g, gh, gn, gc or gu "
+        "and waits until it breaks again. Requires ALLOW_DEBUGGER.",
     )
-    async def kd_break(
-        vm_name: str, nmi: bool | None = None, timeout_ms: int | None = None
+    async def kd_execution(
+        vm_name: str,
+        action: Literal["break", "go"],
+        command: str = "g",
+        nmi: bool | None = None,
+        timeout_ms: int | None = None,
     ) -> dict[str, Any]:
-        return await _invoke(service.kd_break, vm_name, nmi, timeout_ms)
-
-    @tool(
-        "kd_go", annotations=MUTATION,
-        description="Resume the target (g, gh, gn, gc, gu) and wait until it breaks again or the timeout "
-        "expires. Requires ALLOW_DEBUGGER.",
-    )
-    async def kd_go(
-        vm_name: str, command: str = "g", timeout_ms: int | None = None
-    ) -> dict[str, Any]:
+        if action == "break":
+            return await _invoke(service.kd_break, vm_name, nmi, timeout_ms)
         return await _invoke(service.kd_go, vm_name, command, timeout_ms)
 
     @tool(
         "kd_command", annotations=MUTATION,
         description="Run one kd command on an attached session and return its output, delimited by a unique "
-        "per-session marker rather than a timeout. Commands that resume the target belong in kd_go. "
-        "Requires ALLOW_DEBUGGER.",
+        "per-session marker rather than a timeout. Commands that resume the target belong in "
+        "kd_execution. Requires ALLOW_DEBUGGER.",
     )
     async def kd_command(
         vm_name: str, command: str, timeout_ms: int | None = None
@@ -728,72 +786,65 @@ def create_server(
         return await _invoke(service.kd_wait_event, vm_name, timeout_ms)
 
     @tool(
-        "kd_set_breakpoint", annotations=MUTATION,
-        description="Set a software breakpoint (bp) or deferred breakpoint (bu) with an optional command "
-        "string, e.g. MyDriver!Init or nt!KeBugCheckEx. Requires ALLOW_DEBUGGER.",
+        "kd_breakpoint", annotations=MUTATION,
+        description="Manage breakpoints in the attached session. action='set' sets a software breakpoint "
+        "(bp) or, with deferred=true, a deferred one (bu) with an optional command string; action='clear' "
+        "removes every breakpoint (bc *); action='on_load' arms sxe ld:<module> or, with enabled=false, "
+        "sxd ld:<module>, so a driver load is caught before its entry point runs. Requires ALLOW_DEBUGGER.",
     )
-    async def kd_set_breakpoint(
-        vm_name: str, target: str, deferred: bool = False, command: str | None = None
+    async def kd_breakpoint(
+        vm_name: str,
+        action: Literal["set", "clear", "on_load"],
+        target: str | None = None,
+        module: str | None = None,
+        deferred: bool = False,
+        command: str | None = None,
+        enabled: bool = True,
     ) -> dict[str, Any]:
-        return await _invoke(service.kd_set_breakpoint, vm_name, target, deferred, command)
-
-    @tool(
-        "kd_clear_breakpoints", annotations=MUTATION,
-        description="Clear every breakpoint in the attached session (bc *). Requires ALLOW_DEBUGGER.",
-    )
-    async def kd_clear_breakpoints(vm_name: str) -> dict[str, Any]:
+        if action == "set":
+            if not target:
+                raise ToolError("validation_error: action='set' needs target.")
+            return await _invoke(
+                service.kd_set_breakpoint, vm_name, target, deferred, command
+            )
+        if action == "on_load":
+            if not module:
+                raise ToolError("validation_error: action='on_load' needs module.")
+            return await _invoke(service.kd_break_on_load, vm_name, module, enabled)
         return await _invoke(service.kd_clear_breakpoints, vm_name)
 
     @tool(
-        "kd_break_on_load", annotations=MUTATION,
-        description="Break (sxe ld:module) or stop breaking (sxd ld:module) when a driver loads, so a load "
-        "can be caught before its entry point runs. Requires ALLOW_DEBUGGER.",
+        "kd_inspect", annotations=READ_ONLY,
+        description="Read a debug target without changing it. what='stack' returns the call stack (k) "
+        "of the broken target, depth frames deep; 'modules' lists loaded modules with base addresses "
+        "and symbols (lm); 'analyze' runs !analyze -v on the attached session and returns the parsed "
+        "bugcheck code, parameters, blamed driver, bucket id and top frames; 'dump' analyzes a host "
+        ".dmp under the evidence root with kd -z instead of the live session.",
     )
-    async def kd_break_on_load(
-        vm_name: str, module: str, enabled: bool = True
+    async def kd_inspect(
+        vm_name: str,
+        what: Literal["stack", "modules", "analyze", "dump"] = "analyze",
+        depth: int = 20,
+        dump_path: str | None = None,
+        commands: list[str] | None = None,
     ) -> dict[str, Any]:
-        return await _invoke(service.kd_break_on_load, vm_name, module, enabled)
-
-    @tool(
-        "kd_stack", annotations=READ_ONLY,
-        description="Read the current call stack (k) of the broken target.",
-    )
-    async def kd_stack(vm_name: str, depth: int = 20) -> dict[str, Any]:
-        return await _invoke(service.kd_stack, vm_name, depth)
-
-    @tool(
-        "kd_modules", annotations=READ_ONLY,
-        description="List loaded modules with base addresses and symbols (lm) in the attached session.",
-    )
-    async def kd_modules(vm_name: str) -> dict[str, Any]:
-        return await _invoke(service.kd_modules, vm_name)
-
-    @tool(
-        "kd_analyze", annotations=READ_ONLY,
-        description="Run !analyze -v on the attached session and return the parsed report: bugcheck code, "
-        "parameters, blamed driver, bucket id, and top stack frames.",
-    )
-    async def kd_analyze(vm_name: str) -> dict[str, Any]:
+        if what == "stack":
+            return await _invoke(service.kd_stack, vm_name, depth)
+        if what == "modules":
+            return await _invoke(service.kd_modules, vm_name)
+        if what == "dump":
+            if not dump_path:
+                raise ToolError("validation_error: what='dump' needs dump_path.")
+            return await _invoke(service.kd_dump_open, vm_name, dump_path, commands)
         return await _invoke(service.kd_analyze, vm_name)
 
-    @tool(
-        "kd_dump_open", annotations=READ_ONLY,
-        description="Analyze a crash dump on the host with kd -z, running !analyze -v plus optional extra "
-        "commands. The dump must live under the configured evidence root and end in .dmp.",
-    )
-    async def kd_dump_open(
-        vm_name: str, dump_path: str, commands: list[str] | None = None
-    ) -> dict[str, Any]:
-        return await _invoke(service.kd_dump_open, vm_name, dump_path, commands)
-
-    @mcp.tool(
+    @image_tool(
         name="console_screenshot",
         description="PNG screenshot of the guest display from the Hyper-V console thumbnail: no "
         "VMConnect window or interactive session needed, and at scale 1 its pixels are the same "
-        "coordinates console_mouse_move uses. source='vmconnect' captures an existing visible "
-        "VMConnect window instead. Requires ALLOW_SCREENSHOTS and an allowlist.",
+        "coordinates console_input's move action uses. source='vmconnect' captures an existing "
+        "visible VMConnect window instead. Requires ALLOW_SCREENSHOTS and an allowlist.",
         annotations=READ_ONLY,
-        structured_output=False,
     )
     async def console_screenshot(
         vm_name: str,

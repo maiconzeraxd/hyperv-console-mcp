@@ -339,6 +339,48 @@ def test_console_key_mouse_and_batch_validation(
         enabled.console_key_state("NORTH-Test", "shift", 1)
 
 
+def test_a_batch_can_hold_a_key_and_set_mouse_buttons(
+    enabled: HyperVService, backend: FakeBackend
+) -> None:
+    """The console tool's typed actions reach the bridge as one ordered batch.
+
+    ``console_input`` replaced the eleven single-purpose console tools, so the
+    two actions that used to be their own operations — an explicit key state
+    and explicit mouse-button states — have to travel inside the batch.
+    """
+    backend.responses["console_batch"] = {"vm": "NORTH-Test", "actions_completed": 3, "results": []}
+    enabled.console_batch("NORTH-Test", [
+        {"type": "key_state", "key": "Shift", "down": True},
+        {"type": "mouse_buttons", "left": True},
+        {"type": "key_state", "key": "shift", "down": False},
+    ])
+    assert backend.calls[-1] == (
+        "console_batch",
+        {"vm": "NORTH-Test", "actions": [
+            {"type": "key_state", "key": "shift", "down": True},
+            {"type": "mouse_buttons", "left": True, "right": False, "middle": False},
+            {"type": "key_state", "key": "shift", "down": False},
+        ]},
+    )
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        {"type": "key_state", "key": "hyper", "down": True},
+        {"type": "key_state", "key": "shift", "down": 1},
+        {"type": "mouse_buttons", "left": "yes"},
+    ],
+)
+def test_bad_key_and_button_actions_never_reach_the_bridge(
+    enabled: HyperVService, backend: FakeBackend, action: dict
+) -> None:
+    before = len(backend.calls)
+    with pytest.raises(ValidationError):
+        enabled.console_batch("NORTH-Test", [action])
+    assert len(backend.calls) == before
+
+
 @windows_paths
 def test_media_requires_confirmation_and_offline_safe_arguments(
     enabled: HyperVService, backend: FakeBackend

@@ -17,7 +17,7 @@ them has `kd.exe`, the tool fails with instructions instead of guessing.
 | Host change | one firewall rule for `kd.exe`, one UDP port | a COM1 pipe on the VM |
 | VM state while preparing | Running (BCD is set over PowerShell Direct) | Off for the pipe, Running for the guest BCD |
 | Best for | frequent kernel work, fast transfers, dump-less bugchecks | a VM that must stay off the network |
-| Prepared by | `debug_kdnet_prepare` | `debug_guest_prepare` + `debug_serial_prepare` |
+| Prepared by | `debug_setup(transport="kdnet", action="prepare")` | `debug_setup(transport="serial", action="prepare")` for the pipe, `action="guest"` for the guest BCD |
 
 SSH is a guest-administration transport, not a kernel-debug one: it cannot see the guest
 before the network stack is up, so it is useless for boot debugging, breakpoints and
@@ -38,7 +38,7 @@ One `kd.exe` process per VM, owned by the server:
   debugger returns when the target stops. They are recognised by their head and return when
   the prompt reappears.
 - **Break-in** sends `CTRL_BREAK` to the debugger's own process group (SIGINT off Windows).
-  If the console break does not stop the target, `kd_break` falls back to
+  If the console break does not stop the target, `kd_execution(action="break")` falls back to
   `vm_inject_nmi` (`Debug-VM -InjectNonMaskableInterrupt`), which needs
   `HYPERV_MCP_ALLOW_DEBUGGER` and `confirm_vm`. Pass `nmi=false` to disable the fallback.
 - **Logging**: everything `kd.exe` prints is appended to
@@ -55,12 +55,12 @@ exact `confirm_vm`):
 
 | Tool | What it does |
 |---|---|
-| `debug_serial_status` | COM1 pipe and VM state, read-only |
-| `debug_guest_prepare` | sets `bcdedit /dbgsettings SERIAL DEBUGPORT:1 BAUDRATE:115200` in the guest, checks Secure Boot first |
-| `debug_serial_prepare` | creates the host-side COM1 pipe while the VM is Off |
-| `debug_kdnet_status` | prepared state, port, host IP, firewall rule, key present (never the key) |
-| `debug_kdnet_prepare` | internal switch, UDP port 50000–50039, guest BCD, host firewall rule, key |
-| `debug_kdnet_deprovision` | removes the rule, the key and the state file |
+| `debug_status(transport="serial")` | COM1 pipe and VM state, read-only |
+| `debug_status(transport="kdnet")` | prepared state, port, host IP, firewall rule, key present (never the key) |
+| `debug_setup(transport="serial", action="guest")` | sets `bcdedit /dbgsettings SERIAL DEBUGPORT:1 BAUDRATE:115200` in the guest, checks Secure Boot first |
+| `debug_setup(transport="serial", action="prepare")` | creates the host-side COM1 pipe while the VM is Off |
+| `debug_setup(transport="kdnet", action="prepare")` | internal switch, UDP port 50000–50039, guest BCD, host firewall rule, key |
+| `debug_setup(transport="kdnet", action="deprovision")` | removes the rule, the key and the state file |
 | `vm_inject_nmi` | the break-in fallback |
 
 Session:
@@ -69,24 +69,23 @@ Session:
 |---|---|
 | `kd_attach` | `transport="kdnet"` (default) or `"serial"`; `break_on_connect`, `initial_break` |
 | `kd_status` | state, transport, log path; never the command line |
-| `kd_break` | console break, NMI fallback |
-| `kd_go` | `g`/`gh`/`gn`/`gc`/`gu`, returns when the target stops |
+| `kd_execution` | `action="break"` (console break, NMI fallback) or `action="go"` with `g`/`gh`/`gn`/`gc`/`gu`, which returns when the target stops |
 | `kd_command` | one line of debugger syntax; result carries the SHA-256 of the whole command |
 | `kd_wait_event` | waits for a break or a bugcheck, reports the module that loaded |
-| `kd_set_breakpoint` / `kd_clear_breakpoints` | `bp`/`bu` (`deferred=true`) and `bc *` |
-| `kd_break_on_load` | `sxe ld:<module>` / `sxd ld:<module>` |
-| `kd_stack` | `k <depth>` |
-| `kd_modules` | `lm` |
-| `kd_analyze` | `!analyze -v`, parsed |
-| `kd_dump_open` | opens a `.dmp` under the evidence root and runs `!analyze -v` |
+| `kd_breakpoint` | `action="set"` for `bp`/`bu` (`deferred=true`), `action="clear"` for `bc *`, `action="on_load"` for `sxe ld:<module>` / `sxd ld:<module>` |
+| `kd_inspect(what="stack")` | `k <depth>` |
+| `kd_inspect(what="modules")` | `lm` |
+| `kd_inspect(what="analyze")` | `!analyze -v`, parsed |
+| `kd_inspect(what="dump", dump_path=…)` | opens a `.dmp` under the evidence root and runs `!analyze -v` |
 
-`kd_command`, `kd_set_breakpoint` and friends are annotated destructive: debugger syntax can
-write guest memory and registers. `kd_status`, `kd_stack`, `kd_modules`, `kd_analyze` and
-`kd_wait_event` do not change the target and are read-only.
+`kd_command`, `kd_execution` and `kd_breakpoint` are annotated destructive: debugger syntax can
+write guest memory and registers. `kd_status`, `kd_inspect` and `kd_wait_event` do not change
+the target and are read-only.
 
 ## KDNET setup
 
-`debug_kdnet_prepare(vm_name, confirm_vm, port=None, use_existing_adapter=False)`:
+`debug_setup(transport="kdnet", action="prepare", vm_name, confirm_vm, port=None,
+use_existing_adapter=False)`:
 
 1. Verifies the guest answers PowerShell Direct before touching anything.
 2. Creates the internal switch `HyperV-MCP-Lab` and the host address if they are missing
@@ -103,15 +102,15 @@ The key never appears in a tool result, an event, an audit record, or the state 
 put on `kd.exe`'s command line only when a session starts, because KDNET requires it there.
 
 **The guest must reboot before the setting takes effect.** The tool does not reboot it. After
-the reboot, `kd_attach` connects. `debug_kdnet_deprovision` removes the firewall rule, the
+the reboot, `kd_attach` connects. `debug_setup(transport="kdnet", action="deprovision")` removes the firewall rule, the
 Credential Manager entry and the state file; it turns debug off in the guest when the guest is
 reachable, and reports `guest.success=false` when it is not.
 
 ## Serial setup
 
-`debug_guest_prepare` sets the guest BCD over PowerShell Direct (Secure Boot is checked
-first, and a failure leaves BCD untouched). `debug_serial_prepare` creates the host COM1 pipe
-while the VM is Off. The guest reboots deliberately, then `kd_attach(transport="serial")`
+`debug_setup(transport="serial", action="guest")` sets the guest BCD over PowerShell Direct
+(Secure Boot is checked first, and a failure leaves BCD untouched).
+`debug_setup(transport="serial", action="prepare")` creates the host COM1 pipe while the VM is Off. The guest reboots deliberately, then `kd_attach(transport="serial")`
 builds:
 
 ```
@@ -133,7 +132,7 @@ that already holds the modules you care about.
 
 1. `kd_wait_event` blocks until the target breaks; a bugcheck comes back as
    `{"event": "bugcheck"}` instead of a normal break.
-2. `kd_analyze` runs `!analyze -v` and parses it. The report carries `bugcheck_code`,
+2. `kd_inspect(what="analyze")` runs `!analyze -v` and parses it. The report carries `bugcheck_code`,
    `bugcheck_code_int`, `bugcheck_parameters`, `blamed_driver`, `probably_caused_by`,
    `module_name`, `symbol_name`, `stack_frames` and `top_frames`. Addresses lose the
    debugger's backtick; a text that is not an analysis comes back with `found: false` rather
@@ -144,21 +143,23 @@ that already holds the modules you care about.
    `outcome="bugcheck"` with the parsed analysis in `debugger.analysis` — instead of
    classifying the dropped session as a hang.
 
-Opening a saved dump works the same way without a live target: `kd_dump_open(vm_name,
-dump_path)` accepts only a `.dmp` under `HYPERV_MCP_EVIDENCE_ROOT`, runs `!analyze -v` and
+Opening a saved dump works the same way without a live target: `kd_inspect(what="dump",
+dump_path=...)` accepts only a `.dmp` under `HYPERV_MCP_EVIDENCE_ROOT`, runs `!analyze -v` and
 returns the same report shape.
 
 ## Troubleshooting
 
 - **`waiting_for_target` never changes**: the guest did not reboot after KDNET preparation, or
-  it booted with the debug setting off. Check `debug_kdnet_status`, then reboot.
-- **`kd_break` does not stop the target**: the console break is not reaching the debugger. The
+  it booted with the debug setting off. Check `debug_status(transport="kdnet")`, then reboot.
+- **`kd_execution(action="break")` does not stop the target**: the console break is not reaching
+  the debugger. The
   NMI fallback needs a guest that handles NMI; `nmi=false` disables it when you would rather
   see the original error.
 - **`Could not find kd.exe`**: install the Windows SDK "Debugging Tools for Windows" (x64) or
   set `HYPERV_MCP_DEBUGGERS_DIR`.
-- **Serial attach fails**: the VM is not Running, or COM1 has no debugger pipe. `debug_serial_prepare`
-  needs the VM Off, and `serial_connect` refuses while kd owns the pipe.
+- **Serial attach fails**: the VM is not Running, or COM1 has no debugger pipe.
+  `debug_setup(transport="serial", action="prepare")` needs the VM Off, and `serial_connect`
+  refuses while kd owns the pipe.
 
 ## References
 

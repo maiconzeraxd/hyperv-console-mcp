@@ -87,6 +87,44 @@ def _profile(values: Mapping[str, str]) -> str:
         raise ValidationError("HYPERV_MCP_PROFILE must be safe or lab.")
     return value
 
+
+# Every tool belongs to exactly one family. The server registers only the
+# families the profile enables, because every schema a conversation never uses
+# is a cost the model pays anyway.
+TOOLSETS = frozenset({
+    "core", "guest", "console", "config", "credentials", "media", "serial", "ssh",
+    "lab", "kd", "debug",
+})
+
+# A profile is a starting point, not a ceiling: HYPERV_MCP_TOOLSETS can add or
+# drop any family. Both defaults stay within the 40-tool budget — safe is the
+# everyday surface, lab adds the package cycle, the guest configuration that
+# cycle depends on, and the debugger.
+DEFAULT_TOOLSETS: dict[str, frozenset[str]] = {
+    "safe": frozenset({"core", "guest", "console", "config", "credentials", "media", "ssh"}),
+    "lab": frozenset({"core", "guest", "console", "config", "lab", "kd", "debug"}),
+}
+
+
+def _toolsets(values: Mapping[str, str], profile: str) -> frozenset[str]:
+    raw = values.get("HYPERV_MCP_TOOLSETS", "").strip()
+    if not raw:
+        return DEFAULT_TOOLSETS[profile]
+    names = frozenset(name.strip().casefold() for name in raw.split(",") if name.strip())
+    if "all" in names:
+        return TOOLSETS
+    unknown = names - TOOLSETS
+    if unknown:
+        raise ValidationError(
+            "HYPERV_MCP_TOOLSETS contains unknown toolsets: "
+            + ", ".join(sorted(unknown))
+            + f". Known: {', '.join(sorted(TOOLSETS))}."
+        )
+    if not names:
+        raise ValidationError("HYPERV_MCP_TOOLSETS must name at least one toolset.")
+    return names
+
+
 # The lab profile turns every capability on for the allowlisted VMs. It never
 # widens the allowlist itself: an empty list still refuses every mutation.
 CAPABILITY_VARIABLES = (
@@ -104,6 +142,7 @@ CAPABILITY_VARIABLES = (
 class Settings:
     allowed_vms: frozenset[str] = frozenset()
     profile: str = "safe"
+    toolsets: frozenset[str] = DEFAULT_TOOLSETS["safe"]
     allow_power: bool = False
     allow_checkpoints: bool = False
     allow_guest: bool = False
@@ -161,6 +200,7 @@ class Settings:
         return cls(
             allowed_vms=names,
             profile=profile,
+            toolsets=_toolsets(env, profile),
             allow_power=capability("HYPERV_MCP_ALLOW_POWER"),
             allow_checkpoints=capability("HYPERV_MCP_ALLOW_CHECKPOINTS"),
             allow_guest=capability("HYPERV_MCP_ALLOW_GUEST"),

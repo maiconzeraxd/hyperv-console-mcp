@@ -2,11 +2,11 @@
 
 A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/) server for **Hyper-V on Windows**. It combines VM management, checkpoints, PowerShell Direct diagnostics, synthetic keyboard/mouse input, console screenshots without VMConnect, installation media, serial consoles, and serial WinDbg preparation and a live kd.exe kernel-debugging session in one stdio server.
 
-**Alpha status:** 332 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. An earlier elevated read-only MCP diagnostic succeeded against `NORTH-Test` for host, VM, console, serial status, media, and checkpoint queries. Live mutations, PowerShell Direct guest operations and SSH provisioning were not exercised in this delivery. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
+**Alpha status:** 383 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
 
 ## Highlights
 
-- **78 MCP tools** with read-only/destructive annotations and structured results.
+- **53 MCP tools in eleven toolsets**, with read-only/destructive annotations and structured results; a profile registers only its own toolsets, so the default surface is 29 tools rather than every schema in every conversation.
 - Inventory, pause/resume, bounded state waiting, power, checkpoints, and bounded guest file transfer.
 - Guest OS health, processes, services, and recent event logs through PowerShell Direct.
 - Hyper-V `Msvm_Keyboard` and `Msvm_SyntheticMouse`, explicit key/button states, and ordered console batches: works without guest networking.
@@ -56,30 +56,45 @@ hyperv-console-mcp
 
 See [client configuration](docs/SETUP.md) for a stdio JSON example. All mutations require an explicit VM allowlist and their own capability flag. A `.env` file is **not** loaded automatically.
 
+`HYPERV_MCP_PROFILE` picks the default toolset list (`safe` or `lab`); `HYPERV_MCP_TOOLSETS` overrides it with a comma-separated list such as `core,console,guest` or `all`. An unknown name is refused at startup rather than silently ignored.
+
 ## Tool groups
 
-| Group | Tools |
-|---|---|
-| Host/VM | `hyperv_host_status`, `vm_list`, `vm_get`, `vm_wait`, `vm_power` |
-| Checkpoints | `checkpoint_list`, `checkpoint_create`, `checkpoint_restore`, `checkpoint_delete` |
-| PowerShell Direct | `guest_status`, `guest_processes`, `guest_services`, `guest_events`, `guest_exec`, `guest_read_file`, `guest_write_file`, `guest_put_file`, `guest_get_file` |
-| Console | `console_info`, `console_type_text`, `console_press_keys`, `console_key_state`, `console_mouse_buttons`, `console_batch`, `console_wait_for_change`, `console_ctrl_alt_delete`, `console_mouse_move`, `console_click`, `console_scroll`, `console_screenshot` |
-| Media/boot | `media_list`, `media_mount`, `media_eject` |
-| Serial console | `serial_status`, `serial_connect`, `serial_read`, `serial_send`, `serial_disconnect` |
-| Kernel debugging (setup) | `debug_serial_status`, `debug_serial_prepare`, `debug_guest_prepare`, `debug_kdnet_status`, `debug_kdnet_prepare`, `debug_kdnet_deprovision`, `vm_inject_nmi` |
-| Kernel debugging (kd session) | `kd_attach`, `kd_status`, `kd_detach`, `kd_break`, `kd_go`, `kd_command`, `kd_wait_event`, `kd_set_breakpoint`, `kd_clear_breakpoints`, `kd_break_on_load`, `kd_stack`, `kd_modules`, `kd_analyze`, `kd_dump_open` |
-| SSH (optional) | `guest_ssh_provision`, `guest_ssh_status`, `guest_ssh_deprovision` |
-| Guest credentials | `guest_credential_status`, `guest_password_rotate`, `guest_credential_forget` |
-| Guest automation | `guest_autologon_configure`, `guest_config_status`, `guest_config_revert` |
-| Driver lab | `lab_init`, `lab_diagnostics`, `lab_stage`, `lab_verify`, `lab_collect`, `lab_guest_configure` |
-| Driver lab (lab profile) | `lab_run`, `lab_cycle` |
-| Activity | `events_snapshot`, `operation_status` |
+Every tool belongs to one toolset. A profile decides which toolsets are registered, and a
+tool that is not registered is never advertised, so its schema never enters the model's
+context. The `safe` profile registers 29 tools, `lab` registers 40, `HYPERV_MCP_TOOLSETS`
+replaces the set outright, and `all` enables everything (53 tools).
+
+| Toolset | Tools | safe | lab |
+|---|---|:--:|:--:|
+| `core` | `hyperv_host_status`, `vm_list`, `vm_get`, `vm_power`, `checkpoint_list`, `checkpoint`, `events_snapshot`, `operation_status` | ✓ | ✓ |
+| `guest` | `guest_report`, `guest_exec`, `guest_read_file`, `guest_write_file`, `guest_put_file`, `guest_get_file` | ✓ | ✓ |
+| `console` | `console_info`, `console_input`, `console_wait_for_change`, `console_screenshot` | ✓ | ✓ |
+| `config` | `guest_autologon_configure`, `guest_config_status`, `guest_config_revert` | ✓ | ✓ |
+| `credentials` | `guest_credential_status`, `guest_credential` | ✓ | |
+| `media` | `media_list`, `media_mount`, `media_eject` | ✓ | |
+| `ssh` | `guest_ssh_provision`, `guest_ssh_status`, `guest_ssh_deprovision` | ✓ | |
+| `serial` | `serial_status`, `serial_connect`, `serial_read`, `serial_send`, `serial_disconnect` | | |
+| `lab` | `lab_init`, `lab_diagnostics`, `lab_stage`, `lab_verify`, `lab_collect`, `lab_guest_configure`, `lab_run`, `lab_cycle` | | ✓ |
+| `kd` | `kd_attach`, `kd_status`, `kd_detach`, `kd_execution`, `kd_command`, `kd_wait_event`, `kd_breakpoint`, `kd_inspect`, `vm_inject_nmi` | | ✓ |
+| `debug` | `debug_status`, `debug_setup` | | ✓ |
+
+Families that only differ by an action share one tool with a typed discriminator, so the
+schema carries the choice instead of a dozen near-duplicates: `console_input` takes an
+ordered list of `text`, `keys`, `key_state`, `mouse_buttons`, `move`, `click`, `scroll`,
+`wait` and `ctrl_alt_delete` actions; `checkpoint` takes `create`/`restore`/`delete`;
+`guest_report` takes `status`/`processes`/`services`/`events`; `guest_credential` takes
+`rotate`/`forget`; `kd_execution` takes `break`/`go`; `kd_breakpoint` takes
+`set`/`clear`/`on_load`; `kd_inspect` takes `stack`/`modules`/`analyze`/`dump`; and
+`debug_setup` crosses `transport` (`serial`/`kdnet`) with `action` (`prepare`/`guest`/
+`deprovision`). `vm_get(wait_for=[...])` absorbs the old `vm_wait`. Read-only tools stay
+separate from mutating ones, so a listing never asks for approval.
 
 Power actions are `start`, `shutdown`, `save`, `pause`, `resume`, `turn_off`, and `reset`. Forced power needs `confirm_vm` equal to `vm_name`. Restore/delete need the VM name and exact checkpoint GUID confirmed. Overwriting an existing guest file needs `overwrite=true` and an exact `confirm_path`.
 
 `guest_read_file`/`guest_write_file` move small content inline (≤ 8 MiB of base64 in one request). `guest_put_file`/`guest_get_file` copy whole files between the guest and a host path under `HYPERV_MCP_TRANSFER_ROOT`, verifying SHA-256 on both sides; they are the right choice for drivers, dumps and anything else measured in tens of MiB. Every guest result carries `transport` (`psdirect` or `ssh`); see [client configuration](docs/SETUP.md) for the optional SSH transport, which stays unused until `guest_ssh_provision` has set it up.
 
-The guest password lives in the current user's Windows Credential Manager under `HyperVConsoleMCP/<vm>`, so it never has to sit in the MCP host environment. `guest_autologon_configure` then makes the VM boot straight to the desktop: the password goes into LSA private data rather than the registry, and the no-lock-screen, no-Ctrl+Alt+Del, power, UAC and update-reboot toggles each record the value they replaced in the guest's `C:\DriverLab\State\guest-config.json`, which `guest_config_revert` restores. `guest_credential_status` reports which source is in use and whether PowerShell Direct and SSH accept it without returning the secret; `guest_password_rotate` changes the password in the guest, proves a fresh session accepts it and only then replaces the stored one. The `HYPERV_MCP_GUEST_USERNAME`/`HYPERV_MCP_GUEST_PASSWORD` pair still works as a fallback.
+The guest password lives in the current user's Windows Credential Manager under `HyperVConsoleMCP/<vm>`, so it never has to sit in the MCP host environment. `guest_autologon_configure` then makes the VM boot straight to the desktop: the password goes into LSA private data rather than the registry, and the no-lock-screen, no-Ctrl+Alt+Del, power, UAC and update-reboot toggles each record the value they replaced in the guest's `C:\DriverLab\State\guest-config.json`, which `guest_config_revert` restores. `guest_credential_status` reports which source is in use and whether PowerShell Direct and SSH accept it without returning the secret; `guest_credential(action="rotate")` changes the password in the guest, proves a fresh session accepts it and only then replaces the stored one. The `HYPERV_MCP_GUEST_USERNAME`/`HYPERV_MCP_GUEST_PASSWORD` pair still works as a fallback.
 
 Media operations use an existing DVD drive and require the VM to be Off. `media_mount(..., boot_first=true)` changes firmware/BIOS boot priority; it does not start the VM. Serial attachment requires an already configured COM1 named pipe and a Running VM. It is not a WinDbg replacement and cannot be combined with a debugger that already owns that pipe.
 
@@ -95,7 +110,7 @@ The server reuses one local PowerShell worker for host and console work and a se
 
 For kernel work, choose **KDNET** after reviewing a suitable network path, or **COM1/named pipe** to preserve a no-network VM. Guest BCD and host COM1 preparation are separate, explicitly confirmed operations. Neither stops nor reboots the VM automatically.
 
-`kd_attach` then drives a real `kd.exe` from the server: one session per VM, a per-session marker that delimits every command's output (never a sleep), an explicit `disconnected → waiting_for_target → running ↔ broken` state reported by `kd_status`, break-in through the console with `vm_inject_nmi` as the fallback, and a full log under `%LOCALAPPDATA%\HyperVConsoleMCP\kd\<vm>\`. `debug_kdnet_prepare` sets up the internal lab switch, a UDP port in 50000–50039 and a host firewall rule that names `kd.exe`; the generated key lives only in the Windows Credential Manager and is masked in everything the tool returns. Symbols come from the Microsoft symbol server into a local cache, plus any staged lab package that ships a `.pdb`. In the lab profile, `lab_cycle(..., debugger="kdnet")` attaches kd before the run, arms `sxe ld:<driver>` for each `.sys` in the package manifest, and reports a bugcheck with the parsed `!analyze -v` instead of calling it a hang.
+`kd_attach` then drives a real `kd.exe` from the server: one session per VM, a per-session marker that delimits every command's output (never a sleep), an explicit `disconnected → waiting_for_target → running ↔ broken` state reported by `kd_status`, break-in through the console with `vm_inject_nmi` as the fallback, and a full log under `%LOCALAPPDATA%\HyperVConsoleMCP\kd\<vm>\`. `debug_setup(transport="kdnet", action="prepare")` sets up the internal lab switch, a UDP port in 50000–50039 and a host firewall rule that names `kd.exe`; the generated key lives only in the Windows Credential Manager and is masked in everything the tool returns. Symbols come from the Microsoft symbol server into a local cache, plus any staged lab package that ships a `.pdb`. In the lab profile, `lab_cycle(..., debugger="kdnet")` attaches kd before the run, arms `sxe ld:<driver>` for each `.sys` in the package manifest, and reports a bugcheck with the parsed `!analyze -v` instead of calling it a hang.
 
 - [Performance rationale and benchmarks](docs/PERFORMANCE.md)
 - [WinDbg, KDNET, and serial setup](docs/WINDBG.md)

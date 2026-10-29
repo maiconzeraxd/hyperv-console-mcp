@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperv_console_mcp.config import Settings
+from hyperv_console_mcp.config import TOOLSETS, Settings
 from hyperv_console_mcp.errors import ValidationError
 
 
@@ -78,3 +78,39 @@ def test_an_explicit_false_holds_one_capability_back_in_the_lab_profile(
 def test_an_unknown_profile_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ValidationError, match="HYPERV_MCP_PROFILE"):
         Settings.from_env({"LOCALAPPDATA": str(tmp_path), "HYPERV_MCP_PROFILE": "yolo"})
+
+
+def test_each_profile_starts_from_its_own_toolsets(tmp_path: Path) -> None:
+    safe = Settings.from_env({"LOCALAPPDATA": str(tmp_path)})
+    lab = Settings.from_env({"LOCALAPPDATA": str(tmp_path), "HYPERV_MCP_PROFILE": "lab"})
+    # The everyday surface; the lab cycle, the guest configuration it depends on,
+    # and both halves of the debugger.
+    assert safe.toolsets == frozenset(
+        {"core", "guest", "console", "config", "credentials", "media", "ssh"}
+    )
+    assert lab.toolsets == frozenset({"core", "guest", "console", "config", "lab", "kd", "debug"})
+    assert "lab" not in safe.toolsets
+    assert "kd" not in safe.toolsets
+    assert "debug" not in safe.toolsets
+    # A lab cycle that cannot configure or revert its guest is not a lab profile.
+    assert {"config", "debug"} <= lab.toolsets
+
+
+def test_the_toolset_list_can_be_replaced_entirely(tmp_path: Path) -> None:
+    settings = Settings.from_env({
+        "LOCALAPPDATA": str(tmp_path),
+        "HYPERV_MCP_TOOLSETS": " Core , kd ,, debug ",
+    })
+    assert settings.toolsets == frozenset({"core", "kd", "debug"})
+
+
+def test_all_is_shorthand_for_every_toolset(tmp_path: Path) -> None:
+    settings = Settings.from_env({"LOCALAPPDATA": str(tmp_path), "HYPERV_MCP_TOOLSETS": "all"})
+    assert settings.toolsets == TOOLSETS
+
+
+def test_an_unknown_toolset_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError, match="unknown toolsets: kernel"):
+        Settings.from_env({
+            "LOCALAPPDATA": str(tmp_path), "HYPERV_MCP_TOOLSETS": "core,kernel",
+        })

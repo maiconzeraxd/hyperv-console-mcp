@@ -42,23 +42,18 @@ WAIT_CHANGE_THRESHOLD = 0.01
 KD_SYMBOL_SERVER = "https://msdl.microsoft.com/download/symbols"
 # Every MCP tool annotated MUTATION must request approval here, once per call.
 GATED_TOOLS = frozenset({
-    "vm_power", "checkpoint_create", "checkpoint_restore", "checkpoint_delete",
-    "guest_exec", "guest_write_file", "guest_put_file", "guest_get_file",
+    "vm_power", "checkpoint", "guest_exec",
+    "guest_write_file", "guest_put_file", "guest_get_file",
     "guest_ssh_provision", "guest_ssh_deprovision",
-    "guest_password_rotate", "guest_credential_forget",
-    "guest_autologon_configure", "guest_config_revert",
+    "guest_credential", "guest_autologon_configure", "guest_config_revert",
     "lab_init", "lab_stage", "lab_collect", "lab_run", "lab_cycle",
     "lab_guest_configure",
     "vm_inject_nmi",
-    "console_type_text", "console_press_keys", "console_key_state",
-    "console_mouse_buttons", "console_batch", "console_ctrl_alt_delete",
-    "console_mouse_move", "console_click", "console_scroll",
+    "console_input",
     "media_mount", "media_eject",
     "serial_connect", "serial_send", "serial_disconnect",
-    "debug_serial_prepare", "debug_guest_prepare",
-    "kd_attach", "kd_detach", "kd_break", "kd_go", "kd_command",
-    "kd_set_breakpoint", "kd_clear_breakpoints", "kd_break_on_load",
-    "debug_kdnet_prepare", "debug_kdnet_deprovision",
+    "debug_setup",
+    "kd_attach", "kd_detach", "kd_execution", "kd_command", "kd_breakpoint",
 })
 KEY_NAMES = frozenset(
     {
@@ -320,7 +315,7 @@ class HyperVService:
             vm_name, self.settings.allow_checkpoints, "HYPERV_MCP_ALLOW_CHECKPOINTS"
         )
         checkpoint_name = _text(name, "name", 128)
-        with self._approve("checkpoint_create", vm, {"checkpoint_name": checkpoint_name}):
+        with self._approve("checkpoint", vm, {"action": "create", "checkpoint_name": checkpoint_name}):
             return self._run(
                 "checkpoint_create", "checkpoint_create",
                 {"vm": vm, "name": checkpoint_name}, vm_name=vm,
@@ -344,7 +339,7 @@ class HyperVService:
         snapshot = self._snapshot_id(snapshot_id)
         self._confirm(confirm_vm, vm, "confirm_vm")
         self._confirm(confirm_snapshot_id, snapshot, "confirm_snapshot_id")
-        with self._approve("checkpoint_restore", vm, {"snapshot_id": snapshot}):
+        with self._approve("checkpoint", vm, {"action": "restore", "snapshot_id": snapshot}):
             return self._run(
                 "checkpoint_restore", "checkpoint_restore",
                 {"vm": vm, "snapshot_id": snapshot}, vm_name=vm,
@@ -359,7 +354,7 @@ class HyperVService:
         snapshot = self._snapshot_id(snapshot_id)
         self._confirm(confirm_vm, vm, "confirm_vm")
         self._confirm(confirm_snapshot_id, snapshot, "confirm_snapshot_id")
-        with self._approve("checkpoint_delete", vm, {"snapshot_id": snapshot}):
+        with self._approve("checkpoint", vm, {"action": "delete", "snapshot_id": snapshot}):
             return self._run(
                 "checkpoint_delete", "checkpoint_delete",
                 {"vm": vm, "snapshot_id": snapshot}, vm_name=vm,
@@ -829,7 +824,7 @@ class HyperVService:
 
         name = self._guest_vm(vm_name)
         self._confirm(confirm_vm, name, "confirm_vm")
-        with self._approve("guest_credential_forget", name, {"vm": name, "removes": "vault_entry"}):
+        with self._approve("guest_credential", name, {"vm": name, "action": "forget", "removes": "vault_entry"}):
             removed = credentials.CredentialStore().delete(name)
             self.audit.record("guest_credential_forget", name, "success")
         return {
@@ -857,7 +852,7 @@ class HyperVService:
             "validates_before_saving": True,
             "previous_source": previous_source,
         }
-        with self._approve("guest_password_rotate", name, summary):
+        with self._approve("guest_credential", name, {"action": "rotate", **summary}):
             return self._call(
                 "guest_password_rotate", name,
                 lambda: self._rotate(name, username, previous_password, previous_source),
@@ -1314,7 +1309,7 @@ class HyperVService:
             vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
         )
         value = _ascii_keyboard_text(_text(text, "text", 16_384, allow_empty=True))
-        with self._approve("console_type_text", vm, {"characters": len(value)}):
+        with self._approve("console_input", vm, {"characters": len(value)}):
             result = self._run(
                 "console_type_text", "console_type_text", {"vm": vm, "text": value}, vm_name=vm
             )
@@ -1332,7 +1327,7 @@ class HyperVService:
         normalized = [key.casefold() for key in keys]
         if any(key not in KEY_NAMES for key in normalized) or len(set(normalized)) != len(normalized):
             raise ValidationError("keys contains an unsupported or duplicate key name.")
-        with self._approve("console_press_keys", vm, {"keys": normalized}):
+        with self._approve("console_input", vm, {"keys": normalized}):
             return self._run(
                 "console_press_keys", "console_press_keys", {"vm": vm, "keys": normalized}, vm_name=vm
             )
@@ -1348,7 +1343,7 @@ class HyperVService:
             raise ValidationError("key is not a supported key name.")
         if not isinstance(down, bool):
             raise ValidationError("down must be a boolean value.")
-        with self._approve("console_key_state", vm, {"key": normalized, "down": down}):
+        with self._approve("console_input", vm, {"key": normalized, "down": down}):
             return self._run(
                 "console_key_state", "console_key_state",
                 {"vm": vm, "key": normalized, "down": down}, vm_name=vm,
@@ -1366,7 +1361,7 @@ class HyperVService:
         )
         if not all(isinstance(value, bool) for value in (left, right, middle)):
             raise ValidationError("Mouse button states must be boolean values.")
-        with self._approve("console_mouse_buttons", vm, {
+        with self._approve("console_input", vm, {
             "left": left, "right": right, "middle": middle,
         }):
             return self._run(
@@ -1383,6 +1378,8 @@ class HyperVService:
         allowed_fields = {
             "text": {"text"}, "keys": {"keys"}, "click": {"button", "x", "y"},
             "move": {"x", "y"}, "scroll": {"delta"}, "wait": {"milliseconds"},
+            "key_state": {"key", "down"},
+            "mouse_buttons": {"left", "right", "middle"},
             "ctrl_alt_delete": set(),
         }
         for index, action in enumerate(actions):
@@ -1430,6 +1427,20 @@ class HyperVService:
                 arguments["delta"] = _integer(
                     arguments.get("delta"), f"actions[{index}].delta", -100_000, 100_000
                 )
+            elif kind == "key_state":
+                key = arguments.get("key")
+                if not isinstance(key, str) or key.casefold() not in KEY_NAMES:
+                    raise ValidationError(f"actions[{index}].key is not a supported key.")
+                arguments["key"] = key.casefold()
+                down = arguments.get("down")
+                if not isinstance(down, bool):
+                    raise ValidationError(f"actions[{index}].down must be a boolean value.")
+            elif kind == "mouse_buttons":
+                for field in ("left", "right", "middle"):
+                    value = arguments.get(field, False)
+                    if not isinstance(value, bool):
+                        raise ValidationError(f"actions[{index}].{field} must be a boolean value.")
+                    arguments[field] = value
             elif kind == "wait":
                 duration = _integer(
                     arguments.get("milliseconds"), f"actions[{index}].milliseconds", 1, 30_000
@@ -1441,7 +1452,7 @@ class HyperVService:
             prepared.append((index, kind, arguments))
         # One approval and one bridge request cover the whole ordered batch, so an
         # intermediate state cannot be interleaved with another console call.
-        with self._approve("console_batch", vm, {
+        with self._approve("console_input", vm, {
             "actions": [kind for _, kind, _ in prepared],
             "action_count": len(prepared),
         }):
@@ -1456,7 +1467,7 @@ class HyperVService:
         vm = self._write(
             vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
         )
-        with self._approve("console_ctrl_alt_delete", vm):
+        with self._approve("console_input", vm):
             return self._run(
                 "console_ctrl_alt_delete", "console_ctrl_alt_delete", {"vm": vm}, vm_name=vm
             )
@@ -1470,7 +1481,7 @@ class HyperVService:
             "x": _integer(x, "x", 0, 32_767),
             "y": _integer(y, "y", 0, 32_767),
         }
-        with self._approve("console_mouse_move", vm, {"x": payload["x"], "y": payload["y"]}):
+        with self._approve("console_input", vm, {"x": payload["x"], "y": payload["y"]}):
             return self._run("console_mouse_move", "console_mouse_move", payload, vm_name=vm)
 
     def console_click(
@@ -1489,7 +1500,7 @@ class HyperVService:
                 x=_integer(x, "x", 0, 32_767), y=_integer(y, "y", 0, 32_767)
             )
         summary = {"button": button, "x": payload.get("x"), "y": payload.get("y")}
-        with self._approve("console_click", vm, summary):
+        with self._approve("console_input", vm, summary):
             return self._run("console_click", "console_click", payload, vm_name=vm)
 
     def console_scroll(self, vm_name: str, delta: int) -> dict[str, Any]:
@@ -1497,7 +1508,7 @@ class HyperVService:
             vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
         )
         amount = _integer(delta, "delta", -100_000, 100_000)
-        with self._approve("console_scroll", vm, {"delta": amount}):
+        with self._approve("console_input", vm, {"delta": amount}):
             return self._run(
                 "console_scroll", "console_scroll",
                 {"vm": vm, "delta": amount}, vm_name=vm,
@@ -1672,7 +1683,9 @@ class HyperVService:
                 "pipe_name must contain only letters, digits, dot, underscore, or hyphen."
             )
         self._confirm(confirm_vm, vm, "confirm_vm")
-        with self._approve("debug_serial_prepare", vm, {"pipe_name": pipe_name}):
+        with self._approve("debug_setup", vm, {
+                "transport": "serial", "action": "prepare", "pipe_name": pipe_name,
+            }):
             return self._run(
                 "debug_serial_prepare", "debug_serial_prepare",
                 {"vm": vm, "pipe_name": pipe_name}, vm_name=vm,
@@ -1687,7 +1700,9 @@ class HyperVService:
             raise PolicyError(
                 "Guest debug preparation requires guest credentials in the server environment."
             )
-        with self._approve("debug_guest_prepare", vm, {"bcd_debug": "COM1/115200"}):
+        with self._approve("debug_setup", vm, {
+                "transport": "serial", "action": "guest", "bcd_debug": "COM1/115200",
+            }):
             return self._run(
                 "debug_guest_prepare", "debug_guest_prepare",
                 {
@@ -1930,7 +1945,7 @@ class HyperVService:
                 self._run("kd_break", "vm_inject_nmi", {"vm": vm}, vm_name=vm, audit=False)
                 return {"method": "nmi", **session.break_in(timeout=timeout)}
 
-        with self._approve("kd_break", vm, {"state": session.state, "nmi": nmi}):
+        with self._approve("kd_execution", vm, {"state": session.state, "nmi": nmi}):
             result = self._local_action("kd_break", vm, action)
         return {"vm": vm, **result}
 
@@ -1941,7 +1956,7 @@ class HyperVService:
         session = self.kd.require(vm)
         text = _text(command, "command", 32)
         timeout = self._kd_timeout(timeout_ms)
-        with self._approve("kd_go", vm, {"command": text, "timeout_seconds": timeout}):
+        with self._approve("kd_execution", vm, {"command": text, "timeout_seconds": timeout}):
             result = self._local_action(
                 "kd_go", vm, lambda: session.go(text, timeout=timeout)
             )
@@ -1998,7 +2013,7 @@ class HyperVService:
             if '"' in hook or "\n" in hook or "\r" in hook:
                 raise ValidationError("command must be one line without double quotes.")
             line += f' "{hook}"'
-        with self._approve("kd_set_breakpoint", vm, {"breakpoint": line}):
+        with self._approve("kd_breakpoint", vm, {"breakpoint": line}):
             result = self._local_action(
                 "kd_set_breakpoint", vm, lambda: session.command(line)
             )
@@ -2007,7 +2022,7 @@ class HyperVService:
     def kd_clear_breakpoints(self, vm_name: str) -> dict[str, Any]:
         vm = self._kd_gate(vm_name)
         session = self.kd.require(vm)
-        with self._approve("kd_clear_breakpoints", vm, {"breakpoint": "all"}):
+        with self._approve("kd_breakpoint", vm, {"breakpoint": "all"}):
             result = self._local_action(
                 "kd_clear_breakpoints", vm, lambda: session.command("bc *")
             )
@@ -2024,7 +2039,7 @@ class HyperVService:
         if not isinstance(enabled, bool):
             raise ValidationError("enabled must be a boolean value.")
         line = f"{'sxe' if enabled else 'sxd'} ld:{name}"
-        with self._approve("kd_break_on_load", vm, {"command": line}):
+        with self._approve("kd_breakpoint", vm, {"command": line}):
             result = self._local_action(
                 "kd_break_on_load", vm, lambda: session.command(line)
             )
@@ -2113,7 +2128,8 @@ class HyperVService:
             raise ValidationError(
                 "A debugger session is attached. Detach it before changing the guest's debug settings."
             )
-        with self._approve("debug_kdnet_prepare", vm, {
+        with self._approve("debug_setup", vm, {
+            "transport": "kdnet", "action": "prepare",
             "port": port, "use_existing_adapter": use_existing_adapter,
             "guest_bcd": "net", "key_storage": "credential_manager",
         }):
@@ -2128,7 +2144,7 @@ class HyperVService:
         vm = self._kd_gate(vm_name)
         self._confirm(confirm_vm, vm, "confirm_vm")
         detached = False
-        with self._approve("debug_kdnet_deprovision", vm, {"removes": [
+        with self._approve("debug_setup", vm, {"transport": "kdnet", "action": "deprovision", "removes": [
             "firewall_rule", "guest_bcd_debug", "kdnet_key",
         ]}):
             def action() -> dict[str, Any]:

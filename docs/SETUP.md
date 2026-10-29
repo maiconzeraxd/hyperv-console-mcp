@@ -30,7 +30,7 @@ What the lab profile does **not** change: the allowlist (an empty `HYPERV_MCP_AL
 
 ## Guest credential
 
-The primary place for the guest password is the current user's Windows Credential Manager, under the generic target `HyperVConsoleMCP/<vm>`. Set it from the dashboard's **Guest access** page (typed locally, written straight into the vault) or with `guest_credential_set` from a Python session. It is deliberately not an MCP tool, so the AI never types the password. `guest_password_rotate` generates a new random password, sets it in the guest, proves a fresh session accepts it, and only then stores it, restoring the previous password if the guest rejects the new one. `guest_credential_status` reports where the credential came from and whether PowerShell Direct and SSH accept it, and never returns the secret.
+The primary place for the guest password is the current user's Windows Credential Manager, under the generic target `HyperVConsoleMCP/<vm>`. Set it from the dashboard's **Guest access** page (typed locally, written straight into the vault) or with `guest_credential_set` from a Python session. It is deliberately not an MCP tool, so the AI never types the password. `guest_credential(action="rotate")` generates a new random password, sets it in the guest, proves a fresh session accepts it, and only then stores it, restoring the previous password if the guest rejects the new one. `guest_credential_status` reports where the credential came from and whether PowerShell Direct and SSH accept it, and never returns the secret.
 
 `HYPERV_MCP_GUEST_USERNAME` and `HYPERV_MCP_GUEST_PASSWORD` keep working as a fallback for existing setups and win nothing over a stored entry; the status tool reports `environment` so the weaker source is visible.
 
@@ -102,12 +102,14 @@ $env:HYPERV_MCP_KD_LOG_ROOT   = "$env:LOCALAPPDATA\HyperVConsoleMCP\kd"
 $env:HYPERV_MCP_SYMBOL_ROOT   = "$env:LOCALAPPDATA\HyperVConsoleMCP\symbols"
 ```
 
-`debug_kdnet_prepare` reuses the same internal `HyperV-MCP-Lab` switch as SSH (never an
+`debug_setup(transport="kdnet", action="prepare")` reuses the same internal
+`HyperV-MCP-Lab` switch as SSH (never an
 external one), allocates one UDP port in 50000–50039, sets the guest BCD over PowerShell
 Direct, and adds one firewall rule named `HyperVConsoleMCP KDNET <vm>` for that `kd.exe`, that
 port and that interface. The generated key goes into the Windows Credential Manager under
 `HyperVConsoleMCP/kdnet/<vm>` and is masked in every result; the guest must be rebooted before
-KDNET takes effect. `debug_kdnet_deprovision` removes the rule, the key and the state file.
+KDNET takes effect. `debug_setup(transport="kdnet", action="deprovision")` removes the
+rule, the key and the state file.
 
 See [WINDBG.md](WINDBG.md) for both transports, the session tools, symbols and the bugcheck
 flow.
