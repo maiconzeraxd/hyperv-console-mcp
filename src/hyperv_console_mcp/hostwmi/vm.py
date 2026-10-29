@@ -147,38 +147,61 @@ def _settings(connection: Connection, identifier: str) -> dict[str, Any]:
     return rows[0]
 
 
-def _components(connection: Connection, identifier: str) -> dict[str, list[dict[str, Any]]]:
-    """The resource settings of one VM, one projected query per class.
+def _queries(identifier: str) -> dict[str, str]:
+    """One projected query per resource class.
 
     The association ``Msvm_VirtualSystemSettingDataComponent`` answers the same
     set in one call, but it returns every property of every object, which is
-    slower than these six narrow queries.
+    slower than these narrow queries.
     """
     prefix = f"WHERE InstanceID LIKE {wql_literal('Microsoft:' + identifier + '%')}"
     return {
-        "memory": connection.query(
+        "memory": (
             "SELECT InstanceID, VirtualQuantity, VirtualQuantityUnits "
             f"FROM Msvm_MemorySettingData {prefix}"
         ),
-        "processor": connection.query(
-            f"SELECT InstanceID, VirtualQuantity FROM Msvm_ProcessorSettingData {prefix}"
-        ),
-        "storage": connection.query(
+        "processor": f"SELECT InstanceID, VirtualQuantity FROM Msvm_ProcessorSettingData {prefix}",
+        "storage": (
             "SELECT InstanceID, ResourceSubType, Parent, HostResource "
             f"FROM Msvm_StorageAllocationSettingData {prefix}"
         ),
-        "drives": connection.query(
+        "drives": (
             "SELECT InstanceID, ResourceSubType, Parent, HostResource "
             f"FROM Msvm_ResourceAllocationSettingData {prefix} AND ResourceType = {_DVD_DRIVE}"
         ),
-        "ports": connection.query(
+        "ports": (
             "SELECT InstanceID, ElementName, Address "
             f"FROM Msvm_SyntheticEthernetPortSettingData {prefix}"
         ),
-        "allocations": connection.query(
+        "allocations": (
             f"SELECT InstanceID, Parent, HostResource FROM Msvm_EthernetPortAllocationSettingData {prefix}"
         ),
     }
+
+
+def _components(connection: Connection, identifier: str) -> dict[str, list[dict[str, Any]]]:
+    return {name: connection.query(wql) for name, wql in _queries(identifier).items()}
+
+
+def generation(connection: Connection, identifier: str) -> int:
+    """The VM generation, from the subtype of its realized setting."""
+    return _generation(_settings(connection, identifier))
+
+
+def dvd_drives(connection: Connection, identifier: str) -> list[dict[str, Any]]:
+    """The DVD drives of one VM, saying whether each one holds media.
+
+    ``Get-VM`` reports only the path; ``Get-VMDvdDrive`` — what ``media_list``
+    shows — adds the flag, so it is added here instead of in the shared mapping.
+    """
+    queries = _queries(identifier)
+    storage = connection.query(queries["storage"])
+    drives = []
+    for row in connection.query(queries["drives"]):
+        drive = _drive(row, storage)
+        drive["mounted"] = bool(str(drive["path"] or "").strip())
+        drives.append(drive)
+    return drives
 
 
 def _checkpoints(connection: Connection, identifier: str) -> int:

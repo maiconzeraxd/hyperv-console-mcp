@@ -551,3 +551,21 @@ the same frame, the WMI thumbnail and the bridge's were compared — `vm`, `stat
 `height`, `format`, `byte_length`, `stride_bytes` all equal, and the **decoded payloads were
 byte-for-byte identical** (614,404 bytes). The VM was resumed afterwards and confirmed
 `Running`. Not validated live: a thumbnail from a stopped VM, which no tool asks for.
+
+### 2026-10-29 — v0.3 phase 4: the DVD drives from the resource settings
+
+- **`media_list` reads two classes instead of six.** A DVD drive is an
+  `Msvm_ResourceAllocationSettingData` of resource type 16 (`<vm>\<controller>\<number>\<location>\D`);
+  the disc inside it is a separate `Msvm_StorageAllocationSettingData` of the virtual-CD
+  subtype whose `Parent` names the drive. `vm.py` now builds its projected queries from one
+  table, so `dvd_drives()` asks for those two classes and nothing else, and the drive mapping
+  itself is shared with `vm_get` rather than copied.
+- **`mounted` is added where it is reported, not in the shared mapping.** `Get-VM` shows a
+  DVD drive as a slot and a path; `Get-VMDvdDrive` — what `media_list` shows — also says
+  whether the tray holds anything, and the bridge treats a whitespace path as empty. The flag
+  is therefore computed in `dvd_drives()` and `vm_get`'s shape is untouched.
+
+Live validation (elevated, `NORTH-Test` on this host, VM running): `media_list` through WMI
+and through the bridge were compared as whole dictionaries — `vm`, `state`, `generation` and
+both drives with their `path` and `mounted` flags — and **the answers were equal**. Not
+validated live: a VM with a DVD drive that holds no disc, which this VM does not have.
