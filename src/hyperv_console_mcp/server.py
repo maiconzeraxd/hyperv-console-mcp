@@ -511,7 +511,9 @@ def create_server(
         "lab_cycle", annotations=MUTATION,
         description="Lab profile only. Optionally attach kd (debugger='serial' or 'kdnet'), run the package, "
         "collect evidence into HYPERV_MCP_EVIDENCE_ROOT, then optionally restore checkpoint pre-<run_id>. "
-        "With a debugger, a bugcheck is reported as a bugcheck with the parsed !analyze -v instead of a hang.",
+        "With a debugger, a bugcheck is reported as a bugcheck with the parsed !analyze -v instead of a hang; "
+        "a crash is triaged from the collected dump either way, and the cycle writes lab-cycle.json beside "
+        "the evidence so runs of the same package can be compared.",
     )
     async def lab_cycle(
         vm_name: str,

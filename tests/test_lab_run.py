@@ -440,6 +440,23 @@ def test_cycle_collects_evidence_and_restores_the_checkpoint(tmp_path: Path) -> 
     assert ("checkpoint_restore", "11111111-1111-1111-1111-111111111111") in service.calls
 
 
+def test_a_cycle_writes_the_record_two_runs_are_compared_on(tmp_path: Path) -> None:
+    service = FakeLabService(run_result={"success": True, "exit_code": 0})
+    service.settings = replace(service.settings, evidence_root=tmp_path)
+    report = lab_run.cycle(
+        service, "NORTH-Test",
+        package_id="north.1", run_id="run-1",
+        expected_manifest_sha256=DIGEST, revert_after=True,
+    )
+
+    assert report["report_file"]["written"] is True
+    written = json.loads((tmp_path / "run-1" / "lab-cycle.json").read_text(encoding="utf-8"))
+    assert written["outcome"] == "ok"
+    assert written["package"]["manifest_sha256"] == DIGEST
+    assert written["checkpoint"]["revert"]["restored"] is True
+    assert written["evidence"]["files"] == 1
+
+
 def test_cycle_keeps_the_report_when_the_guest_cannot_produce_evidence(
     tmp_path: Path,
 ) -> None:

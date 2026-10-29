@@ -18,6 +18,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from ..errors import HyperVError, PolicyError, ValidationError
+from .report import write as report_write
 from .transfer import GUEST_ROOT, DriverLabTransfer, guest_script, identifier
 
 RUNNER = rf"{GUEST_ROOT}\Tools\Invoke-DriverLabRun.ps1"
@@ -253,11 +254,15 @@ def _report(
     bugcheck: list[dict[str, Any]] | None,
     payload_executed: bool,
     bugcheck_source: str | None = None,
+    manifest_sha256: str | None = None,
 ) -> dict[str, Any]:
     return {
         "vm": vm_name,
         "package_id": package_id,
         "run_id": run_id,
+        # The digest the run was asked to match, kept even when the package did
+        # not verify: it is what a later run is compared against.
+        "manifest_sha256": manifest_sha256,
         "outcome": outcome,
         "detail": detail,
         "outcome_values": list(OUTCOMES),
@@ -321,7 +326,7 @@ def run(
             detail="the package did not match its manifest, so nothing was executed",
             started_utc=None, elapsed=0.0, timeout=timeout, checkpoint=checkpoint,
             verification=verification, execution=None, record=None, after=None,
-            bugcheck=None, payload_executed=False,
+            bugcheck=None, payload_executed=False, manifest_sha256=digest,
         )
 
     started_utc = datetime.now(timezone.utc).isoformat()
@@ -363,7 +368,7 @@ def run(
         outcome=outcome, detail=detail, started_utc=started_utc, elapsed=elapsed,
         timeout=timeout, checkpoint=checkpoint, verification=verification,
         execution=execution, record=record, after=after, bugcheck=bugcheck,
-        payload_executed=True, bugcheck_source=bugcheck_source,
+        payload_executed=True, bugcheck_source=bugcheck_source, manifest_sha256=digest,
     )
 
 
@@ -580,4 +585,6 @@ def cycle(
     report["revert"] = (
         _restore(service, vm_name, report["run_id"], checkpoint_id) if revert_after else None
     )
+    # Written last, so the record holds the revert and the crash reading too.
+    report["report_file"] = report_write(report, service.settings.evidence_root)
     return report
