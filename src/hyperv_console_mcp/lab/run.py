@@ -17,7 +17,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from ..errors import HyperVError, PolicyError, ValidationError
-from .transfer import GUEST_ROOT, DriverLabTransfer, identifier
+from .transfer import GUEST_ROOT, DriverLabTransfer, guest_script, identifier
 
 RUNNER = rf"{GUEST_ROOT}\Tools\Invoke-DriverLabRun.ps1"
 MAX_RESULT_BYTES = 1024 * 1024
@@ -50,10 +50,12 @@ def result_path(run_id: str) -> str:
 
 def run_command(package_id: str, run_id: str, digest: str) -> str:
     """The exact guest command. Both identifiers are validated, so nothing can break out."""
-    return (
-        f"& '{RUNNER}' -PackageId '{package_id}' -RunId '{run_id}' "
-        f"-ExpectedManifestSha256 '{digest}' "
-        f"-ApproveExecution 'EXECUTE {package_id} {run_id}'"
+    return guest_script(
+        RUNNER,
+        f"-PackageId '{package_id}'",
+        f"-RunId '{run_id}'",
+        f"-ExpectedManifestSha256 '{digest}'",
+        f"-ApproveExecution 'EXECUTE {package_id} {run_id}'",
     )
 
 
@@ -61,7 +63,9 @@ def _read_result(service: Any, vm_name: str, run_id: str) -> dict[str, Any] | No
     try:
         fetched = service.guest_read_file(vm_name, result_path(run_id), max_bytes=MAX_RESULT_BYTES)
         raw = base64.b64decode(fetched["file"]["content_base64"], validate=True)
-        record = json.loads(raw.decode("utf-8"))
+        # `Set-Content -Encoding UTF8` on Windows PowerShell 5.1 writes a BOM, and
+        # json.loads rejects one; the older files keep theirs, so read tolerantly.
+        record = json.loads(raw.decode("utf-8-sig"))
     except (HyperVError, KeyError, ValueError, TypeError):
         # No result file is exactly what a bugcheck or a hang looks like.
         return None
@@ -241,19 +245,30 @@ def run(
     )
 
 
-def _restore(service: Any, vm_name: str, run_id: str) -> dict[str, Any]:
+def _restore(
+    service: Any, vm_name: str, run_id: str, snapshot_id: str | None = None
+) -> dict[str, Any]:
+    """Restore the checkpoint this cycle made.
+
+    The id from `create_checkpoint` is used directly when it is known: a listing
+    taken moments after the checkpoint was created can still miss it, and the id
+    is the only thing that identifies *this* cycle's checkpoint anyway. The name
+    lookup stays as the fallback for a caller that has no id.
+    """
     wanted = checkpoint_name(run_id)
-    try:
-        listed = service.list_checkpoints(vm_name).get("checkpoints", [])
-    except HyperVError as exc:
-        return {"restored": False, "error": exc.code, "message": str(exc)}
-    match = next(
-        (item for item in listed if str(item.get("name", "")).casefold() == wanted.casefold()),
-        None,
-    )
-    if match is None:
-        return {"restored": False, "reason": f"checkpoint {wanted} is not present on the VM"}
-    snapshot_id = str(match.get("id", ""))
+    if not snapshot_id:
+        try:
+            listed = service.list_checkpoints(vm_name).get("checkpoints", [])
+        except HyperVError as exc:
+            return {"restored": False, "error": exc.code, "message": str(exc)}
+        match = next(
+            (item for item in listed if str(item.get("name", "")).casefold() == wanted.casefold()),
+            None,
+        )
+        if match is None:
+            return {"restored": False, "reason": f"checkpoint {wanted} is not present on the VM"}
+        snapshot_id = str(match.get("id", ""))
+    snapshot_id = str(snapshot_id)
     try:
         result = service.restore_checkpoint(vm_name, snapshot_id, vm_name, snapshot_id)
     except HyperVError as exc:
@@ -402,7 +417,8 @@ def cycle(
             # still has to come back.
             evidence = {"collected": False, "error": exc.code, "message": str(exc)}
     report["evidence"] = evidence
+    checkpoint_id = (report.get("checkpoint") or {}).get("id")
     report["revert"] = (
-        _restore(service, vm_name, report["run_id"]) if revert_after else None
+        _restore(service, vm_name, report["run_id"], checkpoint_id) if revert_after else None
     )
     return report

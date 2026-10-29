@@ -36,6 +36,9 @@ try {
     $record.output = $_.Exception.ToString(); $record.exit_code = 1
 }
 $record.finished_utc = [DateTime]::UtcNow.ToString('o')
-$record | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $run 'result.json') -Encoding UTF8
+$json = $record | ConvertTo-Json -Depth 5
+# Windows PowerShell's UTF8 encoding writes a BOM, which the host's json reader
+# rejected; every other file this lab writes is BOM-less, so this one is too.
+[IO.File]::WriteAllText((Join-Path $run 'result.json'), $json, (New-Object Text.UTF8Encoding($false)))
 $record | ConvertTo-Json -Depth 5 -Compress
 if (-not $record.success) { exit 1 }

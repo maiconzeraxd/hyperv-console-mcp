@@ -15,6 +15,8 @@ from hyperv_console_mcp.lab.transfer import (
     DriverLabTransfer,
     build_manifest,
     canonical_json,
+    failure_detail,
+    manifest_hash,
 )
 from hyperv_console_mcp.service import HyperVService
 
@@ -23,6 +25,7 @@ class FakeGuestBackend:
     def __init__(self) -> None:
         self.files: dict[str, bytes] = {}
         self.calls: list[str] = []
+        self.commands: list[str] = []
         self.corrupt_download = False
 
     @staticmethod
@@ -77,10 +80,14 @@ class FakeGuestBackend:
                 data = bytes([data[0] ^ 1]) + data[1:]
             return {"chunk": {"content_base64": base64.b64encode(data).decode(), "sha256": hashlib.sha256(data).hexdigest()}}
         if operation == "guest_read_file":
-            data = self.files[self._path(payload)]
+            path = self._path(payload)
+            if path not in self.files:
+                raise BackendError(f"{path} is not there", code="not_found")
+            data = self.files[path]
             assert len(data) <= payload["max_bytes"]
             return {"file": {"content_base64": base64.b64encode(data).decode(), "sha256": hashlib.sha256(data).hexdigest()}}
         if operation == "guest_exec":
+            self.commands.append(str(payload["command"]))
             return {"execution": {"success": True, "exit_code": 0, "output": "verified"}}
         raise AssertionError(operation)
 
@@ -251,3 +258,50 @@ def test_lab_init_does_not_overwrite_tools_after_a_generic_bridge_error() -> Non
         initialize(service, "NORTH-Test")
     assert service.written == []
     assert service.executed is False
+
+
+def test_lab_init_replaces_a_tool_that_drifted_from_the_packaged_version() -> None:
+    """The server's own copy is the authority; a stale guest copy is replaced.
+
+    Regression: after the server's tools changed, the guest kept the old copy and
+    `lab_init` refused to update it, which stranded the lab on a live VM.
+    """
+    service = FakeInitService(None)
+    result = initialize(service, "NORTH-Test")
+    assert result["already_verified"] == 0
+    assert result["updated"] == [path.name for path in _tool_files()]
+    assert len(service.written) == len(_tool_files())
+    assert service.executed is True
+
+def test_a_guest_failure_detail_prefers_the_specific_reason() -> None:
+    """`-File` scripts leave `error_records` empty and put the text in `output`."""
+    assert failure_detail({"error_records": ["first", "second"], "output": "x"}) == "first"
+    assert failure_detail({"error_records": [], "output": " spoken text \r\n"}) == "spoken text"
+    assert failure_detail({"exit_code": 3}) == "exit code 3"
+
+
+def test_guest_scripts_run_even_when_the_guest_policy_forbids_scripts(
+    guest: tuple[HyperVService, FakeGuestBackend], tmp_path: Path
+) -> None:
+    """A default Windows guest is `Restricted`; the lab must not depend on that.
+
+    Regression: `& 'C:\\DriverLab\\Tools\\...ps1'` died with "execution of scripts
+    is disabled on this system" on a stock guest, so lab_init, verify and collect
+    all failed against a real VM.
+    """
+    service, backend = guest
+    source = tmp_path / "package"
+    source.mkdir()
+    (source / "Run-Lab.ps1").write_text("exit 0\n", encoding="utf-8")
+    manifest = build_manifest(source, "north-test.1")
+    transfer = DriverLabTransfer(service)
+    transfer.verify("NORTH-Test", "north-test.1", manifest_hash(manifest))
+    initialize(service, "NORTH-Test")
+
+    assert backend.commands, "no guest command was issued"
+    for command in backend.commands:
+        assert command.startswith(
+            "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '"
+        ), command
+    assert any("Test-DriverLabPackage.ps1" in command for command in backend.commands)
+    assert any("Initialize-DriverLab.ps1" in command for command in backend.commands)

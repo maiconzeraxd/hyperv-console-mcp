@@ -19,6 +19,7 @@ MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_PACKAGE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_PACKAGE_FILES = 512
 CHUNK_BYTES = 4 * 1024 * 1024
+MAX_ERROR_CHARS = 600
 GUEST_ROOT = r"C:\DriverLab"
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,63}")
 # Package paths must stay portable ASCII so the Python and PowerShell canonical
@@ -35,6 +36,37 @@ def identifier(value: str, label: str) -> str:
     if not isinstance(value, str) or not _IDENTIFIER.fullmatch(value):
         raise ValidationError(f"{label} must be 1-64 letters, digits, dots, or hyphens.")
     return value
+
+
+def guest_script(path: str, *arguments: str) -> str:
+    """Invoke one of this server's own guest scripts, whatever the guest's policy.
+
+    The guest's ExecutionPolicy belongs to the operator, and the server does not
+    change it. These scripts ship with the server and are hash-verified before
+    they run, so each call starts its own PowerShell that bypasses the policy for
+    that one file instead of relaxing the session for everything else.
+    """
+    tail = "".join(f" {argument}" for argument in arguments)
+    return (
+        "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass "
+        f"-File '{path}'{tail}"
+    )
+
+
+def failure_detail(execution: dict[str, Any]) -> str:
+    """The most specific reason a guest script failed, not the whole transcript.
+
+    A guest script started with `-File` reports a terminating error through its
+    exit code and its text output, so `error_records` is often empty and the
+    output is the only place the reason exists.
+    """
+    records = execution.get("error_records")
+    if isinstance(records, list) and records:
+        return str(records[0]).strip()[:MAX_ERROR_CHARS]
+    output = str(execution.get("output") or "").strip()
+    if output:
+        return output[:MAX_ERROR_CHARS]
+    return f"exit code {execution.get('exit_code')}"
 
 
 def canonical_json(value: Any) -> bytes:
@@ -229,8 +261,11 @@ class DriverLabTransfer:
             raise ValidationError("expected_hash must be a SHA-256 hexadecimal string.")
         result = self.service.guest_exec(
             vm_name,
-            "& 'C:\\DriverLab\\Tools\\Test-DriverLabPackage.ps1' "
-            f"-PackageId '{package_id}' -ExpectedManifestSha256 '{expected_hash.lower()}'",
+            guest_script(
+                rf"{GUEST_ROOT}\Tools\Test-DriverLabPackage.ps1",
+                f"-PackageId '{package_id}'",
+                f"-ExpectedManifestSha256 '{expected_hash.lower()}'",
+            ),
         )
         return {"package_id": package_id, "verification": result, "payload_executed": False, "verified": bool(result.get("execution", {}).get("success"))}
 
@@ -240,14 +275,21 @@ class DriverLabTransfer:
     ) -> dict[str, Any]:
         package_id = identifier(package_id, "package_id")
         run_id = identifier(run_id, "run_id")
+        arguments = [f"-PackageId '{package_id}'", f"-RunId '{run_id}'"]
+        if include_kernel_dump:
+            # `-File` hands a script its arguments as text, so `-Switch:$false`
+            # arrives as the string "$false" and fails to bind. The switch is
+            # either absent or present.
+            arguments.append("-IncludeKernelDump")
         result = self.service.guest_exec(
             vm_name,
-            "& 'C:\\DriverLab\\Tools\\New-DriverLabEvidence.ps1' "
-            f"-PackageId '{package_id}' -RunId '{run_id}' -IncludeKernelDump:${str(include_kernel_dump).lower()}",
+            guest_script(rf"{GUEST_ROOT}\Tools\New-DriverLabEvidence.ps1", *arguments),
         )
         execution = result.get("execution", {})
         if not execution.get("success"):
-            raise ValidationError(f"Guest evidence collection failed: {execution.get('error', 'unknown error')}")
+            raise ValidationError(
+                f"Guest evidence collection failed: {failure_detail(execution)}"
+            )
         evidence_index = rf"{GUEST_ROOT}\Evidence\{run_id}\evidence.json"
         downloaded = self.service.guest_read_file(vm_name, evidence_index, MAX_MANIFEST_BYTES)
         raw = base64.b64decode(downloaded["file"]["content_base64"], validate=True)

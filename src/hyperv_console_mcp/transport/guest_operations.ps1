@@ -119,7 +119,10 @@ function Invoke-GuestOperation {
             try {
                 [IO.File]::WriteAllBytes($temporary, $bytes)
                 if ([IO.File]::Exists($path)) {
-                    [IO.File]::Replace($temporary, $path, $null)
+                    # PowerShell turns $null into '' for a [string] parameter, and
+                    # File.Replace rejects an empty backup path; [NullString]::Value
+                    # is the null the overload expects.
+                    [IO.File]::Replace($temporary, $path, [NullString]::Value)
                 } else {
                     [IO.File]::Move($temporary, $path)
                 }

@@ -12,9 +12,9 @@ from typing import Any
 
 from ..backend import PowerShellBackend
 from ..config import Settings
-from ..errors import HyperVError, ValidationError
+from ..errors import HyperVError
 from ..service import HyperVService
-from .transfer import DriverLabTransfer, build_manifest
+from .transfer import GUEST_ROOT, DriverLabTransfer, build_manifest, guest_script
 
 GUEST_DIRECTORY = Path(__file__).with_name("guest")
 
@@ -24,10 +24,20 @@ def _tool_files() -> list[Path]:
 
 
 def initialize(service: HyperVService, vm_name: str) -> dict[str, Any]:
+    """Install this server's lab tools into the guest.
+
+    A tool whose hash differs from the packaged one is replaced: the server's own
+    copy is the authority, and refusing to update would strand every guest on the
+    tools it received first, so an upgrade could never reach it. Only a genuine
+    bridge failure stops the install.
+    """
     verified = 0
+    installed = 0
+    updated: list[str] = []
     for path in _tool_files():
         content = path.read_bytes()
         remote = rf"C:\DriverLab\Tools\{path.name}"
+        encoded = base64.b64encode(content).decode("ascii")
         try:
             existing = service.guest_read_file(vm_name, remote, max_bytes=1_048_576)
         except HyperVError as exc:
@@ -35,19 +45,35 @@ def initialize(service: HyperVService, vm_name: str) -> dict[str, Any]:
             # surface instead of being mistaken for an absent tool.
             if exc.code != "not_found":
                 raise
+            installed += 1
             service.guest_write_file(
-                vm_name, remote, base64.b64encode(content).decode("ascii"), create_parent=True,
+                vm_name, remote, encoded, create_parent=True,
             )
-        else:
-            if existing["file"]["sha256"].casefold() != hashlib.sha256(content).hexdigest():
-                raise ValidationError(f"Installed lab tool differs from the packaged version: {path.name}")
+            continue
+        if existing["file"]["sha256"].casefold() == hashlib.sha256(content).hexdigest():
             verified += 1
-    result = service.guest_exec(vm_name, "& 'C:\\DriverLab\\Tools\\Initialize-DriverLab.ps1'")
-    return {"vm": vm_name, "initialization": result, "already_verified": verified, "payload_executed": False}
+            continue
+        updated.append(path.name)
+        service.guest_write_file(
+            vm_name, remote, encoded, overwrite=True, confirm_path=remote, create_parent=True,
+        )
+    result = service.guest_exec(
+        vm_name, guest_script(rf"{GUEST_ROOT}\Tools\Initialize-DriverLab.ps1")
+    )
+    return {
+        "vm": vm_name,
+        "initialization": result,
+        "already_verified": verified,
+        "installed": installed,
+        "updated": updated,
+        "payload_executed": False,
+    }
 
 
 def diagnostics(service: HyperVService, vm_name: str) -> dict[str, Any]:
-    return service.guest_exec(vm_name, "& 'C:\\DriverLab\\Tools\\Get-DriverLabDiagnostics.ps1'")
+    return service.guest_exec(
+        vm_name, guest_script(rf"{GUEST_ROOT}\Tools\Get-DriverLabDiagnostics.ps1")
+    )
 
 
 def _parser() -> argparse.ArgumentParser:

@@ -15,6 +15,9 @@ from hyperv_console_mcp.lab import run as lab_run
 from hyperv_console_mcp.service import GATED_TOOLS, HyperVService
 
 DIGEST = "a" * 64
+EVIDENCE_FAILURE = (
+    "New-DriverLabEvidence.ps1 : Cannot bind argument to parameter 'IncludeKernelDump'."
+)
 
 
 class FakeLabService:
@@ -33,6 +36,7 @@ class FakeLabService:
         evidence: bool = True,
         kd_event: dict[str, Any] | None = None,
         manifest: dict[str, Any] | None = None,
+        checkpoints: list[dict[str, Any]] | None = None,
     ) -> None:
         self.state = state
         self.uptime = uptime
@@ -44,6 +48,7 @@ class FakeLabService:
         self.evidence = evidence
         self.kd_event = kd_event or {"event": "break", "module": None}
         self.manifest = manifest
+        self.checkpoints = checkpoints
         self.calls: list[tuple[str, Any]] = []
         self.commands: list[str] = []
         self.files: dict[str, bytes] = {}
@@ -62,9 +67,11 @@ class FakeLabService:
 
     def list_checkpoints(self, vm_name: str) -> dict[str, Any]:
         self.calls.append(("checkpoint_list", vm_name))
-        return {"checkpoints": [
-            {"id": "11111111-1111-1111-1111-111111111111", "name": "pre-run-1"},
-        ]}
+        if self.checkpoints is None:
+            return {"checkpoints": [
+                {"id": "11111111-1111-1111-1111-111111111111", "name": "pre-run-1"},
+            ]}
+        return {"checkpoints": self.checkpoints}
 
     def restore_checkpoint(
         self, vm_name: str, snapshot_id: str, confirm_vm: str, confirm_snapshot_id: str
@@ -89,7 +96,12 @@ class FakeLabService:
         if "New-DriverLabEvidence" in command:
             self.calls.append(("evidence", timeout_seconds))
             if not self.evidence:
-                return {"execution": {"success": False, "exit_code": 1, "error": "no dump"}}
+                # A `-File` script reports a terminating error through its output,
+                # with an exit code and no error records.
+                return {"execution": {
+                    "success": False, "exit_code": 1, "had_errors": False,
+                    "error_records": [], "output": EVIDENCE_FAILURE,
+                }}
             return {"execution": {"success": True, "exit_code": 0, "output": "{}"}}
         self.calls.append(("run", timeout_seconds))
         if self.run_error is not None:
@@ -281,6 +293,83 @@ def test_cycle_keeps_the_report_when_the_guest_cannot_produce_evidence(
     assert report["revert"] is None
 
 
+def test_a_failed_evidence_collection_says_what_the_guest_said(tmp_path: Path) -> None:
+    """A `-File` script reports through its output, so `error` is never set.
+
+    Regression: the live cycle reported "Guest evidence collection failed:
+    unknown error" while the guest had printed exactly what was wrong.
+    """
+    service = FakeLabService(
+        run_result={"success": True, "exit_code": 0}, evidence=False,
+    )
+    service.settings = replace(service.settings, evidence_root=tmp_path)
+    report = lab_run.cycle(
+        service, "NORTH-Test",
+        package_id="north.1", run_id="run-1",
+        expected_manifest_sha256=DIGEST,
+    )
+
+    assert report["evidence"]["collected"] is False
+    assert "Cannot bind argument" in report["evidence"]["message"]
+
+
+def test_evidence_collection_omits_the_switch_instead_of_passing_a_string(
+    tmp_path: Path,
+) -> None:
+    """`-File` hands a script its arguments as text.
+
+    Regression: `-IncludeKernelDump:$false` reached the guest as the string
+    "$false", which cannot bind to a SwitchParameter, so evidence never
+    collected on a live VM.
+    """
+    service = FakeLabService(run_result={"success": True, "exit_code": 0})
+    service.settings = replace(service.settings, evidence_root=tmp_path / "off")
+    lab_run.cycle(
+        service, "NORTH-Test",
+        package_id="north.1", run_id="run-1",
+        expected_manifest_sha256=DIGEST, include_kernel_dump=False,
+    )
+    command = next(item for item in service.commands if "New-DriverLabEvidence" in item)
+    assert "-IncludeKernelDump" not in command
+    assert "$false" not in command and "$true" not in command
+
+    with_dump = FakeLabService(run_result={"success": True, "exit_code": 0})
+    with_dump.settings = replace(with_dump.settings, evidence_root=tmp_path / "on")
+    lab_run.cycle(
+        with_dump, "NORTH-Test",
+        package_id="north.1", run_id="run-1",
+        expected_manifest_sha256=DIGEST, include_kernel_dump=True,
+    )
+    command = next(item for item in with_dump.commands if "New-DriverLabEvidence" in item)
+    assert command.endswith("-IncludeKernelDump")
+
+
+def test_run_reads_a_result_file_that_carries_a_utf8_bom() -> None:
+    """Windows PowerShell's `Set-Content -Encoding UTF8` writes a BOM.
+
+    Regression: the live runner wrote a perfectly good result.json and the host
+    still reported "the guest answered but wrote no result file", because
+    `json.loads` rejects a leading BOM.
+    """
+    service = FakeLabService(run_result={"success": True, "exit_code": 0})
+    original = service.guest_read_file
+
+    def with_bom(vm_name: str, path: str, max_bytes: int = 65_536) -> dict[str, Any]:
+        result = original(vm_name, path, max_bytes)
+        if path.casefold().endswith("result.json"):
+            data = base64.b64decode(result["file"]["content_base64"])
+            result["file"]["content_base64"] = base64.b64encode(
+                b"\xef\xbb\xbf" + data
+            ).decode()
+        return result
+
+    service.guest_read_file = with_bom  # type: ignore[method-assign]
+    report = _run(service)
+
+    assert report["outcome"] == "ok"
+    assert report["result"]["success"] is True
+
+
 def test_cycle_does_not_collect_after_a_package_failed_verification(tmp_path: Path) -> None:
     service = FakeLabService(verification=False)
     service.settings = replace(service.settings, evidence_root=tmp_path)
@@ -293,6 +382,33 @@ def test_cycle_does_not_collect_after_a_package_failed_verification(tmp_path: Pa
     assert report["outcome"] == "not_verified"
     assert report["evidence"]["collected"] is False
     assert "evidence" not in [name for name, _ in service.calls]
+
+
+def test_cycle_reverts_by_the_id_it_created_not_by_a_fresh_listing(
+    tmp_path: Path,
+) -> None:
+    """A listing taken seconds after `Checkpoint-VM` can still miss the new snapshot.
+
+    Regression: on a live VM the checkpoint was created and then reported as
+    "not present on the VM", so `revert_after=true` silently did nothing.
+    """
+    service = FakeLabService(
+        run_result={"success": True, "exit_code": 0},
+        checkpoints=[],
+    )
+    service.settings = replace(service.settings, evidence_root=tmp_path)
+    report = lab_run.cycle(
+        service, "NORTH-Test",
+        package_id="north.1", run_id="run-1",
+        expected_manifest_sha256=DIGEST, revert_after=True,
+    )
+
+    assert report["revert"] == {
+        "restored": True,
+        "checkpoint": "pre-run-1",
+        "snapshot_id": "11111111-1111-1111-1111-111111111111",
+    }
+    assert "checkpoint_list" not in [name for name, _ in service.calls]
 
 
 # -- debugger integration ---------------------------------------------------
@@ -457,3 +573,18 @@ def test_nmi_needs_the_debugger_capability_and_the_exact_vm_name() -> None:
     result = service.vm_inject_nmi("NORTH-Test", "NORTH-Test")
     assert result["operation"] == "vm_inject_nmi"
     assert backend.calls[-1] == ("vm_inject_nmi", {"vm": "NORTH-Test"})
+
+
+def test_the_run_command_bypasses_the_guest_execution_policy() -> None:
+    """A stock guest is `Restricted`; the runner has to be started explicitly.
+
+    Regression: `& 'C:\\\\DriverLab\\\\Tools\\\\Invoke-DriverLabRun.ps1' ...` was refused
+    with "execution of scripts is disabled on this system" on a live VM.
+    """
+    command = lab_run.run_command("north.1", "run-1", DIGEST)
+    assert command.startswith(
+        "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '"
+    )
+    assert "Invoke-DriverLabRun.ps1" in command
+    assert "-ApproveExecution 'EXECUTE north.1 run-1'" in command
+    assert f"-ExpectedManifestSha256 '{DIGEST}'" in command
