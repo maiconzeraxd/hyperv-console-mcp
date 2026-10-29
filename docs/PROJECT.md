@@ -729,3 +729,19 @@ bridge compared as whole dictionaries — `vm`, `generation`, `state`, `secure_b
 `secure_boot`, `preferred_boot_device` — and **the answers were equal** (generation 2, Secure
 Boot Off). Not validated live: a generation 1 VM, and a VM with Secure Boot On; both are unit
 tests here.
+
+### 2026-10-29 — v0.3 phase 4: Secure Boot through ModifySystemSettings
+
+- **The flag travels as a partial embedded `Msvm_VirtualSystemSettingData`** keyed by the
+  realized setting's `InstanceID`, which is the same `ModifySystemSettings` shape `Set-VM`
+  uses for memory and processor counts — no full configuration round trip.
+- **The answer is read back, and `enabled` keeps what was asked.** The two can disagree, and
+  the bridge reports both, so this does too.
+- **Generation 1 is refused before the state check**, as the bridge does: the tool's contract
+  is "generation 2 only", and a stopped generation 1 VM is still not a candidate.
+
+Live validation (elevated, `NORTH-Test`, stopped with `vm_power` and started again): with the
+VM Off, `vm_secure_boot` through WMI and through the bridge were compared on `enable: true`
+and **the answers were equal** (`secure_boot: On`, `enabled: true`); `vm_firmware` confirmed
+`Secure Boot On` while it was set, and the VM was returned to `Off` and started before the run
+ended. Not validated live: the refusal paths (generation 1, VM running), which are unit tests.

@@ -34,6 +34,7 @@ HANDLERS: dict[str, Handler] = {
     "vm_power": power.vm_power,
     "vm_inject_nmi": vm.vm_inject_nmi,
     "vm_firmware": firmware.vm_firmware,
+    "vm_secure_boot": firmware.vm_secure_boot,
     "vm_thumbnail": thumbnail.vm_thumbnail,
     "checkpoint_list": checkpoint.checkpoint_list,
     "checkpoint_restore": checkpoint.checkpoint_restore,
