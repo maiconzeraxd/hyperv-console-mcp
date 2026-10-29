@@ -1,0 +1,81 @@
+*******************************************************************************
+*                                                                             *
+*                        Bugcheck Analysis                                    *
+*                                                                             *
+*******************************************************************************
+
+DRIVER_IRQL_NOT_LESS_OR_EQUAL (d1)
+An attempt was made to access a pageable (or completely invalid) address at an
+interrupt request level (IRQL) that is too high.  This is usually
+caused by drivers using improper addresses.
+If kernel debugger is available get stack backtrace.
+Arguments:
+Arg1: 0000000000000010, memory referenced
+Arg2: 0000000000000002, IRQL
+Arg3: 0000000000000000, value 0 = read operation, 1 = write operation
+Arg4: fffff80512345678, address which referenced memory
+
+Debugging Details:
+------------------
+
+KEY_VALUES_STRING: 1
+
+    Key  : Analysis.CPU.mSec
+    Value: 2343
+
+    Key  : Analysis.Elapsed.mSec
+    Value: 2891
+
+    Key  : Analysis.IO.Other.Mb
+    Value: 3
+
+BUGCHECK_CODE:  d1
+
+BUGCHECK_P1: 10
+
+BUGCHECK_P2: 2
+
+BUGCHECK_P3: 0
+
+BUGCHECK_P4: fffff80512345678
+
+WRITE_ADDRESS: fffff80512345678
+
+FAULTING_THREAD:  ffff8888`88888888
+
+DEFAULT_BUCKET_ID:  WIN8_DRIVER_FAULT
+
+PROCESS_NAME:  System
+
+STACK_TEXT:
+fffff805`0a1b2c30 fffff805`0d3e4f50 : 00000000`0000000a 00000000`00000002 00000000`00000000 fffff805`12345678 : nt!KeBugCheckEx
+fffff805`0a1b2c38 fffff805`12345678 : 00000000`00000010 00000000`00000002 00000000`00000000 00000000`00000000 : MyDriver!Crash+0x18
+fffff805`0a1b2c80 fffff805`0d3e5100 : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : nt!KiDispatchException+0x1a0
+fffff805`0a1b2d40 fffff805`0d3e4ff0 : 00000000`00000000 00000000`00000000 00000000`00000000 00000000`00000000 : nt!KiExceptionDispatch+0x150
+
+STACK_COMMAND:  .cxr; .ecxr ; kb
+
+SYMBOL_NAME:  MyDriver!Crash+18
+
+MODULE_NAME: MyDriver
+
+IMAGE_NAME:   MyDriver.sys
+
+FAILURE_BUCKET_ID:  AV_MyDriver!Crash
+
+OS_VERSION:  10.0.19041.1
+
+BUILDLAB_STR:  vb_release
+
+OSPLATFORM_TYPE:  x64
+
+OSNAME:  Windows 10
+
+IMAGE_VERSION:  1.0.0.1
+
+FAILURE_ID_HASH:  {a1b2c3d4-e5f6-7890-abcd-ef1234567890}
+
+Followup:     MachineOwner
+---------
+
+Probably caused by : MyDriver.sys ( MyDriver!Crash+18 )

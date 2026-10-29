@@ -27,3 +27,10 @@ class BackendError(HyperVError):
 class CaptureError(HyperVError):
     def __init__(self, message: str) -> None:
         super().__init__(message, code="console_capture_failed")
+
+
+class DebuggerError(HyperVError):
+    """A kd.exe session failed: no debugger, no target, a lost marker, or an exit."""
+
+    def __init__(self, message: str, *, code: str = "kd_error") -> None:
+        super().__init__(message, code=code)
