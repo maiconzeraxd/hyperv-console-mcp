@@ -24,7 +24,7 @@ from ._base import (
 
 class GuestService(ServiceBase):
     def _guest_vm(self, vm_name: str) -> str:
-        return self._write(vm_name, self.settings.allow_guest, "HYPERV_MCP_ALLOW_GUEST")
+        return self._write(vm_name, "guest")
 
     def _transport(self, vm_name: str) -> Any:
         from ..transport import select_transport

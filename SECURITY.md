@@ -7,9 +7,18 @@ It is designed for an explicitly authorized local lab, not as an exposed remote 
 service. Use stdio and restrict the MCP host to the intended account.
 
 Read operations are enabled by default. An allowlist, if configured, filters them. Every
-mutation requires both a nonempty `HYPERV_MCP_ALLOWED_VMS` and a capability-specific opt-in.
+mutation requires both a nonempty allowlist and a capability that the target VM has.
 Destructive operations additionally require exact confirmation values. No tool automatically
 stops, reboots, restores, or deletes a VM to complete another operation.
+
+The allowlist and the capabilities can be given per VM, as a level in
+`%LOCALAPPDATA%\HyperVConsoleMCP\access.json` (`read-only`, `control`, `lab`), or host-wide with
+`HYPERV_MCP_ALLOWED_VMS` and the `HYPERV_MCP_ALLOW_*` variables. A VM with a level takes its
+capabilities from that level; `HYPERV_MCP_ALLOWED_VMS` narrows the file rather than replacing it.
+The file is written only by `hyperv-access` and the dashboard, both run by the operator on the
+host: **no MCP tool can raise a level or add a VM**, because a policy the AI could widen is not a
+policy. A file that cannot be read or parsed stops startup instead of degrading to an empty
+allowlist, so a typo cannot silently disable or silently widen the boundary.
 
 ## Threat model
 
@@ -21,8 +30,9 @@ What the boundaries are for:
   permitted changes are Hyper-V objects of those VMs, one dedicated **internal** switch, one
   firewall rule scoped to the debugger and a UDP port, and files under the configured roots.
 - **A loop that should run without a human click.** The lab profile (`HYPERV_MCP_PROFILE=lab`)
-  turns the capabilities on and skips the per-mutation dashboard approval, while keeping the
-  allowlist, the confirmations, the audit and the event records.
+  turns the capabilities on — for VMs that have no level of their own — and skips the
+  per-mutation dashboard approval, while keeping the allowlist, the confirmations, the audit and
+  the event records. A VM left at `read-only` stays read-only whatever the profile says.
 
 What the boundaries are **not** for:
 
@@ -77,7 +87,8 @@ the guest command stopped.
 
 ## Kernel debugging and serial consoles
 
-The `kd_*` tools require `HYPERV_MCP_ALLOW_DEBUGGER` and the allowlist; the mutating ones are
+The `kd_*` tools require the debugger capability — a VM level of `lab`, or
+`HYPERV_MCP_ALLOW_DEBUGGER` — and the allowlist; the mutating ones are
 annotated destructive and listed in `GATED_TOOLS`. `kd_command` can write guest memory and
 registers, which is why it is destructive rather than read-only.
 
@@ -100,7 +111,8 @@ pipe: `kd_attach` detaches the reader first, and `serial_connect` refuses while 
 
 ## Media and boot
 
-ISO mount/eject requires `HYPERV_MCP_ALLOW_MEDIA`, an allowlisted VM, exact VM confirmation, an
+ISO mount/eject requires the media capability — a VM level of `control` or `lab`, or
+`HYPERV_MCP_ALLOW_MEDIA` — an allowlisted VM, exact VM confirmation, an
 existing DVD drive, and the VM to be Off. The ISO must be under `HYPERV_MCP_ISO_ROOT`. Boot-first
 selection changes VM firmware/BIOS configuration. The server never stops or starts the VM to
 complete these operations.

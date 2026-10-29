@@ -16,6 +16,8 @@ After installation, `hyperv-dashboard` is equivalent. Use the same protected env
 
 The debugger page's pipe name is derived from the chosen VM (`<vm>-kd`, lowercased, with anything the provider rejects turned into a hyphen), so two VMs configured from the same installation never share one.
 
+The sidebar shows the chosen VM's access level next to its name, and the capability list below it is that VM's — not the host-wide flags — so a `read-only` VM reads as read-only here even under the `lab` profile. Levels are set with `hyperv-access set "<vm>" read-only|control|lab`; see the README for what each one allows.
+
 ## Pages
 
 - **Overview:** host and VM state, capability indicators, guest diagnostics and explicit power/checkpoint actions.

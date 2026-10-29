@@ -58,6 +58,9 @@ class VmService(ServiceBase):
     def host_status(self) -> dict[str, Any]:
         result = self._run("host_status", "host_status")
         result["profile"] = self.settings.profile
+        # The flags describe a VM with no access level. A VM that has one takes
+        # its capabilities from that level instead, which is why the map below
+        # is reported alongside rather than folded into this answer.
         result["capabilities"] = {
             "power": self.settings.allow_power,
             "checkpoints": self.settings.allow_checkpoints,
@@ -67,6 +70,7 @@ class VmService(ServiceBase):
             "debugger": self.settings.allow_debugger,
             "media": self.settings.allow_media,
         }
+        result["levels"] = dict(sorted(self.settings.levels.items()))
         result["allowlist"] = sorted(self.settings.allowed_vms)
         return result
 
@@ -85,7 +89,7 @@ class VmService(ServiceBase):
         return self._run("vm_get", "vm_get", {"vm": name}, vm_name=name)
 
     def power(self, vm_name: str, action: str, confirm_vm: str | None = None) -> dict[str, Any]:
-        name = self._write(vm_name, self.settings.allow_power, "HYPERV_MCP_ALLOW_POWER")
+        name = self._write(vm_name, "power")
         if action not in {"start", "shutdown", "save", "pause", "resume", "turn_off", "reset"}:
             raise ValidationError(
                 "action must be start, shutdown, save, pause, resume, turn_off, or reset."
@@ -115,9 +119,7 @@ class VmService(ServiceBase):
         )
 
     def create_checkpoint(self, vm_name: str, name: str) -> dict[str, Any]:
-        vm = self._write(
-            vm_name, self.settings.allow_checkpoints, "HYPERV_MCP_ALLOW_CHECKPOINTS"
-        )
+        vm = self._write(vm_name, "checkpoints")
         checkpoint_name = _text(name, "name", 128)
         with self._approve("checkpoint", vm, {"action": "create", "checkpoint_name": checkpoint_name}):
             return self._run(
@@ -137,9 +139,7 @@ class VmService(ServiceBase):
     def restore_checkpoint(
         self, vm_name: str, snapshot_id: str, confirm_vm: str, confirm_snapshot_id: str
     ) -> dict[str, Any]:
-        vm = self._write(
-            vm_name, self.settings.allow_checkpoints, "HYPERV_MCP_ALLOW_CHECKPOINTS"
-        )
+        vm = self._write(vm_name, "checkpoints")
         snapshot = self._snapshot_id(snapshot_id)
         self._confirm(confirm_vm, vm, "confirm_vm")
         self._confirm(confirm_snapshot_id, snapshot, "confirm_snapshot_id")
@@ -152,9 +152,7 @@ class VmService(ServiceBase):
     def delete_checkpoint(
         self, vm_name: str, snapshot_id: str, confirm_vm: str, confirm_snapshot_id: str
     ) -> dict[str, Any]:
-        vm = self._write(
-            vm_name, self.settings.allow_checkpoints, "HYPERV_MCP_ALLOW_CHECKPOINTS"
-        )
+        vm = self._write(vm_name, "checkpoints")
         snapshot = self._snapshot_id(snapshot_id)
         self._confirm(confirm_vm, vm, "confirm_vm")
         self._confirm(confirm_snapshot_id, snapshot, "confirm_snapshot_id")

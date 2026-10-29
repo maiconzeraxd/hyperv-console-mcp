@@ -22,7 +22,7 @@ class MediaService(ServiceBase):
         boot_first: bool = False,
         controller_number: int = 0,
     ) -> dict[str, Any]:
-        vm = self._write(vm_name, self.settings.allow_media, "HYPERV_MCP_ALLOW_MEDIA")
+        vm = self._write(vm_name, "media")
         self._confirm(confirm_vm, vm, "confirm_vm")
         path = _confined_path(iso_path, "iso_path", self.settings.iso_root, ".iso")
         if not isinstance(boot_first, bool):
@@ -44,7 +44,7 @@ class MediaService(ServiceBase):
     def media_eject(
         self, vm_name: str, controller_location: int, confirm_vm: str, controller_number: int = 0
     ) -> dict[str, Any]:
-        vm = self._write(vm_name, self.settings.allow_media, "HYPERV_MCP_ALLOW_MEDIA")
+        vm = self._write(vm_name, "media")
         self._confirm(confirm_vm, vm, "confirm_vm")
         number = _integer(controller_number, "controller_number", 0, 1)
         location = _integer(controller_location, "controller_location", 0, 63)

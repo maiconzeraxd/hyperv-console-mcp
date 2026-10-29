@@ -227,7 +227,7 @@ class LabService(ServiceBase):
             "restart": None,
         }
         if restart:
-            if not self.settings.allow_power:
-                raise PolicyError("Restarting the guest requires HYPERV_MCP_ALLOW_POWER.")
+            if not self.settings.allows(name, "power"):
+                raise PolicyError(self.settings.refusal(name, "power"))
             result["restart"] = self._restart_and_verify(name)
         return result

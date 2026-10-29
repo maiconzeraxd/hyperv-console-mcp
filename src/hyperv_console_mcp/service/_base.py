@@ -118,15 +118,22 @@ class ServiceBase:
     def _vm(self, name: str) -> str:
         name = _text(name, "vm_name", 256)
         if self.settings.allowed_vms and not self.settings.is_allowed(name):
-            raise PolicyError(f"VM {name!r} is not in HYPERV_MCP_ALLOWED_VMS.")
+            raise PolicyError(
+                f"VM {name!r} is not allowed. Name it in HYPERV_MCP_ALLOWED_VMS or give it "
+                f"an access level with: hyperv-access set \"{name}\" read-only|control|lab"
+            )
         return name
 
-    def _write(self, name: str, enabled: bool, variable: str) -> str:
+    def _write(self, name: str, capability: str) -> str:
+        """A mutating operation on a VM, which needs the allowlist and a level."""
         name = self._vm(name)
         if not self.settings.allowed_vms:
-            raise PolicyError("Mutations require HYPERV_MCP_ALLOWED_VMS to name the target VMs.")
-        if not enabled:
-            raise PolicyError(f"This capability is disabled. Set {variable}=true to enable it.")
+            raise PolicyError(
+                "Mutations require a VM allowlist: name the VMs in HYPERV_MCP_ALLOWED_VMS, "
+                "or give them access levels with hyperv-access set."
+            )
+        if not self.settings.allows(name, capability):
+            raise PolicyError(self.settings.refusal(name, capability))
         return name
 
     @staticmethod

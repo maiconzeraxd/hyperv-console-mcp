@@ -23,9 +23,7 @@ class DebugSetupService(ServiceBase):
         pipe_name: str,
         confirm_vm: str,
     ) -> dict[str, Any]:
-        vm = self._write(
-            vm_name, self.settings.allow_debugger, "HYPERV_MCP_ALLOW_DEBUGGER"
-        )
+        vm = self._write(vm_name, "debugger")
         if not isinstance(pipe_name, str) or not re.fullmatch(
             r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", pipe_name
         ):
@@ -42,9 +40,7 @@ class DebugSetupService(ServiceBase):
             )
 
     def debug_guest_prepare(self, vm_name: str, confirm_vm: str) -> dict[str, Any]:
-        vm = self._write(
-            vm_name, self.settings.allow_debugger, "HYPERV_MCP_ALLOW_DEBUGGER"
-        )
+        vm = self._write(vm_name, "debugger")
         self._confirm(confirm_vm, vm, "confirm_vm")
         if not self.settings.guest_username or not self.settings.guest_password:
             raise PolicyError(
@@ -65,7 +61,7 @@ class DebugSetupService(ServiceBase):
 
     def vm_inject_nmi(self, vm_name: str, confirm_vm: str) -> dict[str, Any]:
         """Force a bugcheck in a hung guest so the debugger can catch it."""
-        name = self._write(vm_name, self.settings.allow_debugger, "HYPERV_MCP_ALLOW_DEBUGGER")
+        name = self._write(vm_name, "debugger")
         self._confirm(confirm_vm, name, "confirm_vm")
         with self._approve("vm_inject_nmi", name, {"action": "inject_nmi"}):
             return self._run("vm_inject_nmi", "vm_inject_nmi", {"vm": name}, vm_name=name)

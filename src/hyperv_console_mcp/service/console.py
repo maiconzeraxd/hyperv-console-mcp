@@ -34,9 +34,7 @@ class ConsoleService(ServiceBase):
         return self._run("console_info", "console_info", {"vm": name}, vm_name=name)
 
     def console_type_text(self, vm_name: str, text: str) -> dict[str, Any]:
-        vm = self._write(
-            vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
-        )
+        vm = self._write(vm_name, "console")
         value = _ascii_keyboard_text(_text(text, "text", 16_384, allow_empty=True))
         with self._approve("console_input", vm, {"characters": len(value)}):
             result = self._run(
@@ -46,9 +44,7 @@ class ConsoleService(ServiceBase):
         return result
 
     def console_press_keys(self, vm_name: str, keys: list[str]) -> dict[str, Any]:
-        vm = self._write(
-            vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
-        )
+        vm = self._write(vm_name, "console")
         if not isinstance(keys, list) or not 1 <= len(keys) <= 6:
             raise ValidationError("keys must contain between one and six key names.")
         if any(not isinstance(key, str) for key in keys):
@@ -62,9 +58,7 @@ class ConsoleService(ServiceBase):
             )
 
     def console_key_state(self, vm_name: str, key: str, down: bool) -> dict[str, Any]:
-        vm = self._write(
-            vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
-        )
+        vm = self._write(vm_name, "console")
         if not isinstance(key, str):
             raise ValidationError("key must be a string key name.")
         normalized = key.casefold()
@@ -85,9 +79,7 @@ class ConsoleService(ServiceBase):
         right: bool = False,
         middle: bool = False,
     ) -> dict[str, Any]:
-        vm = self._write(
-            vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
-        )
+        vm = self._write(vm_name, "console")
         if not all(isinstance(value, bool) for value in (left, right, middle)):
             raise ValidationError("Mouse button states must be boolean values.")
         with self._approve("console_input", vm, {
@@ -99,9 +91,7 @@ class ConsoleService(ServiceBase):
             )
 
     def console_batch(self, vm_name: str, actions: list[dict[str, Any]]) -> dict[str, Any]:
-        vm = self._write(
-            vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
-        )
+        vm = self._write(vm_name, "console")
         if not isinstance(actions, list) or not 1 <= len(actions) <= 32:
             raise ValidationError("actions must contain between one and 32 console actions.")
         allowed_fields = {
@@ -193,18 +183,14 @@ class ConsoleService(ServiceBase):
             )
 
     def console_ctrl_alt_delete(self, vm_name: str) -> dict[str, Any]:
-        vm = self._write(
-            vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
-        )
+        vm = self._write(vm_name, "console")
         with self._approve("console_input", vm):
             return self._run(
                 "console_ctrl_alt_delete", "console_ctrl_alt_delete", {"vm": vm}, vm_name=vm
             )
 
     def console_mouse_move(self, vm_name: str, x: int, y: int) -> dict[str, Any]:
-        vm = self._write(
-            vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
-        )
+        vm = self._write(vm_name, "console")
         payload = {
             "vm": vm,
             "x": _integer(x, "x", 0, 32_767),
@@ -216,9 +202,7 @@ class ConsoleService(ServiceBase):
     def console_click(
         self, vm_name: str, button: str = "left", x: int | None = None, y: int | None = None
     ) -> dict[str, Any]:
-        vm = self._write(
-            vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
-        )
+        vm = self._write(vm_name, "console")
         if button not in BUTTONS:
             raise ValidationError("button must be left, right, or middle.")
         if (x is None) != (y is None):
@@ -233,9 +217,7 @@ class ConsoleService(ServiceBase):
             return self._run("console_click", "console_click", payload, vm_name=vm)
 
     def console_scroll(self, vm_name: str, delta: int) -> dict[str, Any]:
-        vm = self._write(
-            vm_name, self.settings.allow_console, "HYPERV_MCP_ALLOW_CONSOLE"
-        )
+        vm = self._write(vm_name, "console")
         amount = _integer(delta, "delta", -100_000, 100_000)
         with self._approve("console_input", vm, {"delta": amount}):
             return self._run(
@@ -244,9 +226,7 @@ class ConsoleService(ServiceBase):
             )
 
     def authorize_screenshot(self, vm_name: str) -> str:
-        return self._write(
-            vm_name, self.settings.allow_screenshots, "HYPERV_MCP_ALLOW_SCREENSHOTS"
-        )
+        return self._write(vm_name, "screenshots")
 
     def _video_head(self, vm: str) -> tuple[int, int]:
         """The guest display resolution, which is the coordinate space mouse tools use."""

@@ -1091,6 +1091,39 @@ this host, `list_vms` reported `NORTH-Test` as the only VM and `initial_vm_name`
 and without `HYPERV_MCP_ALLOWED_VMS` set, so the window opens with no argument at all. Tests: 659
 passing, 1 skipped.
 
+### 2026-10-29 — v0.3 phase 5: one level per VM instead of seven flags
+
+The allowlist and the seven `HYPERV_MCP_ALLOW_*` variables said the same thing twice — once per VM,
+once per capability — and every capability was host-wide: there was no way to let the AI drive one
+VM and only read another. `access.py` names the same policy in one word per VM.
+
+- **`read-only`** lists the VM and reads its state and nothing more; **`control`** adds power,
+  checkpoints, console input, screenshots and media; **`lab`** adds guest access and the debugger.
+  Guest access and the debugger are what separate the last two, because both put code or a debugger
+  inside the guest — the line this project keeps everywhere else.
+- **The file is the policy and the allowlist.** `%LOCALAPPDATA%\HyperVConsoleMCP\access.json` (or
+  `HYPERV_MCP_ACCESS_FILE`) maps VM to level, written by `hyperv-access set|list|remove` — run by the
+  operator on the host. No MCP tool writes it, and no tool can add a VM: a policy the AI could widen
+  is not a policy. The write goes to a temporary file and is renamed into place, so a reader never
+  sees half a policy; a file that exists but cannot be parsed stops startup rather than degrading to
+  "no VMs allowed", which would look like a broken host and hide the typo.
+- **Precedence, stated once.** A VM with a level takes its capabilities from that level; a VM without
+  one keeps the old behaviour, where the profile and the environment flags decide for every VM at
+  once. Per VM is more specific, so it wins. `HYPERV_MCP_ALLOWED_VMS` narrows the file rather than
+  replacing it, which is what keeps every existing test and one-off run meaning what it meant.
+- `_write(name, enabled, variable)` became `_write(name, capability)`, and 27 call sites became
+  `self._write(vm_name, "power")` and so on; `Settings.refusal` now words the error in whatever
+  decided it (the VM's level, or the variable to set). `host_status` reports the level map beside the
+  global flags, and the dashboard's sidebar shows the chosen VM's capabilities rather than the host's.
+
+Tests: `tests/test_access.py` — the level-to-capability mapping, a read-only VM refusing a mutation
+it would otherwise be allowed, `control` reaching power but not the guest, a level overriding a
+host-wide flag, the file supplying the allowlist and the environment narrowing it, a malformed file
+and an unknown level both refused, and the round trip through the file with no `.tmp` left behind.
+The `hyperv-access` CLI was exercised end to end against a temporary file; the real access file on
+this host was read (empty) and deliberately not written — granting `lab` to a VM is the operator's
+decision, not this loop's. Suite: 674 passing, 1 skipped.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,

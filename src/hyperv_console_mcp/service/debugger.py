@@ -27,9 +27,7 @@ def _tool(name: str) -> Any:
 
 class DebuggerService(ServiceBase):
     def _kd_gate(self, vm_name: str) -> str:
-        return self._write(
-            vm_name, self.settings.allow_debugger, "HYPERV_MCP_ALLOW_DEBUGGER"
-        )
+        return self._write(vm_name, "debugger")
 
     def _kd_timeout(self, timeout_ms: int | None) -> float:
         if timeout_ms is None:

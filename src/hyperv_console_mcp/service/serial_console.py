@@ -19,9 +19,7 @@ class SerialConsoleService(ServiceBase):
     def serial_connect(
         self, vm_name: str, pipe_name: str, log_path: str, confirm_vm: str
     ) -> dict[str, Any]:
-        vm = self._write(
-            vm_name, self.settings.allow_debugger, "HYPERV_MCP_ALLOW_DEBUGGER"
-        )
+        vm = self._write(vm_name, "debugger")
         self._confirm(confirm_vm, vm, "confirm_vm")
         if self.kd.get(vm) is not None:
             raise ValidationError(
@@ -47,18 +45,14 @@ class SerialConsoleService(ServiceBase):
             )
 
     def serial_read(self, vm_name: str, tail_chars: int = 32_768) -> dict[str, Any]:
-        vm = self._write(
-            vm_name, self.settings.allow_debugger, "HYPERV_MCP_ALLOW_DEBUGGER"
-        )
+        vm = self._write(vm_name, "debugger")
         tail = _integer(tail_chars, "tail_chars", 1, 262_144)
         return self._serial_action("serial_read", vm, lambda: self.serial.read(vm, tail))
 
     def serial_send(
         self, vm_name: str, text: str, append_newline: bool = True
     ) -> dict[str, Any]:
-        vm = self._write(
-            vm_name, self.settings.allow_debugger, "HYPERV_MCP_ALLOW_DEBUGGER"
-        )
+        vm = self._write(vm_name, "debugger")
         value = _text(text, "text", 32_768, allow_empty=True)
         if not isinstance(append_newline, bool):
             raise ValidationError("append_newline must be a boolean value.")
@@ -70,9 +64,7 @@ class SerialConsoleService(ServiceBase):
             return self._serial_action("serial_send", vm, lambda: self.serial.send(vm, data))
 
     def serial_disconnect(self, vm_name: str) -> dict[str, Any]:
-        vm = self._write(
-            vm_name, self.settings.allow_debugger, "HYPERV_MCP_ALLOW_DEBUGGER"
-        )
+        vm = self._write(vm_name, "debugger")
         with self._approve("serial_disconnect", vm):
             return self._serial_action(
                 "serial_disconnect", vm, lambda: self.serial.disconnect(vm)

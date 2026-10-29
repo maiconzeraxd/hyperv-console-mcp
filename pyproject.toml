@@ -31,6 +31,7 @@ ssh = ["paramiko>=3.4,<4"]
 hyperv-console-mcp = "hyperv_console_mcp.server:main"
 hyperv-lab = "hyperv_console_mcp.lab.cli:main"
 hyperv-dashboard = "hyperv_console_mcp.dashboard:main"
+hyperv-access = "hyperv_console_mcp.access_cli:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "hyperv_console_mcp.__version__" }

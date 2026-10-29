@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
+from .access import CAPABILITIES, LEVEL_CAPABILITIES, AccessStore, access_file
 from .errors import ValidationError
 
 PER_VM_TRANSPORT_PREFIX = "HYPERV_MCP_GUEST_TRANSPORT_"
@@ -141,6 +142,11 @@ CAPABILITY_VARIABLES = (
 @dataclass(frozen=True, slots=True)
 class Settings:
     allowed_vms: frozenset[str] = frozenset()
+    # casefolded VM name -> access level, from the operator's access file. A VM
+    # with a level takes its capabilities from that level; the flags below are
+    # the fallback for a VM with none, which is how a bare environment behaves.
+    levels: Mapping[str, str] = field(default_factory=dict)
+    access_path: Path | None = None
     profile: str = "safe"
     toolsets: frozenset[str] = DEFAULT_TOOLSETS["safe"]
     allow_power: bool = False
@@ -176,12 +182,19 @@ class Settings:
     @classmethod
     def from_env(cls, values: Mapping[str, str] | None = None) -> "Settings":
         env = os.environ if values is None else values
+        path = access_file(env)
+        entries = AccessStore(path).load()
         names = frozenset(
             name.strip() for name in env.get("HYPERV_MCP_ALLOWED_VMS", "").split(",") if name.strip()
         )
         for name in names:
             if any(ord(character) < 32 for character in name) or len(name) > 256:
                 raise ValidationError("HYPERV_MCP_ALLOWED_VMS contains an invalid VM name.")
+        # An explicit allowlist narrows the file rather than being replaced by
+        # it: a test or a one-off run names the VMs it means, and the file still
+        # supplies each VM's level.
+        if not names:
+            names = frozenset(name for name, _level in entries.values())
         audit_path = env.get("HYPERV_MCP_AUDIT_LOG", "").strip()
         overrides = {
             key[len(PER_VM_TRANSPORT_PREFIX):].casefold().replace("_", "-"): _transport(env, key)
@@ -199,6 +212,8 @@ class Settings:
             return profile == "lab"
         return cls(
             allowed_vms=names,
+            levels={key: level for key, (_name, level) in entries.items()},
+            access_path=path,
             profile=profile,
             toolsets=_toolsets(env, profile),
             allow_power=capability("HYPERV_MCP_ALLOW_POWER"),
@@ -258,6 +273,50 @@ class Settings:
 
     def is_allowed(self, vm_name: str) -> bool:
         return any(name.casefold() == vm_name.casefold() for name in self.allowed_vms)
+
+    def level_for(self, vm_name: str) -> str | None:
+        """The access level the operator gave this VM, if any."""
+        return self.levels.get(vm_name.strip().casefold())
+
+    def capabilities_for(self, vm_name: str) -> frozenset[str]:
+        """What this VM may do: its level's set, or the global flags.
+
+        A level is per VM and therefore more specific than a host-wide flag, so
+        it wins. A VM with no level keeps the older behaviour, where the profile
+        and the ``HYPERV_MCP_ALLOW_*`` variables decide for every VM at once.
+        """
+        level = self.level_for(vm_name)
+        if level is not None:
+            return LEVEL_CAPABILITIES[level]
+        flags = (
+            ("power", self.allow_power),
+            ("checkpoints", self.allow_checkpoints),
+            ("guest", self.allow_guest),
+            ("console", self.allow_console),
+            ("screenshots", self.allow_screenshots),
+            ("debugger", self.allow_debugger),
+            ("media", self.allow_media),
+        )
+        return frozenset(name for name, enabled in flags if enabled)
+
+    def allows(self, vm_name: str, capability: str) -> bool:
+        if capability not in CAPABILITIES:
+            raise ValidationError(f"Unknown capability {capability!r}.")
+        return capability in self.capabilities_for(vm_name)
+
+    def refusal(self, vm_name: str, capability: str) -> str:
+        """Why this VM may not do this, in the words of whatever decided it."""
+        level = self.level_for(vm_name)
+        if level is not None:
+            return (
+                f"VM {vm_name!r} has access level {level!r}, which does not include {capability}. "
+                f"Raise it with: hyperv-access set \"{vm_name}\" control|lab"
+            )
+        return (
+            f"This capability is disabled. Set HYPERV_MCP_ALLOW_{capability.upper()}=true "
+            f"to enable it, or give {vm_name!r} an access level: "
+            f"hyperv-access set \"{vm_name}\" control|lab"
+        )
 
     def guest_transport_for(self, vm_name: str) -> str:
         """Per-VM override from HYPERV_MCP_GUEST_TRANSPORT_<VMNAME>, else the default."""

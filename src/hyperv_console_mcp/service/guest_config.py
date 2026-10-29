@@ -49,7 +49,7 @@ class GuestConfigService(ServiceBase):
             if value is not None and not isinstance(value, bool):
                 raise ValidationError(f"{label} must be true, false, or omitted.")
         if restart:
-            self._write(name, self.settings.allow_power, "HYPERV_MCP_ALLOW_POWER")
+            self._write(name, "power")
 
         account: str | None = None
         document: dict[str, Any] | None
@@ -112,7 +112,7 @@ class GuestConfigService(ServiceBase):
         if not isinstance(restart, bool):
             raise ValidationError("restart must be a boolean value.")
         if restart:
-            self._write(name, self.settings.allow_power, "HYPERV_MCP_ALLOW_POWER")
+            self._write(name, "power")
         summary = {
             "vm": name,
             "restores": "every recorded previous value",

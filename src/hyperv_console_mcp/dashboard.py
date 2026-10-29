@@ -388,7 +388,11 @@ class Dashboard(tk.Tk):
         nav.pack_propagate(False)
         ttk.Label(nav, text="HYPER-V", font=("Segoe UI Semibold", 22), foreground=COLORS["accent"]).pack(anchor="w")
         ttk.Label(nav, text="Control Center", foreground=COLORS["muted"]).pack(anchor="w", pady=(0, 8))
-        ttk.Label(nav, textvariable=tk.StringVar(value=self.vm_name), foreground=COLORS["blue"]).pack(anchor="w", pady=(0, 4))
+        level = self.settings.level_for(self.vm_name)
+        ttk.Label(
+            nav, textvariable=tk.StringVar(value=f"{self.vm_name} · {level}" if level else self.vm_name),
+            foreground=COLORS["blue"],
+        ).pack(anchor="w", pady=(0, 4))
         self.profile = tk.StringVar(value=f"profile: {self.settings.profile}")
         ttk.Label(
             nav, textvariable=self.profile,
@@ -403,13 +407,13 @@ class Dashboard(tk.Tk):
             ttk.Button(nav, text=page, style="Nav.TButton", command=lambda p=page: self.show(p)).pack(fill="x", pady=3)
         ttk.Frame(nav, height=1, style="Panel.TFrame").pack(fill="x", pady=20)
         flags = []
-        for label, enabled in (
-            ("Power", self.settings.allow_power), ("Guest", self.settings.allow_guest),
-            ("Console", self.settings.allow_console), ("Checkpoints", self.settings.allow_checkpoints),
-            ("Media", self.settings.allow_media), ("Debugger", self.settings.allow_debugger),
-            ("Screenshots", self.settings.allow_screenshots),
+        for label, capability in (
+            ("Power", "power"), ("Guest", "guest"),
+            ("Console", "console"), ("Checkpoints", "checkpoints"),
+            ("Media", "media"), ("Debugger", "debugger"),
+            ("Screenshots", "screenshots"),
         ):
-            flags.append(("● " if enabled else "○ ") + label)
+            flags.append(("● " if self.settings.allows(self.vm_name, capability) else "○ ") + label)
         self.capabilities = tk.StringVar(value="\n".join(flags))
         ttk.Label(nav, textvariable=self.capabilities, foreground=COLORS["muted"], justify="left").pack(anchor="w")
         self.elevation = tk.StringVar(value="Elevated host" if _is_elevated() else "Read permission may be limited")

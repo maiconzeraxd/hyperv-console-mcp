@@ -2,7 +2,7 @@
 
 A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/) server for **Hyper-V on Windows**. It combines VM management, checkpoints, PowerShell Direct diagnostics, synthetic keyboard/mouse input, console screenshots without VMConnect, installation media, serial consoles, and serial WinDbg preparation and a live kd.exe kernel-debugging session in one stdio server.
 
-**Alpha status:** 659 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
+**Alpha status:** 674 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
 
 ## Highlights
 
@@ -42,7 +42,14 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pytest
 ```
 
-Set the protected environment before launching the MCP host. Start read-only:
+Set the protected environment before launching the MCP host. The shortest path is one access level per VM, written by you — never by a tool — into `%LOCALAPPDATA%\HyperVConsoleMCP\access.json`:
+
+```powershell
+hyperv-access set "NORTH-Test" lab      # read-only | control | lab
+hyperv-access list                      # what each VM may do, and the file in use
+```
+
+A level is also the allowlist: a VM with no level is not reachable. `read-only` lists and reads the VM and changes nothing; `control` adds power, checkpoints, console input, screenshots and media; `lab` adds guest access and the debugger. The equivalent environment variables still work and are what a test or a one-off run should use:
 
 ```powershell
 $env:HYPERV_MCP_ALLOWED_VMS = 'NORTH-Test'
@@ -55,6 +62,8 @@ $env:HYPERV_MCP_ALLOW_DEBUGGER = 'false'
 $env:HYPERV_MCP_ALLOW_MEDIA = 'false'
 hyperv-console-mcp
 ```
+
+A VM with a level takes its capabilities from that level — per VM is more specific than a host-wide flag — and a VM without one keeps the older behaviour, where the profile and the `HYPERV_MCP_ALLOW_*` variables decide for every VM at once. `HYPERV_MCP_ALLOWED_VMS` narrows the file rather than replacing it.
 
 See [client configuration](docs/SETUP.md) for a stdio JSON example. All mutations require an explicit VM allowlist and their own capability flag. A `.env` file is **not** loaded automatically.
 
