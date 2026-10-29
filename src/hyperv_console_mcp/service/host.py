@@ -55,6 +55,13 @@ def pipe_name(suffix: str = "") -> str:
     if not suffix:
         override = os.environ.get("HYPERV_MCP_SERVICE_PIPE", "").strip()
         if override:
+            # CreateNamedPipeW answers a malformed name with WinError 123 from
+            # the detached host, where nobody reads it; say it here instead.
+            if not override.lower().startswith("\\\\.\\pipe\\") or len(override) <= 9:
+                raise PolicyError(
+                    "HYPERV_MCP_SERVICE_PIPE must name a pipe, for example "
+                    r"\\.\pipe\HyperVConsoleMCP-Service-mine."
+                )
             return override
     return f"{SERVICE_PIPE_PREFIX}{ipc._current_user_sid()}{suffix}"
 
@@ -286,6 +293,26 @@ def ensure_running(name: str | None = None, *, timeout: float = START_TIMEOUT_SE
     )
 
 
+def open_service(settings: Any, *, actor: str) -> tuple[Any, Any]:
+    """The shared service, or a private copy when the run must not disturb one.
+
+    The window is a client of the same host the MCP server talks to, so a KD or
+    serial session the AI opens is visible there. A private copy owns its own
+    backend, which is what this returns second — and why the caller has to
+    close it and a proxy's caller does not.
+    """
+    if not settings.shared_service:
+        from ..events import EVENTS, EventSink
+        from ..hostwmi import create_backend
+        from . import HyperVService
+
+        backend = EventSink(create_backend(), EVENTS)
+        return HyperVService(backend, settings), backend
+    from .remote import ServiceProxy
+
+    return ServiceProxy(ensure_running(), settings, actor=actor), None
+
+
 def service_log() -> Path:
     from ..config import local_root
     return local_root("service") / "service.log"
@@ -347,6 +374,7 @@ __all__ = [
     "ServiceClient",
     "ServiceHost",
     "ensure_running",
+    "open_service",
     "pipe_name",
     "service_log",
     "transport",

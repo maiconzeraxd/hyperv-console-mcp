@@ -151,3 +151,24 @@ def test_ensure_running_uses_the_host_that_is_already_there(
     client = host_module.ensure_running(host.name)
     assert client.available()
     assert ServiceProxy(client).list_vms()["vms"][0]["name"] == VM
+
+
+def test_a_malformed_pipe_override_is_refused_where_it_is_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Otherwise the detached host dies with WinError 123 and nobody sees why.
+
+    A single backslash is what a shell that eats one produces, and it is the
+    shape a hand-typed override takes most often.
+    """
+    monkeypatch.setenv("HYPERV_MCP_SERVICE_PIPE", r"\.\pipe\HyperVConsoleMCP-Service-typo")
+    with pytest.raises(PolicyError) as caught:
+        pipe_name()
+    assert "HYPERV_MCP_SERVICE_PIPE" in str(caught.value)
+
+
+def test_a_well_formed_pipe_override_is_used_as_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HYPERV_MCP_SERVICE_PIPE", r"\\.\pipe\HyperVConsoleMCP-Service-mine")
+    assert pipe_name() == r"\\.\pipe\HyperVConsoleMCP-Service-mine"
