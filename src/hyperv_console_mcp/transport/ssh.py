@@ -310,10 +310,15 @@ class SshTransport:
         command = (
             "$os = Get-CimInstance -ClassName 'Win32_OperatingSystem'; "
             "[pscustomobject]@{ computer_name = $env:COMPUTERNAME; "
-            "windows_version = $os.Version } | ConvertTo-Json -Compress"
+            "windows_version = [string]$os.Version } | ConvertTo-Json -Compress"
         )
-        output, error, status = self._run(vm, f"powershell -NoProfile -NonInteractive -Command {command}",
-                                          timeout=HEALTH_TIMEOUT_SECONDS)
+        # The guest's sshd shell is powershell.exe, so a plain `-Command` string
+        # is parsed twice and `$os` is expanded by the outer shell before the
+        # inner one sees it. Encoding the command keeps it intact.
+        output, error, status = self._run(
+            vm, f"powershell -NoProfile -NonInteractive -EncodedCommand {_encoded_command(command)}",
+            timeout=HEALTH_TIMEOUT_SECONDS,
+        )
         if status != 0:
             raise BackendError(
                 f"The SSH guest agent in {vm} did not answer: {error.strip() or output.strip()}",
@@ -378,7 +383,7 @@ class SshTransport:
             f"(Get-FileHash -LiteralPath {ps_quote(remote)} -Algorithm SHA256).Hash.ToLowerInvariant() }}"
         )
         output, _, _ = self._run(
-            vm, f"powershell -NoProfile -NonInteractive -Command {command}",
+            vm, f"powershell -NoProfile -NonInteractive -EncodedCommand {_encoded_command(command)}",
             timeout=self.settings.timeout_seconds,
         )
         for line in output.splitlines():

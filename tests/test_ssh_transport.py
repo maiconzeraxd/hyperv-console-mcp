@@ -148,6 +148,7 @@ class FakeSSHClient:
         self.policy: Any = None
         self.connect_kwargs: dict[str, Any] = {}
         self.commands: list[str] = []
+        self.scripts: list[str] = []
         self.files: dict[str, bytes] = dict(FakeSSHClient.preload_files)
         self.exec_handler = FakeSSHClient.exec_handler
         self.guest_handler = FakeSSHClient.guest_handler
@@ -170,6 +171,14 @@ class FakeSSHClient:
     def get_transport(self) -> FakeTransportChannel:
         return self.transport
 
+    def _hash_line(self, script: str) -> str:
+        match = re.search(r"-LiteralPath '((?:[^']|'')*)'", script)
+        path = match.group(1).replace("''", "'")
+        data = self.files.get(_norm(path))
+        if data is None:
+            return "HVMCP_HASH:not_found"
+        return "HVMCP_HASH:" + hashlib.sha256(data).hexdigest()
+
     def exec_command(self, command: str, timeout: float | None = None):
         self.commands.append(command)
         if FakeSSHClient.raw_output is not None:
@@ -177,12 +186,21 @@ class FakeSSHClient:
             return FakeStream(), FakeStream(text, status), FakeStream()
         if "-EncodedCommand " in command:
             script = base64.b64decode(command.rsplit(" ", 1)[1]).decode("utf-16-le")
-            payload = re.search(r"FromBase64String\('([A-Za-z0-9+/=]+)'\)", script).group(1)
-            user_command = base64.b64decode(payload).decode("utf-8")
-            line = EXEC_MARKER + base64.b64encode(
-                json.dumps(self.exec_handler(user_command)).encode()
-            ).decode()
-            return FakeStream(), FakeStream(line), FakeStream()
+            self.scripts.append(script)
+            wrapped = re.search(r"FromBase64String\('([A-Za-z0-9+/=]+)'\)", script)
+            if wrapped is not None:
+                user_command = base64.b64decode(wrapped.group(1)).decode("utf-8")
+                line = EXEC_MARKER + base64.b64encode(
+                    json.dumps(self.exec_handler(user_command)).encode()
+                ).decode()
+                return FakeStream(), FakeStream(line), FakeStream()
+            if "Get-FileHash" in script:
+                return FakeStream(), FakeStream(self._hash_line(script)), FakeStream()
+            # The health probe: a plain script, not the exec wrapper.
+            if FakeSSHClient.health_fails:
+                return FakeStream(), FakeStream("", 1), FakeStream()
+            body = json.dumps({"computer_name": "LAB", "windows_version": "10.0"})
+            return FakeStream(), FakeStream(body), FakeStream()
         if "guest_operations.ps1" in command:
             operation = re.search(r"-Operation '([^']*)'", command).group(1)
             request = re.search(r"-Request '([^']*)'", command).group(1)
@@ -192,14 +210,7 @@ class FakeSSHClient:
             ).decode()
             return FakeStream(), FakeStream(line), FakeStream()
         if "Get-FileHash" in command:
-            match = re.search(r"-LiteralPath '((?:[^']|'')*)'", command)
-            path = match.group(1).replace("''", "'")
-            data = self.files.get(_norm(path))
-            if data is None:
-                line = "HVMCP_HASH:not_found"
-            else:
-                line = "HVMCP_HASH:" + hashlib.sha256(data).hexdigest()
-            return FakeStream(), FakeStream(line), FakeStream()
+            return FakeStream(), FakeStream(self._hash_line(command)), FakeStream()
         if FakeSSHClient.health_fails:
             return FakeStream(), FakeStream("", 1), FakeStream()
         body = json.dumps({"computer_name": "LAB", "windows_version": "10.0"})
@@ -294,6 +305,26 @@ def test_the_connection_pins_the_host_key_and_never_uses_an_agent(tmp_path: Path
     assert client.connect_kwargs["allow_agent"] is False
     assert client.connect_kwargs["pkey"] == f"key:{directory / 'id_ed25519'}"
     assert client.transport.keepalive == 30
+
+
+def test_the_health_probe_survives_the_guest_shell(tmp_path: Path) -> None:
+    """The guest's sshd shell is powershell.exe, so a `-Command` string is parsed twice.
+
+    Regression: health was sent as `powershell -Command "$os = Get-CimInstance ..."`,
+    the outer shell expanded `$os` to nothing before the inner one ran, and
+    guest_status reported `windows_version: null` on the live guest while the same
+    probe over PowerShell Direct returned the version.
+    """
+    provision(tmp_path)
+
+    result = SshTransport(settings(tmp_path)).health(VM)
+
+    client = FakeSSHClient.instances[-1]
+    assert "-EncodedCommand" in client.commands[-1]
+    script = client.scripts[-1]
+    assert "$os = Get-CimInstance" in script
+    assert "windows_version = [string]$os.Version" in script
+    assert result["windows_version"] == "10.0"
 
 
 def test_a_rejected_host_key_is_reported_not_trusted(tmp_path: Path) -> None:
