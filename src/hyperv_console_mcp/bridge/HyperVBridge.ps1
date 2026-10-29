@@ -540,7 +540,10 @@ function Invoke-BridgeOperation {
                 $firmware = Get-VMFirmware -VM $vm
                 $secureBootSupported = $true
                 $secureBoot = $firmware.SecureBoot.ToString()
-                $preferredBoot = $firmware.PreferredBootDevice
+                # Hyper-V omits the property entirely when no preferred device is
+                # set, and strict mode makes that a fatal error instead of $null.
+                $preferred = $firmware.PSObject.Properties['PreferredBootDevice']
+                if ($null -ne $preferred) { $preferredBoot = $preferred.Value }
             }
             $result = @{
                 vm = $vm.Name

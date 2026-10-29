@@ -855,3 +855,37 @@ def test_guest_auth_check_reports_a_working_password(tmp_path: Path) -> None:
     result = invoke_with_mocks(tmp_path, LOCAL_REMOTING, "guest_auth_check", PASSWORD_PAYLOAD)
     assert result["ok"] is True
     assert result["message"] == ""
+
+
+def test_vm_firmware_survives_a_host_that_omits_the_preferred_boot_device(
+    tmp_path: Path,
+) -> None:
+    """Hyper-V leaves PreferredBootDevice out entirely when nothing is preferred.
+
+    Regression: the bridge read ``$firmware.PreferredBootDevice`` directly, and
+    strict mode turned the missing property into a fatal error, so every
+    lab_guest_configure call died before it touched the guest.
+    """
+    mocks = """
+function Get-VMFirmware {
+    param($VM)
+    [pscustomobject]@{ SecureBoot = 'On' }
+}
+"""
+    result = invoke_with_mocks(tmp_path, mocks, "vm_firmware", {"vm": "NORTH-Test"})
+    assert result["generation"] == 2
+    assert result["secure_boot"] == "On"
+    assert result["preferred_boot_device"] is None
+
+
+def test_vm_firmware_reports_the_preferred_boot_device_when_it_is_set(
+    tmp_path: Path,
+) -> None:
+    mocks = """
+function Get-VMFirmware {
+    param($VM)
+    [pscustomobject]@{ SecureBoot = 'Off'; PreferredBootDevice = 'Drive:0' }
+}
+"""
+    result = invoke_with_mocks(tmp_path, mocks, "vm_firmware", {"vm": "NORTH-Test"})
+    assert result["preferred_boot_device"] == "Drive:0"
