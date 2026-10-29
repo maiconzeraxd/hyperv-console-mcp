@@ -23,6 +23,71 @@ GUEST_SCRIPT = r"C:\ProgramData\HyperVConsoleMCP\guest_config.ps1"
 GUEST_SETTINGS_ROOT = r"C:\ProgramData\HyperVConsoleMCP"
 GUEST_STATE_PATH = r"C:\DriverLab\State\guest-config.json"
 
+# A complete dump needs the pagefile to cover RAM plus roughly 257 MB.
+COMPLETE_DUMP_OVERHEAD_BYTES = 257 * 1024 * 1024
+DUMP_MODES = {0: "none", 1: "complete", 2: "kernel", 7: "automatic"}
+
+
+def _dword_is(value: Any, expected: int) -> bool:
+    """True only for an integer equal to ``expected``; a bool or a string is not one."""
+    return isinstance(value, int) and not isinstance(value, bool) and value == expected
+
+
+def _dump_mode(value: Any) -> str:
+    """The name of a ``CrashDumpEnabled`` value; bcdedit's own numbering."""
+    if value is None:
+        return "none"
+    try:
+        return DUMP_MODES.get(int(value), "other")
+    except (TypeError, ValueError):
+        return "other"
+
+
+def derive_live(facts: dict[str, Any]) -> dict[str, Any]:
+    """Turn the guest's raw facts into the live view the tools report.
+
+    The guest reports registry values, BCD tokens and two memory figures; every
+    "is this on" in the answer is decided here, where it can be tested without a
+    VM. A missing value stays null rather than becoming False — absent and zero
+    are different facts — except where the guest has always read absence as the
+    Windows default: a guest without ``DisableCAD`` does require Ctrl+Alt+Del,
+    and a guest without ``CrashDumpEnabled`` has no dump configured.
+    """
+    boot = facts.get("boot") or {}
+    capacity = facts.get("dump_capacity") or {}
+    memory = capacity.get("memory_bytes")
+    pagefile = capacity.get("pagefile_bytes")
+    sufficient = None
+    if isinstance(memory, int) and isinstance(pagefile, int):
+        sufficient = pagefile >= memory + COMPLETE_DUMP_OVERHEAD_BYTES
+    return {
+        "autologon": facts.get("autologon") or {},
+        "lock_screen_disabled": _dword_is(facts.get("no_lock_screen"), 1),
+        "ctrl_alt_del_required": not _dword_is(facts.get("disable_cad"), 1),
+        "uac_consent_prompt_for_admins": facts.get("consent_prompt_behavior_admin"),
+        "enable_lua": facts.get("enable_lua"),
+        "windows_update_disabled": _dword_is(facts.get("no_auto_update"), 1),
+        "windows_update_auto_reboot_blocked": _dword_is(
+            facts.get("no_auto_reboot_with_logged_on_users"), 1
+        ),
+        "screensaver_active": facts.get("screen_save_active"),
+        "power": facts.get("power") or {},
+        "interactive_sessions": facts.get("interactive_sessions") or [],
+        "driver_ready": {
+            "test_signing": boot.get("testsigning") == "on",
+            "kernel_debug": boot.get("debug") == "on",
+            "crash_dump_enabled": boot.get("crash_dump_enabled"),
+            "crash_dump_mode": _dump_mode(boot.get("crash_dump_enabled")),
+            "hvci_enabled": _dword_is(boot.get("hvci_enabled"), 1),
+            "vbs_enabled": _dword_is(boot.get("vbs_enabled"), 1),
+            "dump_support": {
+                "memory_bytes": memory,
+                "pagefile_bytes": pagefile,
+                "sufficient_for_complete_dump": sufficient,
+            },
+        },
+    }
+
 
 def _marker_result(output: str) -> dict[str, Any]:
     from .ssh import ERROR_MARKER, JSON_MARKER
@@ -52,7 +117,10 @@ def _run(service: Any, vm: str, transport: Any, arguments: str) -> dict[str, Any
         timeout=service.settings.timeout_seconds,
         max_output=service.settings.max_output_chars,
     )
-    return _marker_result(execution.output)
+    result = _marker_result(execution.output)
+    if isinstance(result.get("live"), dict):
+        result["live"] = derive_live(result["live"])
+    return result
 
 
 def _quote(value: str) -> str:
@@ -159,6 +227,7 @@ def revert(service: Any, vm: str) -> dict[str, Any]:
 
 
 __all__ = [
+    "COMPLETE_DUMP_OVERHEAD_BYTES", "DUMP_MODES",
     "GUEST_SCRIPT", "GUEST_SETTINGS_ROOT", "GUEST_STATE_PATH",
-    "apply", "lab_apply", "revert", "status",
+    "apply", "derive_live", "lab_apply", "revert", "status",
 ]

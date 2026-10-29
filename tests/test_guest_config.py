@@ -188,6 +188,86 @@ def test_revert_asks_the_guest_to_restore_and_checks_health_first(tmp_path: Path
     assert "-Mode Revert" in transport.commands[0]
 
 
+def test_the_live_view_is_derived_on_the_host_from_raw_guest_facts() -> None:
+    """The guest reports registry values, BCD tokens and two memory figures.
+
+    Regression: the guest script decided what they meant — `($value -eq 1)`,
+    `-not ($cad -eq 1)`, a dump-mode switch and the pagefile comparison — so the
+    same reading existed only in PowerShell and could be checked only on a VM.
+    The tool's output is unchanged; where it is computed moved.
+    """
+    facts = {
+        "autologon": {"auto_admin_logon": "1", "default_user_name": "mcn1"},
+        "no_lock_screen": 1,
+        "disable_cad": 1,
+        "consent_prompt_behavior_admin": 0,
+        "enable_lua": 1,
+        "no_auto_update": 1,
+        "no_auto_reboot_with_logged_on_users": 1,
+        "screen_save_active": "0",
+        "power": {"standby_timeout_ac": 0, "monitor_timeout_ac": 0, "console_lock": 0},
+        "interactive_sessions": ["mcn1 console 1 Ativo"],
+        "boot": {
+            "testsigning": "on", "debug": "on", "crash_dump_enabled": 2,
+            "hvci_enabled": 0, "vbs_enabled": 0,
+        },
+        "dump_capacity": {"memory_bytes": 4 * 1024**3, "pagefile_bytes": 5 * 1024**3},
+    }
+
+    live = guest_config.derive_live(facts)
+
+    assert live["lock_screen_disabled"] is True
+    assert live["ctrl_alt_del_required"] is False
+    assert live["windows_update_disabled"] is True
+    assert live["windows_update_auto_reboot_blocked"] is True
+    assert live["uac_consent_prompt_for_admins"] == 0
+    assert live["screensaver_active"] == "0"
+    assert live["driver_ready"] == {
+        "test_signing": True,
+        "kernel_debug": True,
+        "crash_dump_enabled": 2,
+        "crash_dump_mode": "kernel",
+        "hvci_enabled": False,
+        "vbs_enabled": False,
+        "dump_support": {
+            "memory_bytes": 4 * 1024**3,
+            "pagefile_bytes": 5 * 1024**3,
+            "sufficient_for_complete_dump": True,
+        },
+    }
+
+
+def test_a_missing_value_stays_missing_and_a_small_pagefile_is_not_enough() -> None:
+    """Absent is not zero, and only the pagefile decides a complete dump.
+
+    A guest with no `DisableCAD` does require Ctrl+Alt+Del, and one with no
+    `CrashDumpEnabled` has no dump configured — those two are Windows defaults,
+    not invented values. Everything else reads back as null.
+    """
+    live = guest_config.derive_live({
+        "boot": {"testsigning": "off", "crash_dump_enabled": None},
+        "dump_capacity": {"memory_bytes": 8 * 1024**3, "pagefile_bytes": 1 * 1024**3},
+    })
+
+    assert live["lock_screen_disabled"] is False
+    assert live["ctrl_alt_del_required"] is True
+    assert live["uac_consent_prompt_for_admins"] is None
+    assert live["screensaver_active"] is None
+    assert live["driver_ready"]["test_signing"] is False
+    assert live["driver_ready"]["kernel_debug"] is False
+    assert live["driver_ready"]["crash_dump_enabled"] is None
+    assert live["driver_ready"]["crash_dump_mode"] == "none"
+    assert live["driver_ready"]["hvci_enabled"] is False
+    assert live["driver_ready"]["dump_support"]["sufficient_for_complete_dump"] is False
+
+
+def test_a_registry_value_of_one_reads_as_on_only_when_it_is_a_number() -> None:
+    """`"1"` and `True` are not a DWORD of one; only the integer is."""
+    live = guest_config.derive_live({"no_lock_screen": "1", "disable_cad": True})
+    assert live["lock_screen_disabled"] is False
+    assert live["ctrl_alt_del_required"] is True
+
+
 def test_the_guest_script_is_the_one_shipped_with_the_package() -> None:
     source = Path(guest_config.__file__).with_name("guest_config.ps1")
     text = source.read_text(encoding="utf-8")

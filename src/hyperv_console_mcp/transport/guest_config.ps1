@@ -477,20 +477,12 @@ function Add-PreviousBcd {
 
 # -- live view ------------------------------------------------------------
 
-function Convert-DumpMode {
-    param($Value)
-    switch ([int]$Value) {
-        0 { return 'none' }
-        1 { return 'complete' }
-        2 { return 'kernel' }
-        7 { return 'automatic' }
-        default { return 'other' }
-    }
-}
-
-# A complete dump needs the pagefile to cover RAM plus roughly 257 MB; a kernel
-# dump needs far less. The tool reports this instead of resizing the pagefile.
-function Get-DumpSupport {
+# The live view reports what is on the guest and nothing else: raw registry
+# values, raw BCD tokens and the two memory figures. Whether a value means
+# "test signing is on" or whether the pagefile is big enough for a complete
+# dump is decided on the host, in transport/guest_config.py, so the same facts
+# can be tested without a guest and one reading of them exists.
+function Get-DumpCapacity {
     $os = Get-CimInstance -ClassName Win32_OperatingSystem
     $pageBytes = [int64]0
     foreach ($page in @(Get-CimInstance -ClassName Win32_PageFileUsage -ErrorAction SilentlyContinue)) {
@@ -500,7 +492,6 @@ function Get-DumpSupport {
     return @{
         memory_bytes = $memoryBytes
         pagefile_bytes = $pageBytes
-        sufficient_for_complete_dump = ($pageBytes -ge ($memoryBytes + (257 * 1MB)))
     }
 }
 
@@ -541,28 +532,27 @@ function Get-LiveConfig {
             password_in_lsa = $secretPresent
             device_password_less_build_version = $passwordless.value
         }
-        lock_screen_disabled = ($lockScreen.value -eq 1)
-        ctrl_alt_del_required = -not ($cad.value -eq 1)
-        uac_consent_prompt_for_admins = $uac.value
+        no_lock_screen = $lockScreen.value
+        disable_cad = $cad.value
+        consent_prompt_behavior_admin = $uac.value
         enable_lua = $lua.value
-        windows_update_disabled = ($update.value -eq 1)
-        windows_update_auto_reboot_blocked = ($reboot.value -eq 1)
-        screensaver_active = $screenSave.value
+        no_auto_update = $update.value
+        no_auto_reboot_with_logged_on_users = $reboot.value
+        screen_save_active = $screenSave.value
         power = @{
             standby_timeout_ac = Get-PowerSetting -Setting 'STANDBYIDLE'
             monitor_timeout_ac = Get-PowerSetting -Setting 'VIDEOIDLE'
             console_lock = Get-PowerSetting -Setting 'CONSOLELOCK'
         }
         interactive_sessions = $sessions
-        driver_ready = @{
-            test_signing = ($testSigning.value -eq 'on')
-            kernel_debug = ($debugEntry.value -eq 'on')
+        boot = @{
+            testsigning = $testSigning.value
+            debug = $debugEntry.value
             crash_dump_enabled = $dumpMode.value
-            crash_dump_mode = Convert-DumpMode -Value $dumpMode.value
-            hvci_enabled = ($hvci.value -eq 1)
-            vbs_enabled = ($vbs.value -eq 1)
-            dump_support = Get-DumpSupport
+            hvci_enabled = $hvci.value
+            vbs_enabled = $vbs.value
         }
+        dump_capacity = Get-DumpCapacity
     }
 }
 

@@ -969,3 +969,27 @@ file), and SSH was deprovisioned afterwards.
 Not validated live: the manual runner's tripwire (it needs an elevated guest console and a real
 package to execute). Tests: 629 passing, 1 skipped.
 
+### 2026-10-29 — v0.3 phase 4: the live config view is computed on the host
+
+`guest_config.ps1` decided what its own readings meant: `($value -eq 1)` for every toggle,
+`-not ($cad.value -eq 1)` for Ctrl+Alt+Del, a `switch` mapping `CrashDumpEnabled` to a mode name,
+and the pagefile-versus-RAM comparison for a complete dump. That is a second place the same
+reading exists, testable only on a VM.
+
+- **`Get-LiveConfig` now reports facts**: the raw registry values, the raw BCD tokens, the power
+  values, the interactive sessions and `dump_capacity {memory_bytes, pagefile_bytes}`.
+  `Convert-DumpMode` and the comparison inside `Get-DumpSupport` (now `Get-DumpCapacity`) are gone.
+- **`transport/guest_config.py::derive_live`** turns those facts into the shape the tools have
+  always returned — `lock_screen_disabled`, `ctrl_alt_del_required`, `windows_update_disabled`,
+  `driver_ready {…, crash_dump_mode, dump_support}` — so nothing downstream changed. It is applied
+  in `_run`, which every mode (`Status`, `Apply`, `Revert`) goes through, so no mode can miss it.
+- Two rules are stated instead of implied: a registry DWORD of `1` counts only when it is an
+  integer (a string `"1"` or a `True` is not one), and an absent value stays `null` except where
+  Windows itself defines the default — no `DisableCAD` means Ctrl+Alt+Del is required, no
+  `CrashDumpEnabled` means no dump is configured.
+
+Live, read-only on `NORTH-Test`: `guest_config_status` returned `crash_dump_enabled: 7` →
+`crash_dump_mode: "automatic"`, `kernel_debug: true`, `test_signing: false`, and
+`dump_support {memory 4 293 791 744, pagefile 1 476 395 008, sufficient: false}` — the derived view
+matching the raw facts the guest sent. Tests: 632 passing, 1 skipped.
+
