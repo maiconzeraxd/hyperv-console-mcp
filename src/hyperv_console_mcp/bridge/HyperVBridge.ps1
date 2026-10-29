@@ -43,6 +43,17 @@ function Convert-Date {
     return ([DateTime]$Value).ToString('o')
 }
 
+# StrictMode 2.0 turns a missing property into a terminating error, and the
+# request is built from whatever the caller sent, so an optional field has to be
+# read through its property collection rather than as $request.name.
+function Get-RequestField {
+    param($Request, [Parameter(Mandatory)][string]$Name, $Default = $null)
+    if ($null -eq $Request) { return $Default }
+    $property = $Request.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $Default }
+    return $property.Value
+}
+
 function Convert-Vm {
     param([Parameter(Mandatory)]$Vm)
     $disks = @(
@@ -233,8 +244,22 @@ function Convert-Checkpoint {
 }
 
 function Get-ExactCheckpoint {
-    param([Parameter(Mandatory)]$Vm, [Parameter(Mandatory)][string]$SnapshotId)
-    $snapshots = @(Get-VMSnapshot -VM $Vm | Where-Object { $_.Id.ToString() -eq $SnapshotId })
+    param(
+        [Parameter(Mandatory)]$Vm,
+        [Parameter(Mandatory)][string]$SnapshotId,
+        [int]$WaitSeconds = 0
+    )
+    # A checkpoint that was just created is not always listed yet: the host
+    # publishes it once Hyper-V has finished writing it, which can be after
+    # Checkpoint-VM -Passthru has already returned. Callers that created the
+    # snapshot wait for it; a caller that only names an id fails fast.
+    $deadline = [DateTime]::UtcNow.AddSeconds($WaitSeconds)
+    while ($true) {
+        $snapshots = @(Get-VMSnapshot -VM $Vm | Where-Object { $_.Id.ToString() -eq $SnapshotId })
+        if ($snapshots.Count -ne 0) { break }
+        if ([DateTime]::UtcNow -ge $deadline) { break }
+        Start-Sleep -Milliseconds 250
+    }
     if ($snapshots.Count -ne 1) {
         throw "Expected checkpoint '$SnapshotId' on '$($Vm.Name)'; found $($snapshots.Count)."
     }
@@ -567,7 +592,10 @@ function Invoke-BridgeOperation {
         }
         'checkpoint_create' {
             $vm = Get-ExactVm -Name $request.vm
-            $snapshot = Checkpoint-VM -VM $vm -SnapshotName ([string]$request.name) -Passthru -Confirm:$false
+            $created = Checkpoint-VM -VM $vm -SnapshotName ([string]$request.name) -Passthru -Confirm:$false
+            # Only report a checkpoint once it is listed, so a restore issued right
+            # afterwards cannot miss it.
+            $snapshot = Get-ExactCheckpoint -Vm $vm -SnapshotId $created.Id.ToString() -WaitSeconds 300
             $result = @{ checkpoint = (Convert-Checkpoint -Snapshot $snapshot) }
         }
         'checkpoint_restore' {
@@ -920,7 +948,10 @@ function Invoke-BridgeOperation {
                     try {
                         [IO.File]::WriteAllBytes($temporary, $bytes)
                         if ([IO.File]::Exists($fullPath)) {
-                            [IO.File]::Replace($temporary, $fullPath, $null)
+                            # PowerShell turns $null into '' for a [string] parameter, and
+                            # File.Replace rejects an empty backup path; [NullString]::Value
+                            # is the null the overload expects.
+                            [IO.File]::Replace($temporary, $fullPath, [NullString]::Value)
                         } else {
                             [IO.File]::Move($temporary, $fullPath)
                         }
@@ -1347,8 +1378,8 @@ function Invoke-BridgeOperation {
             # refused request leaves nothing behind.
             $adapters = @(Get-VMNetworkAdapter -VM $vm)
             $attached = @($adapters | Where-Object { $_.SwitchName -eq $switchName })
-            if ($attached.Count -eq 0 -and $adapters.Count -gt 0 -and
-                -not [bool]$request.use_existing_adapter) {
+            $useExisting = [bool](Get-RequestField -Request $request -Name 'use_existing_adapter')
+            if ($attached.Count -eq 0 -and $adapters.Count -gt 0 -and -not $useExisting) {
                 throw "The VM already has a network adapter; pass use_existing_adapter to attach '$switchName' to it."
             }
 
@@ -1362,10 +1393,15 @@ function Invoke-BridgeOperation {
             }
 
             $adapterCreated = $false
+            # A reused adapter is moved off whatever switch it was on, so remember
+            # that switch: deprovision puts it back instead of leaving the guest
+            # with no network at all.
+            $previousSwitch = ''
             if ($attached.Count -gt 0) {
                 $adapter = $attached[0]
             } elseif ($adapters.Count -gt 0) {
                 $adapter = $adapters[0]
+                $previousSwitch = [string]$adapter.SwitchName
                 Connect-VMNetworkAdapter -VMNetworkAdapter $adapter -SwitchName $switchName -ErrorAction Stop
             } else {
                 $adapter = Add-VMNetworkAdapter -VM $vm -Name $adapterName -SwitchName $switchName -ErrorAction Stop
@@ -1390,6 +1426,7 @@ function Invoke-BridgeOperation {
                 switch_created = $switchCreated
                 adapter_name = [string]$adapter.Name
                 adapter_created = $adapterCreated
+                previous_switch = $previousSwitch
                 host_ip = $hostIp
                 host_address_created = $hostAddressCreated
             }
@@ -1401,17 +1438,28 @@ function Invoke-BridgeOperation {
             $switchName = [string]$request.switch_name
             $adapterName = [string]$request.adapter_name
             $hostIp = [string]$request.host_ip
+            # Provisioning moved a reused adapter off its switch; give it back.
+            $previousSwitch = [string](Get-RequestField -Request $request -Name 'previous_switch' -Default '')
+            $restorable = $previousSwitch -and
+                @(Get-VMSwitch -Name $previousSwitch -ErrorAction SilentlyContinue).Count -gt 0
+            $removeAdapter = [bool](Get-RequestField -Request $request -Name 'remove_adapter')
             $removed = @()
             foreach ($adapter in @(Get-VMNetworkAdapter -VM $vm | Where-Object { $_.SwitchName -eq $switchName })) {
-                if ([bool]$request.remove_adapter -and [string]$adapter.Name -eq $adapterName) {
+                if ($removeAdapter -and [string]$adapter.Name -eq $adapterName) {
                     Remove-VMNetworkAdapter -VMNetworkAdapter $adapter -Confirm:$false -ErrorAction Stop
                     $removed += 'adapter'
+                } elseif ($restorable) {
+                    Connect-VMNetworkAdapter -VMNetworkAdapter $adapter -SwitchName $previousSwitch -ErrorAction Stop
+                    $removed += "connection:$previousSwitch"
                 } else {
-                    Disconnect-VMNetworkAdapter -VMNetworkAdapter $adapter -ErrorAction Stop
-                    $removed += 'connection'
+                    # Nothing usable was recorded about where this adapter came
+                    # from, so it is left connected. Disconnecting the only
+                    # adapter would leave the VM with no network at all, and that
+                    # is not recoverable from here.
+                    $removed += 'connection-kept'
                 }
             }
-            if ([bool]$request.remove_host_address) {
+            if ([bool](Get-RequestField -Request $request -Name 'remove_host_address')) {
                 $address = @(Get-NetIPAddress -IPAddress $hostIp -ErrorAction SilentlyContinue)
                 if ($address.Count -gt 0) {
                     Remove-NetIPAddress -IPAddress $hostIp -Confirm:$false -ErrorAction Stop

@@ -9,7 +9,10 @@
 #
 # Output is one line: HVMCP_JSON:<base64 of the JSON result>, or HVMCP_ERROR:<text>.
 param(
-    [Parameter(Mandatory)][ValidateSet('Install', 'Status', 'Remove')][string]$Mode,
+    # Not mandatory: the host-side test dot-sources this file to exercise its
+    # helpers, and a mandatory parameter would fail that binding. The mode is
+    # validated in main instead, so the command line behaves the same.
+    [string]$Mode = '',
     [string]$PublicKey = '',
     [string]$HostIp = '',
     [string]$GuestIp = '',
@@ -53,9 +56,10 @@ function Install-Sshd {
         $capabilityError = $_.Exception.Message
     }
     if (-not $script:SshdPackage) {
-        throw ("OpenSSH Server is not installed and no offline package was supplied. " +
-            "Set HYPERV_MCP_OPENSSH_PACKAGE to an extracted Win32-OpenSSH release. " +
-            "Capability attempt: $capabilityError")
+        # A distinct marker, so the host can tell "I need the offline package" apart
+        # from a real failure and retry with one instead of parsing the message.
+        Write-Output ('HVMCP_NEEDS_PACKAGE:' + $capabilityError.Replace("`r", ' ').Replace("`n", ' '))
+        exit 3
     }
     $installer = Join-Path $script:SshdPackage 'install-sshd.ps1'
     if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
@@ -80,7 +84,8 @@ function Set-SshdConfig {
     # sshd uses the first value it reads for a keyword, so the managed lines go
     # above the distribution's own settings (and above any Match block).
     $existing = @(Get-Content -LiteralPath $sshdConfig |
-        Where-Object { $_ -notmatch '^\s*(PasswordAuthentication|PubkeyAuthentication)\s' })
+        Where-Object { $_ -notmatch '^\s*(PasswordAuthentication|PubkeyAuthentication)\s' } |
+        ForEach-Object { [string]$_ })
     $managed = @(
         '# Managed by HyperVConsoleMCP: key authentication only.'
         'PubkeyAuthentication yes'
@@ -116,9 +121,19 @@ function Set-AuthorizedKey {
     if (-not $PSCmdlet.ShouldProcess($authorizedKeys, 'Install the host public key')) { return }
     Set-Content -LiteralPath $authorizedKeys -Value $lines -Encoding ascii
     # OpenSSH refuses a key file that is readable by anyone but Administrators
-    # and SYSTEM, so the ACL is reset rather than inherited.
-    & icacls.exe $authorizedKeys /inheritance:r /grant:r 'Administrators:F' /grant:r 'SYSTEM:F' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Could not restrict the ACL of $authorizedKeys." }
+    # and SYSTEM, so the ACL is reset rather than inherited. The grants name the
+    # well-known SIDs, not the accounts: a localized guest has no 'Administrators'
+    # or 'SYSTEM' account name, and icacls fails on the English spelling there.
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $aclOutput = & icacls.exe $authorizedKeys /inheritance:r `
+        /grant:r '*S-1-5-32-544:F' /grant:r '*S-1-5-18:F' 2>&1 | ForEach-Object { "$_" }
+    $aclExit = $LASTEXITCODE
+    $ErrorActionPreference = $previousPreference
+    if ($aclExit -ne 0) {
+        throw ("Could not restrict the ACL of {0} (icacls exit {1}): {2}" -f
+            $authorizedKeys, $aclExit, ($aclOutput -join ' '))
+    }
 }
 
 function Set-FirewallRule {
@@ -173,6 +188,29 @@ function Get-HostKeyPublic {
     return ((Get-Content -LiteralPath $path -Raw).Trim() -split '\s+' | Select-Object -First 2) -join ' '
 }
 
+function Get-RuleRemoteAddress {
+    param($Rule)
+    if ($null -eq $Rule) { return $null }
+    # A rule's own RemoteAddress property comes back empty; the scope lives on
+    # its associated address filter, so read that instead. Status used to report
+    # '' for a rule that really was scoped to the lab host.
+    $filter = $Rule | Get-NetFirewallAddressFilter
+    if ($null -eq $filter) { return $null }
+    return [string](@($filter.RemoteAddress) -join ',')
+}
+
+function Get-ManagedConfigLine {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return @() }
+    # Get-Content decorates every line with the provider's note properties
+    # (PSPath, PSDrive, PSProvider, ...). ConvertTo-Json then walks that whole
+    # object graph, so two lines serialized to 700 KB and the result was cut by
+    # the output limit. Only the text is wanted, so each line is cast to string.
+    return @(Get-Content -LiteralPath $Path |
+        Where-Object { $_ -match '^\s*(PasswordAuthentication|PubkeyAuthentication)\s' } |
+        ForEach-Object { [string]$_ })
+}
+
 function Get-SetupState {
     $service = Get-SshdService
     $rule = @(Get-NetFirewallRule -Name $firewallRule -ErrorAction SilentlyContinue)
@@ -187,11 +225,7 @@ function Get-SetupState {
                 ForEach-Object { $_.IPAddress })
         }
     }
-    $config = @()
-    if (Test-Path -LiteralPath $sshdConfig -PathType Leaf) {
-        $config = @(Get-Content -LiteralPath $sshdConfig |
-            Where-Object { $_ -match '^\s*(PasswordAuthentication|PubkeyAuthentication)\s' })
-    }
+    $config = Get-ManagedConfigLine -Path $sshdConfig
     $keyPresent = $false
     if (Test-Path -LiteralPath $authorizedKeys -PathType Leaf) {
         $keyPresent = [bool](Get-Content -LiteralPath $authorizedKeys |
@@ -206,14 +240,20 @@ function Get-SetupState {
         config_lines = $config
         authorized_key_present = $keyPresent
         firewall_rule_present = ($rule.Count -gt 0)
-        firewall_remote_address = if ($rule.Count -eq 0) { $null } else { [string]$rule[0].RemoteAddress }
+        firewall_remote_address = if ($rule.Count -eq 0) { $null } else { Get-RuleRemoteAddress -Rule $rule[0] }
         ip_addresses = $addresses
         default_shell = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name 'DefaultShell' -ErrorAction SilentlyContinue).DefaultShell
     }
 }
 
+# Dot-sourcing (the host-side test does that to reach the helpers) must not run
+# the setup itself.
+if ($MyInvocation.InvocationName -ne '.') {
 try {
     $result = @{}
+    if ($Mode -notin @('Install', 'Status', 'Remove')) {
+        throw "-Mode must be Install, Status or Remove; got '$Mode'."
+    }
     switch ($Mode) {
         'Install' {
             $install = Install-Sshd
@@ -280,4 +320,5 @@ try {
 } catch {
     Write-Output ('HVMCP_ERROR:' + $_.Exception.Message.Replace("`r", ' ').Replace("`n", ' '))
     exit 1
+}
 }

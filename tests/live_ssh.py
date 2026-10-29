@@ -59,23 +59,39 @@ def main() -> int:
     })
     backend = GuestSplitBackend()
     service = HyperVService(backend, settings)
+    failures = 0
     try:
-        report("guest_ssh_status (before)", lambda: service.guest_ssh_status(args.vm))
+        before = report("guest_ssh_status (before)", lambda: service.guest_ssh_status(args.vm))
+        if before.get("error"):
+            failures += 1
         provisioned = report(
             "guest_ssh_provision",
             lambda: service.guest_ssh_provision(
                 args.vm, args.vm, use_existing_adapter=args.use_existing_adapter
             ),
         )
+        if provisioned.get("error"):
+            failures += 1
         if provisioned.get("verified"):
-            report("guest_exec over ssh", lambda: service.guest_exec(args.vm, "hostname"))
-            report("guest_status over ssh", lambda: service.guest_status(args.vm))
-        report("guest_ssh_status (after)", lambda: service.guest_ssh_status(args.vm))
+            for label, call in (
+                ("guest_exec over ssh", lambda: service.guest_exec(args.vm, "hostname")),
+                ("guest_status over ssh", lambda: service.guest_status(args.vm)),
+            ):
+                if report(label, call).get("error"):
+                    failures += 1
+        after = report("guest_ssh_status (after)", lambda: service.guest_ssh_status(args.vm))
+        if after.get("error"):
+            failures += 1
         if args.deprovision and not args.keep:
-            report("guest_ssh_deprovision", lambda: service.guest_ssh_deprovision(args.vm, args.vm))
+            removed = report(
+                "guest_ssh_deprovision",
+                lambda: service.guest_ssh_deprovision(args.vm, args.vm),
+            )
+            if removed.get("error") or not removed.get("state_removed"):
+                failures += 1
     finally:
         backend.close()
-    return 0
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

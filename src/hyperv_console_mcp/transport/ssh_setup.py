@@ -9,10 +9,12 @@ external switch.
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import ipaddress
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -32,6 +34,23 @@ HEALTH_ATTEMPTS = 20
 HEALTH_DELAY_SECONDS = 0.5
 MAX_PACKAGE_FILES = 200
 MAX_PACKAGE_BYTES = 64 * 1024 * 1024
+PACKAGE_MARKER = "HVMCP_NEEDS_PACKAGE:"
+
+# The guest may have no internet, so `Add-WindowsCapability` cannot be relied on.
+# This is the pinned Win32-OpenSSH release the host falls back to: the version,
+# the size and the hash are all fixed here, and a download that does not match is
+# refused rather than installed. Bump all three together, from a release whose
+# hash was computed from the downloaded asset.
+OPENSSH_RELEASE = {
+    "version": "10.4.0.0p1-Preview",
+    "asset": "OpenSSH-Win64.zip",
+    "size": 6021393,
+    "sha256": "b67ff8becd203502190ec42ac7787c24c2cd3325ed7700485fe7a1c83d2a7957",
+}
+OPENSSH_URL = (
+    "https://github.com/PowerShell/Win32-OpenSSH/releases/download/"
+    f"{OPENSSH_RELEASE['version']}/{OPENSSH_RELEASE['asset']}"
+)
 
 
 # -- addresses and state ----------------------------------------------------
@@ -145,8 +164,25 @@ def ensure_keypair(directory: Path) -> str:
 
 def _marker_result(output: str) -> dict[str, Any]:
     for line in output.splitlines():
+        if line.startswith(PACKAGE_MARKER):
+            raise BackendError(
+                "The guest has no OpenSSH Server and could not install the capability: "
+                f"{line[len(PACKAGE_MARKER):]}",
+                code="openssh_package_required",
+            )
         if line.startswith(JSON_MARKER):
-            return json.loads(base64.b64decode(line[len(JSON_MARKER):]).decode("utf-8"))
+            payload = line[len(JSON_MARKER):].strip()
+            try:
+                return json.loads(base64.b64decode(payload).decode("utf-8"))
+            except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
+                # A result clipped by the output limit used to surface here as a
+                # bare "Invalid base64-encoded string", which says nothing about
+                # the guest. Name the real cause instead.
+                raise BackendError(
+                    "The guest SSH setup result could not be decoded "
+                    f"({exc}); it was probably cut by the output limit.",
+                    code="ssh_setup_failed",
+                ) from exc
         if line.startswith(ERROR_MARKER):
             raise BackendError(
                 f"The guest SSH setup failed: {line[len(ERROR_MARKER):]}", code="ssh_setup_failed"
@@ -156,12 +192,102 @@ def _marker_result(output: str) -> dict[str, Any]:
     )
 
 
+# -- offline package --------------------------------------------------------
+
+
+def package_directory(settings: Any) -> Path:
+    return Path(settings.ssh_root) / "_packages" / OPENSSH_RELEASE["version"]
+
+
+def ensure_package(settings: Any) -> Path:
+    """Return an extracted, hash-verified Win32-OpenSSH tree, downloading it once.
+
+    The guest is disposable and often has no internet, so the host carries the
+    package. The download is verified against the pinned size and SHA-256 before
+    anything is extracted; a mismatch is refused, never installed.
+    """
+    root = package_directory(settings)
+    installer = root / "install-sshd.ps1"
+    if installer.is_file():
+        return root
+    root.parent.mkdir(parents=True, exist_ok=True)
+    archive = root.parent / OPENSSH_RELEASE["asset"]
+    if not archive.is_file():
+        _download(OPENSSH_URL, archive)
+    data = archive.read_bytes()
+    if len(data) != OPENSSH_RELEASE["size"]:
+        raise BackendError(
+            f"The OpenSSH package has {len(data)} bytes; {OPENSSH_RELEASE['size']} were expected.",
+            code="openssh_package_invalid",
+        )
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != OPENSSH_RELEASE["sha256"]:
+        raise BackendError(
+            "The OpenSSH package does not match the pinned SHA-256; refusing to install it.",
+            code="openssh_package_invalid",
+        )
+    _extract(archive, root)
+    if not installer.is_file():
+        raise BackendError(
+            f"The OpenSSH package has no install-sshd.ps1 after extraction: {root}",
+            code="openssh_package_invalid",
+        )
+    return root
+
+
+def _download(url: str, target: Path) -> None:
+    import urllib.request
+
+    partial = target.with_suffix(target.suffix + ".part")
+    try:
+        with urllib.request.urlopen(url, timeout=120) as response, partial.open("wb") as handle:
+            shutil.copyfileobj(response, handle)
+        partial.replace(target)
+    except OSError as exc:
+        partial.unlink(missing_ok=True)
+        raise BackendError(
+            f"Could not download the OpenSSH package from {url}: {exc}", code="openssh_download_failed"
+        ) from exc
+
+
+def _extract(archive: Path, root: Path) -> None:
+    """Extract the archive, refusing entries that would escape ``root``."""
+    import zipfile
+
+    staging = root.with_name(root.name + ".staging")
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            for member in bundle.infolist():
+                name = member.filename.replace("\\", "/")
+                if name.startswith("/") or ".." in name.split("/"):
+                    raise BackendError(
+                        f"The OpenSSH package contains an unsafe path: {member.filename}",
+                        code="openssh_package_invalid",
+                    )
+                bundle.extract(member, staging)
+    except zipfile.BadZipFile as exc:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise BackendError(
+            f"The OpenSSH package is not a readable zip: {exc}", code="openssh_package_invalid"
+        ) from exc
+    # The release ships one top-level directory; the installer lives inside it.
+    entries = [path for path in staging.iterdir() if path.is_dir()]
+    source = entries[0] if len(entries) == 1 and len(list(staging.iterdir())) == 1 else staging
+    shutil.rmtree(root, ignore_errors=True)
+    source.replace(root)
+    shutil.rmtree(staging, ignore_errors=True)
+
+
 # -- provisioning steps -----------------------------------------------------
 
 
 def _adapter_mac(service: Any, vm: str, adapter_name: str) -> str:
     result = service._run("vm_get", "vm_get", {"vm": vm}, vm_name=vm, audit=False)
-    adapters = result.get("vm", {}).get("adapters") or []
+    # `vm_get` reports the adapters as `network_adapters`; reading a key that does
+    # not exist made every provisioning attempt fail on a healthy adapter.
+    adapters = result.get("vm", {}).get("network_adapters") or []
     for adapter in adapters:
         if str(adapter.get("name")) == adapter_name and adapter.get("mac_address"):
             return str(adapter["mac_address"])
@@ -210,6 +336,18 @@ def _install_command(
     return " ".join(parts)
 
 
+def _upload_script(transport: PowerShellDirectTransport, vm: str) -> None:
+    """Put the guest-side setup script where the command line expects it.
+
+    Every mode runs the script by path, so every mode has to ship it first: a
+    guest that was never provisioned has no copy, and `status` on such a guest
+    used to fail with "the argument ... does not exist" instead of reporting
+    that SSH is simply not set up.
+    """
+    source = Path(__file__).with_name("guest_ssh_setup.ps1")
+    transport.put_file(vm, source, GUEST_SCRIPT, overwrite=True)
+
+
 def _probe(settings: Any, vm: str) -> dict[str, Any]:
     """Wait for sshd to answer; a failure is reported, never hidden."""
     transport = SshTransport(settings)
@@ -222,6 +360,46 @@ def _probe(settings: Any, vm: str) -> dict[str, Any]:
             last = str(exc)
             time.sleep(HEALTH_DELAY_SECONDS)
     return {"ok": False, "error": last}
+
+
+def _install(
+    service: Any, transport: PowerShellDirectTransport, vm: str, *,
+    public_key: str, host_ip: str, guest_ip: str, prefix: int, mac: str,
+    sshd_source: str,
+) -> dict[str, Any]:
+    settings = service.settings
+    execution = transport.exec(
+        vm,
+        _install_command(public_key, host_ip, guest_ip, prefix, mac, sshd_source),
+        timeout=settings.timeout_seconds,
+        max_output=settings.max_output_chars,
+    )
+    return _marker_result(execution.output)
+
+
+def _undo_host_changes(service: Any, vm: str, prepared: dict[str, Any], host_ip: str) -> list[str]:
+    """Put the host back after a provisioning attempt that did not finish.
+
+    The network is prepared before the guest work, so a guest that refuses would
+    otherwise leave the VM moved onto the lab switch — and a later deprovision
+    would disconnect it, taking the guest's own network away with it.
+    """
+    try:
+        removed = service._run(
+            "guest_ssh_provision", "ssh_network_remove",
+            {
+                "vm": vm, "switch_name": SWITCH_NAME,
+                "adapter_name": str(prepared.get("adapter_name") or ADAPTER_NAME),
+                "host_ip": host_ip,
+                "remove_adapter": bool(prepared.get("adapter_created")),
+                "remove_host_address": bool(prepared.get("host_address_created")),
+                "previous_switch": str(prepared.get("previous_switch") or ""),
+            },
+            vm_name=vm,
+        )
+    except Exception:  # noqa: BLE001 - the original failure is what matters
+        return []
+    return [str(item) for item in removed.get("removed") or []]
 
 
 def provision(service: Any, vm: str, *, use_existing_adapter: bool = False) -> dict[str, Any]:
@@ -240,25 +418,40 @@ def provision(service: Any, vm: str, *, use_existing_adapter: bool = False) -> d
         },
         vm_name=vm,
     )
-    mac = _adapter_mac(service, vm, str(prepared["adapter_name"]))
+    try:
+        mac = _adapter_mac(service, vm, str(prepared["adapter_name"]))
 
-    directory = state_directory(settings, vm)
-    public_key = ensure_keypair(directory)
-    source = Path(__file__).with_name("guest_ssh_setup.ps1")
-    transport.put_file(vm, source, GUEST_SCRIPT, overwrite=True)
-    sshd_source = ""
-    if settings.openssh_package:
-        sshd_source = _upload_openssh(transport, vm, Path(settings.openssh_package))
+        directory = state_directory(settings, vm)
+        public_key = ensure_keypair(directory)
+        _upload_script(transport, vm)
+        sshd_source = ""
+        if settings.openssh_package:
+            sshd_source = _upload_openssh(transport, vm, Path(settings.openssh_package))
 
-    execution = transport.exec(
-        vm,
-        _install_command(public_key, host_ip, guest_ip, network.prefixlen, mac, sshd_source),
-        timeout=settings.timeout_seconds,
-        max_output=settings.max_output_chars,
-    )
-    guest = _marker_result(execution.output)
+        try:
+            guest = _install(
+                service, transport, vm,
+                public_key=public_key, host_ip=host_ip, guest_ip=guest_ip,
+                prefix=network.prefixlen, mac=mac, sshd_source=sshd_source,
+            )
+        except BackendError as exc:
+            if exc.code != "openssh_package_required" or sshd_source:
+                raise
+            # The guest has no OpenSSH and no internet to fetch the capability.
+            # Ship the pinned package from the host and try once more.
+            sshd_source = _upload_openssh(transport, vm, ensure_package(settings))
+            guest = _install(
+                service, transport, vm,
+                public_key=public_key, host_ip=host_ip, guest_ip=guest_ip,
+                prefix=network.prefixlen, mac=mac, sshd_source=sshd_source,
+            )
+    except BaseException:
+        _undo_host_changes(service, vm, prepared, host_ip)
+        raise
+
     host_key = str(guest.get("host_key_public") or "").strip()
     if not host_key.startswith("ssh-ed25519 "):
+        _undo_host_changes(service, vm, prepared, host_ip)
         raise BackendError("The guest did not report an ed25519 host key.", code="ssh_setup_failed")
 
     (directory / "known_hosts").write_text(f"{guest_ip} {host_key}\n", encoding="utf-8")
@@ -269,6 +462,9 @@ def provision(service: Any, vm: str, *, use_existing_adapter: bool = False) -> d
         "switch_name": SWITCH_NAME,
         "adapter_name": prepared["adapter_name"],
         "adapter_created": bool(prepared["adapter_created"]),
+        # Empty when the adapter was created for this lab or was already on the
+        # lab switch; otherwise the switch provisioning moved it off.
+        "previous_switch": str(prepared.get("previous_switch") or ""),
         "host_ip": host_ip,
         "host_address_created": bool(prepared["host_address_created"]),
         "provisioned_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -277,8 +473,10 @@ def provision(service: Any, vm: str, *, use_existing_adapter: bool = False) -> d
 
     probe = _probe(settings, vm)
     if not probe["ok"]:
-        # Do not leave a state file that would make `auto` prefer a dead transport.
+        # Do not leave a state file that would make `auto` prefer a dead transport,
+        # and do not leave the host moved onto a switch the guest never used.
         (directory / "state.json").unlink(missing_ok=True)
+        _undo_host_changes(service, vm, prepared, host_ip)
         raise BackendError(
             "SSH was configured in the guest but never answered: "
             f"{probe['error']}. Guest state: {guest.get('state')}",
@@ -301,6 +499,7 @@ def status(service: Any, vm: str) -> dict[str, Any]:
     transport = PowerShellDirectTransport(service.backend, settings)
     guest: dict[str, Any]
     try:
+        _upload_script(transport, vm)
         command = (
             "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass "
             f"-File {ps_quote(GUEST_SCRIPT)} -Mode Status"
@@ -333,6 +532,7 @@ def deprovision(service: Any, vm: str) -> dict[str, Any]:
     guest: dict[str, Any] = {"removed": False}
     guest_ip = str(state.get("host") or guest_address(settings, vm))
     try:
+        _upload_script(transport, vm)
         command = (
             "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass "
             f"-File {ps_quote(GUEST_SCRIPT)} -Mode Remove -GuestIp {ps_quote(guest_ip)}"
@@ -355,6 +555,7 @@ def deprovision(service: Any, vm: str) -> dict[str, Any]:
             "host_ip": str(state.get("host_ip") or host_address(settings)[1]),
             "remove_adapter": bool(state.get("adapter_created")),
             "remove_host_address": bool(state.get("host_address_created")),
+            "previous_switch": str(state.get("previous_switch") or ""),
         },
         vm_name=vm,
     )
@@ -373,7 +574,7 @@ def deprovision(service: Any, vm: str) -> dict[str, Any]:
 
 
 __all__ = [
-    "ADAPTER_NAME", "GUEST_SCRIPT", "SWITCH_NAME",
-    "deprovision", "ensure_keypair", "guest_address", "host_address",
-    "provision", "read_state", "state_directory", "status", "write_state",
+    "ADAPTER_NAME", "GUEST_SCRIPT", "OPENSSH_RELEASE", "OPENSSH_URL", "SWITCH_NAME",
+    "deprovision", "ensure_keypair", "ensure_package", "guest_address", "host_address",
+    "package_directory", "provision", "read_state", "state_directory", "status", "write_state",
 ]

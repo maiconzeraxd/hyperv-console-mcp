@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import shutil
 import sys
@@ -68,11 +69,56 @@ function Checkpoint-VM {
         ParentSnapshotId = $null; Notes = 'mock'
     }
 }
+function Get-VMSnapshot {
+    param($VM)
+    [pscustomobject]@{
+        Id = [guid]'6f4b3f13-2a9f-4eb0-a3f4-bd52e890c001'
+        Name = 'before-lab'; CreationTime = [datetime]'2026-10-28T00:00:00Z'
+        ParentSnapshotId = $null; Notes = 'mock'
+    }
+}
 """,
         "checkpoint_create", {"vm": "NORTH-Test", "name": "before-lab"},
     )
     assert result["checkpoint"]["id"] == "6f4b3f13-2a9f-4eb0-a3f4-bd52e890c001"
     assert result["checkpoint"]["name"] == "before-lab"
+
+
+def test_checkpoint_create_waits_until_the_new_snapshot_is_listed(tmp_path: Path) -> None:
+    """Hyper-V can list a checkpoint only after Checkpoint-VM has returned.
+
+    Regression: on a live VM the checkpoint was created and the revert that
+    followed found "0" checkpoints with that id, so the revert did nothing.
+    """
+    log = tmp_path / "snapshots.log"
+    mocks = """
+$global:SnapshotLog = '{log}'
+$global:SnapshotCalls = 0
+function Checkpoint-VM {
+    param($VM, $SnapshotName, [switch]$Passthru, [switch]$Confirm)
+    [pscustomobject]@{
+        Id = [guid]'6f4b3f13-2a9f-4eb0-a3f4-bd52e890c001'
+        Name = $SnapshotName; CreationTime = [datetime]'2026-10-28T00:00:00Z'
+        ParentSnapshotId = $null; Notes = 'mock'
+    }
+}
+function Get-VMSnapshot {
+    param($VM)
+    $global:SnapshotCalls++
+    Add-Content -LiteralPath $global:SnapshotLog -Value "list $($global:SnapshotCalls)"
+    if ($global:SnapshotCalls -le 1) { return }
+    [pscustomobject]@{
+        Id = [guid]'6f4b3f13-2a9f-4eb0-a3f4-bd52e890c001'
+        Name = 'before-lab'; CreationTime = [datetime]'2026-10-28T00:00:00Z'
+        ParentSnapshotId = $null; Notes = 'mock'
+    }
+}
+""".replace("{log}", str(log).replace("'", "''"))
+    result = invoke_with_mocks(
+        tmp_path, mocks, "checkpoint_create", {"vm": "NORTH-Test", "name": "before-lab"},
+    )
+    assert result["checkpoint"]["id"] == "6f4b3f13-2a9f-4eb0-a3f4-bd52e890c001"
+    assert len(log.read_text(encoding="utf-8").splitlines()) >= 2
 
 
 def test_guest_exec_captures_native_stderr_and_strips_remoting_properties(tmp_path: Path) -> None:
@@ -307,6 +353,29 @@ def test_guest_file_info_reports_absence_as_not_found(tmp_path: Path) -> None:
             {**GUEST_PAYLOAD, "path": str(missing)},
         )
     assert error.value.code == "not_found"
+
+
+def test_guest_write_file_replaces_an_existing_file(tmp_path: Path) -> None:
+    """`File.Replace` needs a real null for its backup path.
+
+    Regression: `[IO.File]::Replace($temp, $path, $null)` coerced `$null` to `''`
+    for the [string] parameter and threw "The path has an invalid format", so
+    overwriting any guest file failed — including reinstalling a lab tool.
+    """
+    target = tmp_path / "tool.ps1"
+    target.write_bytes(b"old")
+    content = b"new content"
+    result = invoke_with_mocks(
+        tmp_path, LOCAL_REMOTING, "guest_write_file",
+        {
+            **GUEST_PAYLOAD, "path": str(target),
+            "content_base64": base64.b64encode(content).decode("ascii"),
+            "overwrite": True, "create_parent": False,
+        },
+    )
+    assert target.read_bytes() == content
+    assert result["file"]["bytes_written"] == len(content)
+    assert result["file"]["sha256"] == hashlib.sha256(content).hexdigest()
 
 
 # Copy-Item has no session to talk to in these tests, so it degrades to a local copy.
@@ -626,7 +695,9 @@ def test_ssh_network_prepare_refuses_to_hijack_an_existing_adapter(tmp_path: Pat
     extra = """
 function Get-VMNetworkAdapter { param($VM) [pscustomobject]@{ Name = 'WAN'; SwitchName = 'Default Switch' } }
 """
-    with pytest.raises(BackendError, match="use_existing_adapter"):
+    # The guard's own words: a looser match would also accept the StrictMode error
+    # "the property 'use_existing_adapter' was not found", which is not the guard.
+    with pytest.raises(BackendError, match="already has a network adapter"):
         invoke_with_mocks(
             tmp_path, _ssh_network_mocks(tmp_path, extra), "ssh_network_prepare",
             SSH_NETWORK_PAYLOAD,
@@ -643,6 +714,8 @@ function Get-VMNetworkAdapter { param($VM) [pscustomobject]@{ Name = 'WAN'; Swit
     )
     assert result["adapter_created"] is False
     assert result["adapter_name"] == "WAN"
+    # The switch it left behind is recorded so deprovision can put it back.
+    assert result["previous_switch"] == "Default Switch"
     assert "Connect-VMNetworkAdapter:WAN:HyperV-MCP-Lab" in _read_log(tmp_path)
 
 def test_ssh_network_prepare_reuses_an_existing_host_address(tmp_path: Path) -> None:
@@ -680,6 +753,12 @@ function Get-NetIPAddress {
     ]
 
 def test_ssh_network_remove_keeps_a_foreign_switch_alone(tmp_path: Path) -> None:
+    """With nothing recorded, the adapter is left where it is.
+
+    Regression: it was disconnected, so a VM whose only adapter had been moved
+    onto the lab switch by an earlier provisioning ended up with no network at
+    all — and with no way to tell from the tool what had happened.
+    """
     extra = """
 function Get-VMNetworkAdapter {
     param($VM) [pscustomobject]@{ Name = 'HyperV-MCP-Lab'; SwitchName = 'HyperV-MCP-Lab' }
@@ -689,8 +768,52 @@ function Get-VMNetworkAdapter {
         tmp_path, _ssh_network_mocks(tmp_path, extra), "ssh_network_remove",
         {**SSH_NETWORK_PAYLOAD, "remove_adapter": False, "remove_host_address": False},
     )
-    assert result["removed"] == ["connection"]
-    assert _read_log(tmp_path) == ["Disconnect-VMNetworkAdapter:HyperV-MCP-Lab"]
+    assert result["removed"] == ["connection-kept"]
+    assert _read_log(tmp_path) == []
+
+def test_ssh_network_remove_puts_a_reused_adapter_back_on_its_switch(tmp_path: Path) -> None:
+    """Deprovision restores the switch a reused adapter came from.
+
+    Regression: it only disconnected the adapter, so a VM that arrived on another
+    switch left the lab with no network at all.
+    """
+    extra = """
+function Get-VMNetworkAdapter {
+    param($VM) [pscustomobject]@{ Name = 'WAN'; SwitchName = 'HyperV-MCP-Lab' }
+}
+function Get-VMSwitch {
+    param($Name, $ErrorAction)
+    [pscustomobject]@{ Name = $Name; SwitchType = 'Internal' }
+}
+"""
+    result = invoke_with_mocks(
+        tmp_path, _ssh_network_mocks(tmp_path, extra), "ssh_network_remove",
+        {**SSH_NETWORK_PAYLOAD, "adapter_name": "WAN", "remove_adapter": False,
+         "remove_host_address": False, "previous_switch": "Default Switch"},
+    )
+    assert result["removed"] == ["connection:Default Switch"]
+    assert _read_log(tmp_path) == ["Connect-VMNetworkAdapter:WAN:Default Switch"]
+
+def test_ssh_network_remove_keeps_the_adapter_when_the_old_switch_is_gone(
+    tmp_path: Path,
+) -> None:
+    """A recorded switch that no longer exists must not fail the deprovision.
+
+    It also must not disconnect the adapter: the switch cannot be restored, and
+    leaving the connection in place is the only recoverable outcome.
+    """
+    extra = """
+function Get-VMNetworkAdapter {
+    param($VM) [pscustomobject]@{ Name = 'WAN'; SwitchName = 'HyperV-MCP-Lab' }
+}
+"""
+    result = invoke_with_mocks(
+        tmp_path, _ssh_network_mocks(tmp_path, extra), "ssh_network_remove",
+        {**SSH_NETWORK_PAYLOAD, "adapter_name": "WAN", "remove_adapter": False,
+         "remove_host_address": False, "previous_switch": "Default Switch"},
+    )
+    assert result["removed"] == ["connection-kept"]
+    assert _read_log(tmp_path) == []
 
 PASSWORD_PAYLOAD = {
     "vm": "NORTH-Test", "username": "test-user", "password": "test-password",
