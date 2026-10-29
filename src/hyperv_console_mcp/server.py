@@ -354,6 +354,49 @@ def create_server(
     ) -> dict[str, Any]:
         return await _invoke(service.lab_collect, vm_name, package_id, run_id, include_kernel_dump)
 
+    @tool(
+        "lab_run", annotations=MUTATION,
+        description="Lab profile only. Create checkpoint pre-<run_id>, re-verify the package, run its Run-Lab.ps1 in the guest, and classify the outcome as ok, failed, not_verified, bugcheck, hang, or timeout. The approval phrase is generated here; the VM must already be Running.",
+    )
+    async def lab_run(
+        vm_name: str,
+        package_id: str,
+        run_id: str,
+        expected_manifest_sha256: str,
+        timeout_seconds: int = 600,
+        checkpoint_before: bool = True,
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.lab_run, vm_name, package_id, run_id, expected_manifest_sha256,
+            timeout_seconds, checkpoint_before,
+        )
+
+    @tool(
+        "lab_cycle", annotations=MUTATION,
+        description="Lab profile only. lab_run, then collect evidence into HYPERV_MCP_EVIDENCE_ROOT, then optionally restore checkpoint pre-<run_id>. Returns one structured report.",
+    )
+    async def lab_cycle(
+        vm_name: str,
+        package_id: str,
+        run_id: str,
+        expected_manifest_sha256: str,
+        timeout_seconds: int = 600,
+        checkpoint_before: bool = True,
+        revert_after: bool = False,
+        include_kernel_dump: bool = True,
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.lab_cycle, vm_name, package_id, run_id, expected_manifest_sha256,
+            timeout_seconds, checkpoint_before, revert_after, include_kernel_dump,
+        )
+
+    @tool(
+        "vm_inject_nmi", annotations=MUTATION,
+        description="Inject a non-maskable interrupt into a Running VM so a hung guest bugchecks into the debugger. Requires confirm_vm and HYPERV_MCP_ALLOW_DEBUGGER.",
+    )
+    async def vm_inject_nmi(vm_name: str, confirm_vm: str) -> dict[str, Any]:
+        return await _invoke(service.vm_inject_nmi, vm_name, confirm_vm)
+
     @tool("events_snapshot", annotations=READ_ONLY, description="Read recent operation lifecycle events from this MCP instance, without commands, passwords, typed text, or file contents.")
     async def events_snapshot(after_sequence: int = 0) -> dict[str, Any]:
         from .events import EVENTS

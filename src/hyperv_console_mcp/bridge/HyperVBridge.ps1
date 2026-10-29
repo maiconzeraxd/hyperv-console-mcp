@@ -436,6 +436,21 @@ function Invoke-BridgeOperation {
                 started_at = $status.started_at
             }
         }
+        'vm_inject_nmi' {
+            $vm = Get-ExactVm -Name $request.vm
+            if ($vm.State -ne [Microsoft.HyperV.PowerShell.VMState]::Running) {
+                throw 'The VM must be Running before an NMI can be injected. The server will not start it.'
+            }
+            # An NMI is how a hung guest is forced into the debugger; it is not a
+            # substitute for a graceful shutdown.
+            Debug-VM -VM $vm -InjectNonMaskableInterrupt -Confirm:$false | Out-Null
+            $result = @{
+                vm = $vm.Name
+                injected = $true
+                state = $vm.State.ToString()
+                note = 'An NMI may bugcheck the guest. Collect the dump or attach the debugger before retrying.'
+            }
+        }
         'checkpoint_list' {
             $vm = Get-ExactVm -Name $request.vm
             $checkpoints = @(Get-VMSnapshot -VM $vm | ForEach-Object { Convert-Checkpoint -Snapshot $_ })

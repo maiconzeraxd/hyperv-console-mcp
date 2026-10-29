@@ -2,11 +2,11 @@
 
 A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/) server for **Hyper-V on Windows**. It combines VM management, checkpoints, PowerShell Direct diagnostics, synthetic keyboard/mouse input, experimental VMConnect capture, installation media, serial consoles, and serial WinDbg preparation in one stdio server.
 
-**Alpha status:** 203 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. An earlier elevated read-only MCP diagnostic succeeded against `NORTH-Test` for host, VM, console, serial status, media, and checkpoint queries. Live mutations, PowerShell Direct guest operations and SSH provisioning were not exercised in this delivery. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled or executed by this project.
+**Alpha status:** 227 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. An earlier elevated read-only MCP diagnostic succeeded against `NORTH-Test` for host, VM, console, serial status, media, and checkpoint queries. Live mutations, PowerShell Direct guest operations and SSH provisioning were not exercised in this delivery. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled or executed by this project.
 
 ## Highlights
 
-- **56 MCP tools** with read-only/destructive annotations and structured results.
+- **59 MCP tools** with read-only/destructive annotations and structured results.
 - Inventory, pause/resume, bounded state waiting, power, checkpoints, and bounded guest file transfer.
 - Guest OS health, processes, services, and recent event logs through PowerShell Direct.
 - Hyper-V `Msvm_Keyboard` and `Msvm_SyntheticMouse`, explicit key/button states, and ordered console batches: works without guest networking.
@@ -64,11 +64,12 @@ See [client configuration](docs/SETUP.md) for a stdio JSON example. All mutation
 | Console | `console_info`, `console_type_text`, `console_press_keys`, `console_key_state`, `console_mouse_buttons`, `console_batch`, `console_ctrl_alt_delete`, `console_mouse_move`, `console_click`, `console_scroll`, `console_screenshot` |
 | Media/boot | `media_list`, `media_mount`, `media_eject` |
 | Serial console | `serial_status`, `serial_connect`, `serial_read`, `serial_send`, `serial_disconnect` |
-| Kernel debugging | `debug_serial_status`, `debug_serial_prepare`, `debug_guest_prepare` |
+| Kernel debugging | `debug_serial_status`, `debug_serial_prepare`, `debug_guest_prepare`, `vm_inject_nmi` |
 | SSH (optional) | `guest_ssh_provision`, `guest_ssh_status`, `guest_ssh_deprovision` |
 | Guest credentials | `guest_credential_status`, `guest_password_rotate`, `guest_credential_forget` |
 | Guest automation | `guest_autologon_configure`, `guest_config_status`, `guest_config_revert` |
-| Driver lab (non-executing) | `lab_init`, `lab_diagnostics`, `lab_stage`, `lab_verify`, `lab_collect` |
+| Driver lab | `lab_init`, `lab_diagnostics`, `lab_stage`, `lab_verify`, `lab_collect` |
+| Driver lab (lab profile) | `lab_run`, `lab_cycle` |
 | Activity | `events_snapshot` |
 
 Power actions are `start`, `shutdown`, `save`, `pause`, `resume`, `turn_off`, and `reset`. Forced power needs `confirm_vm` equal to `vm_name`. Restore/delete need the VM name and exact checkpoint GUID confirmed. Overwriting an existing guest file needs `overwrite=true` and an exact `confirm_path`.
@@ -83,7 +84,7 @@ Media operations use an existing DVD drive and require the VM to be Off. `media_
 
 Start the native dashboard with `python -I scripts\run_dashboard.py --vm NORTH-Test` or, after installation, `hyperv-dashboard --vm NORTH-Test`. It uses the same service and policies as MCP and exposes activity, console, recovery, media, serial/debugging, guest access and lab pages. Optional per-request approval of AI mutations is documented in [the dashboard guide](docs/DASHBOARD.md).
 
-The lab workflow initializes fixed guest directories, stages hash-verified packages and collects evidence without executing a payload. Package sources and evidence downloads are confined to `HYPERV_MCP_LAB_ROOT` and `HYPERV_MCP_EVIDENCE_ROOT`. Running a package is a separate manual guest action requiring an exact run-specific approval phrase. See [the lab guide](docs/LAB.md); no driver or mapper is bundled or run by this repository.
+The lab workflow initializes fixed guest directories, stages hash-verified packages and collects evidence. Package sources and evidence downloads are confined to `HYPERV_MCP_LAB_ROOT` and `HYPERV_MCP_EVIDENCE_ROOT`. Without the lab profile, running a package is a separate manual guest action requiring an exact run-specific approval phrase; with `HYPERV_MCP_PROFILE=lab`, `lab_run`/`lab_cycle` generate that phrase, checkpoint first and classify the outcome as `ok`, `failed`, `not_verified`, `bugcheck`, `hang` or `timeout`. See [the lab guide](docs/LAB.md); no driver or mapper is bundled or run by this repository.
 
 ## Performance and debugging
 
@@ -98,7 +99,7 @@ For kernel work, choose **KDNET** after reviewing a suitable network path, or **
 
 - Local stdio only; no HTTP server or unauthenticated network listener.
 - Read-only mode by default; allowlist required for every mutation.
-- `HYPERV_MCP_PROFILE=lab` enables every capability for the allowlisted VMs and skips the per-mutation dashboard approval. It does not widen the allowlist, skip a `confirm_*` field, or stop the audit and event records; an explicit `HYPERV_MCP_ALLOW_*=false` still wins.
+- `HYPERV_MCP_PROFILE=lab` enables every capability for the allowlisted VMs and skips the per-mutation dashboard approval. It does not widen the allowlist, skip a `confirm_*` field, or stop the audit and event records; an explicit `HYPERV_MCP_ALLOW_*=false` still wins. `lab_run`/`lab_cycle`, which execute a staged package, exist only in this profile.
 - Console input is real input to the VM and can change state immediately.
 - Screenshots may contain sensitive guest information and are gated separately.
 - Audit events contain timestamp, operation, VM, outcome, and error code only. Guest commands, typed text, passwords, and file contents are excluded.

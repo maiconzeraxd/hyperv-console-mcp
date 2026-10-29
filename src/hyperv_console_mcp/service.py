@@ -28,7 +28,8 @@ GATED_TOOLS = frozenset({
     "guest_ssh_provision", "guest_ssh_deprovision",
     "guest_password_rotate", "guest_credential_forget",
     "guest_autologon_configure", "guest_config_revert",
-    "lab_init", "lab_stage", "lab_collect",
+    "lab_init", "lab_stage", "lab_collect", "lab_run", "lab_cycle",
+    "vm_inject_nmi",
     "console_type_text", "console_press_keys", "console_key_state",
     "console_mouse_buttons", "console_batch", "console_ctrl_alt_delete",
     "console_mouse_move", "console_click", "console_scroll",
@@ -370,9 +371,15 @@ class HyperVService:
                 result = self._call(operation, name, run)
         return {**result, "vm": result.get("vm", name), "transport": transport.name}
 
-    def guest_exec(self, vm_name: str, command: str) -> dict[str, Any]:
+    def guest_exec(
+        self, vm_name: str, command: str, *, timeout_seconds: int | None = None
+    ) -> dict[str, Any]:
         text = _text(command, "command", 131_072)
         name = self._guest_vm(vm_name)
+        timeout = (
+            self.settings.timeout_seconds if timeout_seconds is None
+            else _integer(timeout_seconds, "timeout_seconds", 10, 3600)
+        )
         transport = self._transport(name)
         with self._approve("guest_exec", name, _command_summary(text)):
             execution = self._call(
@@ -381,7 +388,7 @@ class HyperVService:
                 lambda: transport.exec(
                     name,
                     text,
-                    timeout=self.settings.timeout_seconds,
+                    timeout=timeout,
                     max_output=self.settings.max_output_chars,
                 ),
             )
@@ -1026,6 +1033,83 @@ class HyperVService:
             return DriverLabTransfer(self).collect(
                 name, package_id, run_id, output, include_kernel_dump=include_kernel_dump,
             )
+
+    def _require_lab_profile(self, tool: str) -> None:
+        """Executing a staged payload is a lab-profile decision, never a per-call one."""
+        if self.settings.profile != "lab":
+            raise PolicyError(
+                f"{tool} runs a staged payload and is enabled only with HYPERV_MCP_PROFILE=lab. "
+                "Without it, use lab_verify and run the package deliberately in the guest."
+            )
+
+    def lab_run(
+        self,
+        vm_name: str,
+        package_id: str,
+        run_id: str,
+        expected_manifest_sha256: str,
+        timeout_seconds: int = 600,
+        checkpoint_before: bool = True,
+    ) -> dict[str, Any]:
+        from .lab.run import checkpoint_name, run
+
+        name = self._guest_vm(vm_name)
+        self._require_lab_profile("lab_run")
+        summary = {
+            "package_id": package_id,
+            "run_id": run_id,
+            "manifest_sha256": expected_manifest_sha256,
+            "checkpoint": checkpoint_name(run_id) if checkpoint_before else None,
+            "timeout_seconds": timeout_seconds,
+            "executes_staged_payload": True,
+        }
+        with self._approve("lab_run", name, summary):
+            return run(
+                self, name,
+                package_id=package_id, run_id=run_id,
+                expected_manifest_sha256=expected_manifest_sha256,
+                timeout_seconds=timeout_seconds, checkpoint_before=checkpoint_before,
+            )
+
+    def lab_cycle(
+        self,
+        vm_name: str,
+        package_id: str,
+        run_id: str,
+        expected_manifest_sha256: str,
+        timeout_seconds: int = 600,
+        checkpoint_before: bool = True,
+        revert_after: bool = False,
+        include_kernel_dump: bool = True,
+    ) -> dict[str, Any]:
+        from .lab.run import checkpoint_name, cycle
+
+        name = self._guest_vm(vm_name)
+        self._require_lab_profile("lab_cycle")
+        summary = {
+            "package_id": package_id,
+            "run_id": run_id,
+            "manifest_sha256": expected_manifest_sha256,
+            "checkpoint": checkpoint_name(run_id) if checkpoint_before else None,
+            "timeout_seconds": timeout_seconds,
+            "revert_after": bool(revert_after),
+            "executes_staged_payload": True,
+        }
+        with self._approve("lab_cycle", name, summary):
+            return cycle(
+                self, name,
+                package_id=package_id, run_id=run_id,
+                expected_manifest_sha256=expected_manifest_sha256,
+                timeout_seconds=timeout_seconds, checkpoint_before=checkpoint_before,
+                revert_after=revert_after, include_kernel_dump=include_kernel_dump,
+            )
+
+    def vm_inject_nmi(self, vm_name: str, confirm_vm: str) -> dict[str, Any]:
+        """Force a bugcheck in a hung guest so the debugger can catch it."""
+        name = self._write(vm_name, self.settings.allow_debugger, "HYPERV_MCP_ALLOW_DEBUGGER")
+        self._confirm(confirm_vm, name, "confirm_vm")
+        with self._approve("vm_inject_nmi", name, {"action": "inject_nmi"}):
+            return self._run("vm_inject_nmi", "vm_inject_nmi", {"vm": name}, vm_name=name)
 
     def console_info(self, vm_name: str) -> dict[str, Any]:
         name = self._vm(vm_name)
