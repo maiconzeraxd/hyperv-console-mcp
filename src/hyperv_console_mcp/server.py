@@ -200,9 +200,11 @@ def create_server(
 
     @tool(
         "vm_get", annotations=READ_ONLY,
-        description="Get VM state, devices, memory, network, and checkpoint count. With wait_for set "
-        "to a list of states, poll until the VM reaches one of them instead and report matched=false "
-        "on timeout; waiting never changes power state.",
+        description="Get VM state, devices, memory, network, and checkpoint count. A running VM "
+        "also carries guest_facts, the computer name and OS the guest publishes through the "
+        "key-value pair exchange, which needs no guest credential. With wait_for set to a list of "
+        "states, poll until the VM reaches one of them instead and report matched=false on "
+        "timeout; waiting never changes power state.",
     )
     async def vm_get(
         vm_name: str,

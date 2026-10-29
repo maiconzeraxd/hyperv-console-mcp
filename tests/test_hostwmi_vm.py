@@ -117,6 +117,28 @@ def _allocation() -> dict[str, Any]:
     }
 
 
+def _kvp_item(name: str, data: str) -> str:
+    return (
+        '<INSTANCE CLASSNAME="Msvm_KvpExchangeDataItem">'
+        f'<PROPERTY NAME="Data" TYPE="string"><VALUE>{data}</VALUE></PROPERTY>'
+        f'<PROPERTY NAME="Name" TYPE="string"><VALUE>{name}</VALUE></PROPERTY>'
+        "</INSTANCE>"
+    )
+
+def _kvp() -> dict[str, Any]:
+    return {
+        "DeviceID": "Microsoft:2A34B1C2-FD73-4043-8A5B-DD2159BC743F",
+        "SystemName": VM_ID,
+        "GuestIntrinsicExchangeItems": [
+            _kvp_item("FullyQualifiedDomainName", "DESKTOP-AA9PSTJ"),
+            _kvp_item("OSName", "Windows 10 Pro"),
+            _kvp_item("OSVersion", "10.0.19045"),
+            _kvp_item("OSBuildNumber", "10011"),
+            _kvp_item("IntegrationServicesVersion", "10.0.19045"),
+        ],
+        "GuestExchangeItems": [],
+    }
+
 def _answers(**overrides: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
     answers: dict[str, list[dict[str, Any]]] = {
         "FROM Msvm_ComputerSystem": [_computer()],
@@ -135,6 +157,7 @@ def _answers(**overrides: list[dict[str, Any]]) -> list[tuple[str, list[dict[str
         "FROM Msvm_GuestNetworkAdapterConfiguration": [
             {"InstanceID": f"Microsoft:GuestNetwork\\{VM_ID}\\{PORT_ID}", "IPAddresses": ["10.0.0.5"]}
         ],
+        "FROM Msvm_KvpExchangeComponent": [_kvp()],
     }
     answers.update(overrides)
     return list(answers.items())
@@ -180,6 +203,23 @@ def test_vm_list_maps_what_get_vm_answers() -> None:
                     "ip_addresses": ["10.0.0.5"],
                 }
             ],
+            # Read from the key-value pair exchange: no guest credential needed.
+            "guest_facts": {
+                "available": True,
+                "computer_name": "DESKTOP-AA9PSTJ",
+                "os_name": "Windows 10 Pro",
+                "os_version": "10.0.19045",
+                "os_build": "10011",
+                "integration_services_version": "10.0.19045",
+                "values": {
+                    "FullyQualifiedDomainName": "DESKTOP-AA9PSTJ",
+                    "IntegrationServicesVersion": "10.0.19045",
+                    "OSBuildNumber": "10011",
+                    "OSName": "Windows 10 Pro",
+                    "OSVersion": "10.0.19045",
+                },
+                "host_set": {},
+            },
         }
     ]
 

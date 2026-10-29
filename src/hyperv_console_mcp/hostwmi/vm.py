@@ -18,6 +18,7 @@ from typing import Any
 
 from .connection import Connection, WmiFailure, wql_literal
 from .jobs import await_job
+from .kvp import guest_facts
 
 # A VM instance is the one whose Name is its own id; the host instance is
 # named after the computer, which is why this and not the localized Caption.
@@ -164,6 +165,9 @@ def describe(connection: Connection, computer: dict[str, Any]) -> dict[str, Any]
         ],
         "dvd_drives": [_drive(row, components["storage"]) for row in components["drives"]],
         "network_adapters": _adapters(connection, components),
+        # A stopped VM has no guest to describe, and asking the exchange would
+        # only add a query per VM to every listing.
+        "guest_facts": guest_facts(connection, identifier) if enabled == _RUNNING else None,
     }
 
 

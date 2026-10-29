@@ -1038,6 +1038,31 @@ carries the denial only in its text, and is now marked as the heuristic it is.
 Test: a wrapped denial carrying a German message, which came back as `bridge_error` before the
 change. Tests: 641 passing, 1 skipped.
 
+### 2026-10-29 — v0.3 phase 5: the guest describes itself without a credential
+
+The first piece of zero-config discovery: `vm_get` and `vm_list` now carry `guest_facts` for a
+running VM — the computer name, OS name, version and build, and the integration services version the
+guest publishes through Hyper-V's key-value pair exchange. One WMI query, no password, so a tool can
+name the guest before any credential exists.
+
+- **`hostwmi/kvp.py`** reads `Msvm_KvpExchangeComponent`, scoped by `SystemName`. The component's
+  `DeviceID` is the device's own GUID, not the VM's, so matching on it silently found nothing on the
+  first attempt — confirmed against the live host before wiring it in.
+- Two limits are stated rather than papered over. `NetworkAddressIPv4`/`IPv6` and
+  `RDPAddressIPv4`/`IPv6` are deprecated and now carry a deprecation *notice* where an address used
+  to be, so they are filtered out; guest addresses come from
+  `Msvm_GuestNetworkAdapterConfiguration`, which the adapter mapping already reads. And a stopped VM
+  reports `guest_facts: null` rather than an exchange with no items, because there is no guest to
+  describe — the query is also skipped for it, so a listing of stopped VMs costs no extra call.
+- A missing exchange component, a stopped Data Exchange service and a failed query each come back as
+  `available: false` with the reason, never as an exception: these facts enrich a listing, and a VM
+  whose integration service is missing must still be listed.
+
+Live on `NORTH-Test` through the WMI backend: `guest_facts.computer_name` `DESKTOP-AA9PSTJ`,
+`os_name` `Windows 10 Pro`, `os_version` `10.0.19045`, and `vm_list` reporting `available: true` for
+the same VM. This guest publishes no `ComputerName`, only `FullyQualifiedDomainName`, which is why
+the convenience field falls back to it. Tests: 647 passing, 1 skipped.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,
