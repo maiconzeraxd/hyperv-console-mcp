@@ -575,6 +575,21 @@ def create_server(
         return await _invoke(service.lab_verify, vm_name, package_id, expected_manifest_sha256)
 
     @tool(
+        "lab_receipts", annotations=READ_ONLY,
+        description="Read the receipts earlier cycles left under HYPERV_MCP_EVIDENCE_ROOT. action='list' names every run "
+        "(newest first, optionally for one VM); action='get' returns one run's record and the evidence it collected, "
+        "with the host path and SHA-256 of each file; action='compare' reports field by field what changed between "
+        "two runs. Reads the host only: no VM is touched and nothing is executed.",
+    )
+    async def lab_receipts(
+        action: Literal["list", "get", "compare"] = "list",
+        run_ids: list[str] | None = None,
+        vm_name: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        return await _invoke(service.lab_receipts, action, run_ids, vm_name, limit)
+
+    @tool(
         "lab_collect", annotations=MUTATION,
         description="Collect a new run's logs, events, diagnostics and dumps into HYPERV_MCP_EVIDENCE_ROOT. A kernel dump is opt-in; no new test is started.",
     )

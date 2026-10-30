@@ -873,3 +873,83 @@ def test_the_run_command_bypasses_the_guest_execution_policy() -> None:
     assert "Invoke-DriverLabRun.ps1" in command
     assert "-ApproveExecution 'EXECUTE north.1 run-1'" in command
     assert f"-ExpectedManifestSha256 '{DIGEST}'" in command
+
+
+def test_a_run_reports_the_steps_it_is_in() -> None:
+    """The window shows a cycle's phases from the event bus, not from a guess.
+
+    A run is one blocking service call, so without these the feed has a started
+    and a completed event and nothing in between. The percentages are the share
+    of the wall time each step usually takes, so they only have to be monotonic
+    and to leave room for the steps after them.
+    """
+    service = FakeLabService(run_result={"success": True, "exit_code": 0})
+    seen: list[tuple[int, str]] = []
+
+    lab_run.run(
+        service, "NORTH-Test",
+        package_id="north.1", run_id="run-1",
+        expected_manifest_sha256=DIGEST,
+        progress=lambda percent, message: seen.append((percent, message)),
+    )
+
+    percents = [percent for percent, _ in seen]
+    assert percents == sorted(percents)
+    assert percents[0] == 5, "the checkpoint comes first"
+    assert percents[-1] == 90, "the last phase leaves 100 to the completed event"
+    assert all(0 <= percent < 100 for percent in percents)
+    assert any("executing" in message for _, message in seen)
+
+
+def test_a_nested_step_reports_inside_its_parent_band(tmp_path: Path) -> None:
+    """A cycle's own phases and the run's share one scale, never two."""
+    service = FakeLabService(run_result={"success": True, "exit_code": 0})
+    # The cycle writes its receipt and collects evidence under the evidence
+    # root; a real directory keeps the test off the host's configured one.
+    service.settings = Settings(evidence_root=tmp_path)
+    seen: list[tuple[int, str]] = []
+
+    lab_run.cycle(
+        service, "NORTH-Test",
+        package_id="north.1", run_id="run-1",
+        expected_manifest_sha256=DIGEST,
+        checkpoint_before=True,
+        progress=lambda percent, message: seen.append((percent, message)),
+    )
+
+    percents = [percent for percent, _ in seen]
+    assert percents == sorted(percents), percents
+    assert percents[-1] == 98, "the receipt is written last"
+    assert any("receipt" in message for _, message in seen)
+
+
+def test_a_long_step_appears_once_in_the_feed_with_its_phases() -> None:
+    """One operation, its phases, and a completed event that closes it.
+
+    The reporter is what turns a blocking call into something the Activity page
+    can follow. Its phases share the outer operation's correlation id, so the
+    window draws them under the run they belong to instead of as stray events.
+    """
+    from hyperv_console_mcp.events import EVENTS
+
+    class NoBackend:
+        def invoke(self, operation: str, payload: Any, *, timeout: Any = None) -> Any:
+            raise AssertionError(f"the backend must not be reached: {operation}")
+
+    service = HyperVService(NoBackend(), Settings(evidence_root=Path("C:/Evidence")))
+    before = EVENTS.snapshot()["latest_sequence"]
+
+    result = service._tracked(
+        "lab_probe", "NORTH-Test",
+        lambda progress: (progress(40, "halfway"), {"ok": True})[1],
+    )
+
+    assert result == {"ok": True}
+    events = [
+        event for event in EVENTS.snapshot(before)["events"]
+        if event["operation"] == "lab_probe"
+    ]
+    assert [event["phase"] for event in events] == ["started", "progress", "completed"]
+    assert events[1]["progress"] == 40
+    assert events[1]["message"] == "halfway"
+    assert {event["correlation_id"] for event in events} == {events[0]["correlation_id"]}

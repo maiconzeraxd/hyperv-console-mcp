@@ -106,8 +106,8 @@ client can either ask you or, in the lab profile, do it.
 
 Every tool belongs to one toolset. A profile decides which toolsets are registered, and a
 tool that is not registered is never advertised, so its schema never enters the model's
-context. The `safe` profile registers 29 tools, `lab` registers 42, `HYPERV_MCP_TOOLSETS`
-replaces the set outright, and `all` enables everything (64 tools).
+context. The `safe` profile registers 29 tools, `lab` registers 43, `HYPERV_MCP_TOOLSETS`
+replaces the set outright, and `all` enables everything (65 tools).
 
 | Toolset | Tools | safe | lab |
 |---|---|:--:|:--:|
@@ -120,7 +120,7 @@ replaces the set outright, and `all` enables everything (64 tools).
 | `ssh` | `guest_ssh_provision`, `guest_ssh_status`, `guest_ssh_deprovision` | ✓ | |
 | `files` | `file_roots`, `host_list_dir`, `host_make_dir`, `host_rename`, `host_delete`, `guest_list_dir`, `guest_make_dir`, `guest_rename`, `guest_delete` | | |
 | `serial` | `serial_status`, `serial_connect`, `serial_read`, `serial_send`, `serial_disconnect` | | |
-| `lab` | `lab_init`, `lab_diagnostics`, `lab_stage`, `lab_verify`, `lab_collect`, `lab_guest_configure`, `lab_verifier`, `lab_driver_service`, `lab_run`, `lab_cycle` | | ✓ |
+| `lab` | `lab_init`, `lab_diagnostics`, `lab_stage`, `lab_verify`, `lab_collect`, `lab_guest_configure`, `lab_verifier`, `lab_driver_service`, `lab_run`, `lab_cycle`, `lab_receipts` | | ✓ |
 | `kd` | `kd_attach`, `kd_status`, `kd_detach`, `kd_execution`, `kd_command`, `kd_wait_event`, `kd_breakpoint`, `kd_inspect`, `vm_inject_nmi` | | ✓ |
 | `debug` | `debug_status`, `debug_setup` | | ✓ |
 
@@ -153,7 +153,7 @@ The window is a WebView2 page (`pip install hyperv-console-mcp[ui]`, or pywebvie
 
 The MCP server and the dashboard are clients of one background service, so a KD or serial session the AI opens is the session the window shows, and the activity page lists what the other process did. A client that finds no host starts one (`hyperv-service`, or `hyperv-service --pipe NAME`) and joins it; `HYPERV_MCP_SHARED_SERVICE=false` keeps a private copy for a run that must not disturb a live one, and `HYPERV_MCP_SERVICE_PIPE` names a different pipe. The host reads its policy once at startup, so whichever client starts it decides the environment for both — set the level per VM in the access file rather than relying on a client's environment.
 
-The lab workflow initializes fixed guest directories, stages hash-verified packages and collects evidence. Package sources and evidence downloads are confined to `HYPERV_MCP_LAB_ROOT` and `HYPERV_MCP_EVIDENCE_ROOT`. Without the lab profile, running a package is a separate manual guest action requiring an exact run-specific approval phrase; with `HYPERV_MCP_PROFILE=lab`, `lab_run`/`lab_cycle` generate that phrase, checkpoint first and classify the outcome as `ok`, `failed`, `not_verified`, `bugcheck`, `hang` or `timeout`. A bugcheck is then triaged from the dump the run collected — the newest minidump first, `!analyze -v` through kd, merged with the host's own crash record — and each cycle writes `lab-cycle.json` beside the evidence so two runs of the same package can be diffed. `lab_verifier` turns Driver Verifier on for named test drivers and `lab_driver_service` installs, starts, stops and removes a test kernel-driver service, both recorded and revertible in the guest; a refused driver is reported with its Win32 error and NTSTATUS, and signature enforcement is never bypassed. See [the lab guide](docs/LAB.md); no driver or mapper is bundled or run by this repository.
+The lab workflow initializes fixed guest directories, stages hash-verified packages and collects evidence. Package sources and evidence downloads are confined to `HYPERV_MCP_LAB_ROOT` and `HYPERV_MCP_EVIDENCE_ROOT`. Without the lab profile, running a package is a separate manual guest action requiring an exact run-specific approval phrase; with `HYPERV_MCP_PROFILE=lab`, `lab_run`/`lab_cycle` generate that phrase, checkpoint first and classify the outcome as `ok`, `failed`, `not_verified`, `bugcheck`, `hang` or `timeout`. A bugcheck is then triaged from the dump the run collected — the newest minidump first, `!analyze -v` through kd, merged with the host's own crash record — and each cycle writes `lab-cycle.json` beside the evidence so two runs of the same package can be diffed. `lab_receipts` reads those records back on the host alone — `action="list"` names every run newest first, `action="get"` returns one run with the host path and SHA-256 of each evidence file, and `action="compare"` reports field by field what changed between two runs, marking a field one side never had as absent rather than as changed to nothing. `lab_verifier` turns Driver Verifier on for named test drivers and `lab_driver_service` installs, starts, stops and removes a test kernel-driver service, both recorded and revertible in the guest; a refused driver is reported with its Win32 error and NTSTATUS, and signature enforcement is never bypassed. See [the lab guide](docs/LAB.md); no driver or mapper is bundled or run by this repository.
 
 ## Performance and debugging
 

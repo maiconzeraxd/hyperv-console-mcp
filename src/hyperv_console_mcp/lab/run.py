@@ -281,6 +281,25 @@ def _report(
     }
 
 
+def _say(progress: Any, percent: int, message: str) -> None:
+    """Tell the live feed which step just began, when anybody is listening.
+
+    The numbers are the share of the wall time each step usually takes, not a
+    measurement of this run: the guest's execution is one blocking call and has
+    no progress of its own to report.
+    """
+    if progress is not None:
+        progress(percent, message)
+
+
+def _band(progress: Any, low: int, high: int) -> Any:
+    """Map a nested step's 0-100 onto a slice of the outer step's scale."""
+    if progress is None:
+        return None
+    span = high - low
+    return lambda percent, message: progress(low + int(span * max(0, min(100, percent)) / 100), message)
+
+
 def run(
     service: Any,
     vm_name: str,
@@ -290,6 +309,7 @@ def run(
     expected_manifest_sha256: str,
     timeout_seconds: int = 600,
     checkpoint_before: bool = True,
+    progress: Any = None,
 ) -> dict[str, Any]:
     package = identifier(package_id, "package_id")
     run_identifier = identifier(run_id, "run_id")
@@ -310,6 +330,7 @@ def run(
 
     checkpoint: dict[str, Any] | None = None
     if checkpoint_before:
+        _say(progress, 5, "creating the pre-run checkpoint")
         created = service.create_checkpoint(vm_name, checkpoint_name(run_identifier))
         snapshot = created.get("checkpoint") or {}
         checkpoint = {
@@ -318,6 +339,7 @@ def run(
             "created": True,
         }
 
+    _say(progress, 15, "verifying the package against its manifest")
     verification = DriverLabTransfer(service).verify(vm_name, package, digest)
     if not verification.get("verified"):
         return _report(
@@ -331,6 +353,7 @@ def run(
 
     started_utc = datetime.now(timezone.utc).isoformat()
     started = time.monotonic()
+    _say(progress, 25, "executing the staged package in the guest")
     execution: dict[str, Any] | None = None
     error: HyperVError | None = None
     try:
@@ -340,6 +363,7 @@ def run(
     except HyperVError as exc:
         error = exc
     elapsed = round(time.monotonic() - started, 3)
+    _say(progress, 90, "the guest runner returned; reading what it left")
 
     record = _read_result(service, vm_name, run_identifier) if execution is not None else None
     after = _vm_state(service, vm_name)
@@ -526,6 +550,7 @@ def cycle(
     revert_after: bool = False,
     include_kernel_dump: bool = True,
     debugger: str = "none",
+    progress: Any = None,
 ) -> dict[str, Any]:
     """One autonomous iteration: run, collect evidence, optionally revert.
 
@@ -542,17 +567,21 @@ def cycle(
     attached: dict[str, Any] | None = None
     breakpoints: dict[str, Any] | None = None
     if debugger != "none":
+        _say(progress, 3, f"attaching kd over {debugger}")
         attached = service.kd_attach(vm_name, debugger)
         # Arm the break before the payload can load it, so the run stops at
         # DriverEntry instead of racing the first break-in.
+        _say(progress, 8, "arming the driver-load breakpoint")
         breakpoints = _arm_driver_breakpoints(service, vm_name, package_id)
     report = run(
         service, vm_name,
         package_id=package_id, run_id=run_id,
         expected_manifest_sha256=expected_manifest_sha256,
         timeout_seconds=timeout_seconds, checkpoint_before=checkpoint_before,
+        progress=_band(progress, 10, 60),
     )
     if attached is not None:
+        _say(progress, 62, "asking kd what the target did")
         debug = _debugger_report(
             service, vm_name, debugger, attached, report,
             (breakpoints or {}).get("modules") or [],
@@ -563,6 +592,7 @@ def cycle(
     if not report["payload_executed"]:
         evidence = {"collected": False, "reason": "the run did not execute a payload"}
     else:
+        _say(progress, 75, "collecting evidence from the guest")
         try:
             collected = DriverLabTransfer(service).collect(
                 vm_name, report["package_id"], report["run_id"],
@@ -579,12 +609,16 @@ def cycle(
         # The dump is on the host by now, so kd can say what the crash was even
         # when the run had no debugger attached. A failure here never costs the
         # run its report: the host's code and parameters are already in it.
+        _say(progress, 88, "triaging the crash")
         from .crash import triage
         report["crash"] = triage(service, vm_name, report)
     checkpoint_id = (report.get("checkpoint") or {}).get("id")
+    if revert_after:
+        _say(progress, 94, "restoring the pre-run checkpoint")
     report["revert"] = (
         _restore(service, vm_name, report["run_id"], checkpoint_id) if revert_after else None
     )
     # Written last, so the record holds the revert and the crash reading too.
+    _say(progress, 98, "writing the receipt")
     report["report_file"] = report_write(report, service.settings.evidence_root)
     return report

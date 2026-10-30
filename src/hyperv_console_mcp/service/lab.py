@@ -4,13 +4,70 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..errors import PolicyError, ValidationError
-from ._base import ServiceBase, _text
+from ._base import ServiceBase, _integer, _text
 
 
 class LabService(ServiceBase):
+    def _tracked(
+        self, operation: str, vm_name: str, action: Callable[[Any], Any]
+    ) -> Any:
+        """Run one long step as a single operation in the live feed.
+
+        A run or a cycle is one blocking service call, so without this the feed
+        would show a started/completed pair and nothing in between. The phases
+        the step reports are the steps it actually takes, published on the same
+        bus the window and the AI already watch; when another operation already
+        owns the feed, the phases are dropped rather than orphaned under an
+        empty correlation id.
+        """
+        from ..events import EVENTS, ProgressReporter
+
+        with EVENTS.operation(operation, vm_name) as correlation:
+            reporter = (
+                ProgressReporter(EVENTS, operation, vm_name, correlation)
+                if correlation
+                else None
+            )
+            return action(reporter.update if reporter is not None else None)
+
+    def lab_receipts(
+        self,
+        action: str = "list",
+        run_ids: list[str] | None = None,
+        vm_name: str | None = None,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """What this host kept from earlier runs: list them, open one, compare two.
+
+        A read of the evidence root, not of a VM. ``lab.report`` wrote one record
+        per cycle beside its evidence; this reads those records back so a window
+        can show a receipt without a second implementation of what it means.
+        """
+        from ..lab import receipts
+
+        if action not in {"list", "get", "compare"}:
+            raise ValidationError("action must be list, get, or compare.")
+        if vm_name:
+            self._vm(vm_name)
+        root = self.settings.evidence_root.expanduser().resolve()
+        if action == "list":
+            return receipts.list_receipts(
+                root,
+                vm_name=vm_name or None,
+                limit=_integer(limit, "limit", 1, receipts.MAX_RECEIPTS),
+            )
+        names = list(run_ids) if isinstance(run_ids, (list, tuple)) else []
+        if action == "get":
+            if len(names) != 1:
+                raise ValidationError("action='get' needs exactly one run id in run_ids.")
+            return receipts.get_receipt(root, names[0])
+        if len(names) != 2:
+            raise ValidationError("action='compare' needs exactly two run ids in run_ids.")
+        return receipts.compare(root, names[0], names[1])
+
     def lab_init(self, vm_name: str, confirm_vm: str) -> dict[str, Any]:
         from ..lab.cli import initialize
         name = self._guest_vm(vm_name)
@@ -95,11 +152,15 @@ class LabService(ServiceBase):
             "executes_staged_payload": True,
         }
         with self._approve("lab_run", name, summary):
-            return run(
-                self, name,
-                package_id=package_id, run_id=run_id,
-                expected_manifest_sha256=expected_manifest_sha256,
-                timeout_seconds=timeout_seconds, checkpoint_before=checkpoint_before,
+            return self._tracked(
+                "lab_run", name,
+                lambda progress: run(
+                    self, name,
+                    package_id=package_id, run_id=run_id,
+                    expected_manifest_sha256=expected_manifest_sha256,
+                    timeout_seconds=timeout_seconds, checkpoint_before=checkpoint_before,
+                    progress=progress,
+                ),
             )
 
     def lab_cycle(
@@ -129,13 +190,16 @@ class LabService(ServiceBase):
             "executes_staged_payload": True,
         }
         with self._approve("lab_cycle", name, summary):
-            return cycle(
-                self, name,
-                package_id=package_id, run_id=run_id,
-                expected_manifest_sha256=expected_manifest_sha256,
-                timeout_seconds=timeout_seconds, checkpoint_before=checkpoint_before,
-                revert_after=revert_after, include_kernel_dump=include_kernel_dump,
-                debugger=debugger,
+            return self._tracked(
+                "lab_cycle", name,
+                lambda progress: cycle(
+                    self, name,
+                    package_id=package_id, run_id=run_id,
+                    expected_manifest_sha256=expected_manifest_sha256,
+                    timeout_seconds=timeout_seconds, checkpoint_before=checkpoint_before,
+                    revert_after=revert_after, include_kernel_dump=include_kernel_dump,
+                    debugger=debugger, progress=progress,
+                ),
             )
 
     def lab_verifier(
