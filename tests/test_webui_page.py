@@ -176,3 +176,19 @@ def test_the_guest_bcd_form_offers_only_the_dump_modes_the_service_accepts() -> 
         f"{sorted(offered - set(CRASH_DUMP_MODES))}, which lab_guest_configure refuses"
     )
 
+def test_the_page_speaks_http_when_it_was_served_with_a_token() -> None:
+    """`--serve` is a transport, not a second page.
+
+    The token meta tag is empty in the WebView2 window and filled by the
+    listener. With it, the page must reach the same method names over HTTP and
+    boot from the document — `pywebviewready` never fires in a browser, so a
+    page that only listened for it would open blank.
+    """
+    text = _page()
+    assert 'name="hyperv-token" content=""' in text
+    assert "X-HyperV-Token" in text
+    assert 'fetch("/api"' in text
+    # Both doors: the bridge in the window, the document when served.
+    assert 'addEventListener("pywebviewready", boot)' in text
+    assert 'DOMContentLoaded", boot' in text
+

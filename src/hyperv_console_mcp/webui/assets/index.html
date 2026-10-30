@@ -3,6 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Empty in the WebView2 window, where the page talks to Python over the
+     bridge and needs no token. `--serve` rewrites this attribute with the
+     token the listener was opened with, and the page then speaks HTTP. -->
+<meta name="hyperv-token" content="">
 <title>Hyper-V Control Center</title>
 <style>
   /* One palette in two sets of values. The page is built by the script, so the
@@ -499,7 +503,38 @@ if (window.matchMedia) {
   if (preference.addEventListener) preference.addEventListener("change", follow);
 }
 
-const api = () => window.pywebview && window.pywebview.api;
+/* Two transports, one surface. The WebView2 window exposes `pywebview.api`;
+   `--serve` puts a token in the page and answers the same method names over
+   HTTP on loopback, so nothing below this line knows which one it is talking
+   to — and a refusal arrives as the same `{error}` envelope from both. */
+const TOKEN = (document.querySelector('meta[name="hyperv-token"]') || {}).content || "";
+function httpApi() {
+  return new Proxy({}, {
+    get: (_target, name) => async (...args) => {
+      let response;
+      try {
+        response = await fetch("/api", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-HyperV-Token": TOKEN },
+          body: JSON.stringify({ method: String(name), arguments: args }),
+        });
+      } catch (error) {
+        return { error: { code: "unreachable", message: "The page lost the local host." } };
+      }
+      let body = {};
+      try { body = await response.json(); } catch (error) { /* an empty answer is a refusal too */ }
+      if (body && body.error) return { error: body.error };
+      if (!response.ok) {
+        return { error: { code: "http_" + response.status, message: "The host refused the call." } };
+      }
+      // The window's methods answer `{ok: ...}`, the same envelope the bridge
+      // hands the page, so nothing here has to unwrap a second layer.
+      return body;
+    },
+  });
+}
+const HTTP_API = TOKEN ? httpApi() : null;
+const api = () => (window.pywebview && window.pywebview.api) || HTTP_API;
 const el = (tag, attrs = {}, ...children) => {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
@@ -2853,7 +2888,13 @@ async function boot() {
   await openWizardIfNeeded();
 }
 
-window.addEventListener("pywebviewready", boot);
+if (HTTP_API) {
+  // Served mode: there is no bridge to wait for, only the document itself.
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+  else boot();
+} else {
+  window.addEventListener("pywebviewready", boot);
+}
 </script>
 </body>
 </html>

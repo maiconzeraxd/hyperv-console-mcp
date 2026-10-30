@@ -2305,6 +2305,43 @@ and flushes each chunk, so the missing piece was a reader.
 - **Not validated live:** the tail has run against the fake kd process, not against a real
   `kd.exe` session on `NORTH-Test`, and no window subscribes to it yet.
 
+### 2026-10-30 — v0.4 wave 3: the same page in the operator's browser, and the one port it opens
+
+The roadmap's second delivery mode. Until now the page could only be reached through the
+WebView2 bridge, which is also why nothing in this project had ever opened a port. `--serve`
+opens exactly one, on loopback, and the locks around it are the substance of the wave.
+
+- **`webui/serve.py`** binds `127.0.0.1` (never `0.0.0.0`), generates a token per run with
+  `secrets.token_urlsafe(32)`, prints it with the URL and requires it on every request. The page
+  gets it in a meta tag; a call sends it in `X-HyperV-Token`.
+- **The token in a header is the CSRF defence.** A page on another site can make the browser
+  send a request, but it cannot set a header on one, and it cannot read the token to put it in a
+  body — so the header alone is the whole mechanism, and the token is never accepted from a
+  cookie or from a call's query string.
+- **`Origin` and `Host` are checked.** A foreign `Origin` is 403 `forbidden_origin`; a `Host`
+  that is not a loopback name is 403 `forbidden_host`, which is the DNS-rebinding case — the
+  socket is local, the name is not.
+- **The listener speaks the window's own surface.** Every call is dispatched to the same `Api`
+  the WebView2 page uses, so the policy, the allowlist, the confirmations, the audit and the
+  refusals are the ones that already existed; a private name (`_store`) and an unknown one are
+  answered with `invalid_argument` rather than raising.
+- **One transport switch in the page, not a second page.** `api()` returns the pywebview bridge
+  when there is one and an HTTP proxy over `/api` when the token meta tag is filled; the envelope
+  (`{ok}`/`{error}`) is the same from both, so nothing below that line knows which mode it is in.
+  The page boots on `DOMContentLoaded` when served and on `pywebviewready` in the window — a
+  browser never fires the second, so a page that only listened for it would open blank.
+- `hyperv-console-mcp --serve [--port N] [--vm NAME]` is the command; a typo is answered in the
+  terminal (exit 2) instead of opening a listener that quietly ignored it.
+- Tests: `tests/test_webui_serve.py` (twelve) — loopback bind, no token, wrong token, foreign
+  `Origin`, non-loopback `Host`, a real call reaching the service, a private name refused, an
+  unknown method answered, the page carrying its token, the page refused without one, two runs
+  never sharing a token, and the port closing on `close()`. `tests/test_cli.py` gained four for
+  the new door and the typo, and `tests/test_webui_page.py` one that both boot paths exist.
+- Gate: 1152 passed / 1 skipped, ruff clean, `node --check` on the page's script clean.
+- **Not validated in a browser.** The page has been exercised over real HTTP with a fake service
+  in the tests, but no browser has rendered the served page against a live host: WebView2 and
+  `--serve` both still owe a real window and a real VM.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three

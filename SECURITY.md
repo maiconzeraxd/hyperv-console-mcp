@@ -4,7 +4,9 @@
 
 This server can control real VMs, execute commands in a guest, and drive a kernel debugger.
 It is designed for an explicitly authorized local lab, not as an exposed remote management
-service. Use stdio and restrict the MCP host to the intended account.
+service. Use stdio and restrict the MCP host to the intended account. The one listener this
+project can open is `--serve`, on loopback with a per-run token (see below); the WebView2
+window opens no port at all.
 
 Read operations are enabled by default. An allowlist, if configured, filters them. Every
 mutation requires both a nonempty allowlist and a capability that the target VM has.
@@ -71,6 +73,37 @@ rather than frozen. `HYPERV_MCP_SHARED_SERVICE=false` keeps a private host for a
 not disturb a live one, and `HYPERV_MCP_SERVICE_PIPE` names a different pipe. The approval
 broker is fail-closed: with `HYPERV_MCP_REQUIRE_DASHBOARD_APPROVAL=true` and no reachable
 window, a mutation is denied rather than waved through.
+
+## The one listener: `--serve`
+
+The WebView2 window opens no port. `hyperv-console-mcp --serve` is the exception and the only
+one: it serves the same single HTML file to the operator's own browser. What it does, and what
+bounds it:
+
+- **The socket binds `127.0.0.1`.** `0.0.0.0` is never used, so there is nothing reachable from
+  another machine. Reaching it from one takes an SSH tunnel to the loopback, which is a decision
+  the operator makes outside this program.
+- **A token is generated per run** (`secrets.token_urlsafe(32)`), printed with the URL, required
+  on every request and never written to disk. It is not a password and grants nothing the local
+  user could not already do; it exists so that another local process, or a page in another tab,
+  cannot drive the listener it did not open.
+- **`Origin` and `Host` are checked.** A POST whose `Origin` is not this listener's own loopback
+  origin is refused, which stops a page on another site from acting on the operator's behalf;
+  a `Host` that is not a loopback name is refused, which stops DNS rebinding — where a name the
+  attacker controls resolves to 127.0.0.1, so the socket looks local while the name does not.
+- **A cross-site request cannot carry the token.** It travels in a header, and a plain HTML form
+  cannot set one; the page is same-origin, so its own `fetch` can. That is the CSRF defence, and
+  it is why the token is never accepted from a cookie or from the query string of a call.
+- **The calls are the window's own.** The listener dispatches to the same `Api` the WebView2
+  window exposes, over the same envelope, to the same service — so the policy, the allowlist,
+  the `confirm_*` fields, the audit trail and the refusals are unchanged. A private name never
+  crosses, and an unknown one is answered instead of raising.
+- **Nothing is cached.** Every response carries `Cache-Control: no-store`, so a browser cannot
+  keep a copy of the page that would later be reopened without a token.
+
+What it is not: authentication. Anyone who can read the token from the operator's terminal or
+browser history can use the listener, exactly as they could use the window. It is a local
+operator's surface, not a multi-user service, and it holds no credential of its own.
 
 ## Credentials
 

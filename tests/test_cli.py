@@ -38,6 +38,9 @@ def ran(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     monkeypatch.setattr(
         cli, "_window", lambda arguments: calls.append(("window", list(arguments))) or 0
     )
+    monkeypatch.setattr(
+        cli, "_browser", lambda arguments: calls.append(("browser", list(arguments))) or 0
+    )
     return calls
 
 
@@ -186,3 +189,42 @@ def test_the_console_script_is_the_launcher_not_the_server() -> None:
     with (root / "pyproject.toml").open("rb") as handle:
         project = tomllib.load(handle)["project"]
     assert project["scripts"]["hyperv-console-mcp"] == "hyperv_console_mcp.cli:main"
+
+def test_serve_is_the_page_in_the_operators_browser(
+    ran: list[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third door: the same HTML over loopback, whatever stdin looks like."""
+    monkeypatch.setattr(cli.sys, "stdin", _stdin(False))
+    assert cli.main(["--serve"]) == 0
+    assert ran == [("browser", [])]
+
+
+def test_serve_takes_its_port_and_vm(
+    ran: list[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli.sys, "stdin", _stdin(True))
+    assert cli.main(["--serve", "--port", "8080", "--vm=Lab VM"]) == 0
+    assert ran == [("browser", ["--port", "8080", "--vm=Lab VM"])]
+
+
+def test_an_unknown_serve_option_is_answered_not_ignored(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A typo must not open a listener that quietly ignored it.
+
+    The parser is asked directly: `main` hands its arguments to the real `run`,
+    and a test must not open a listener to prove that a typo is refused.
+    """
+    assert cli._browser(["--prot", "8080"]) == 2
+    assert "--prot is not a --serve option" in capsys.readouterr().out
+    assert cli._browser(["--port", "eighty"]) == 2
+
+
+def test_the_help_lists_the_three_doors(
+    ran: list[Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["--help"]) == 0
+    printed = capsys.readouterr().out
+    assert "--serve" in printed
+    assert "127.0.0.1" in printed
+    assert ran == []

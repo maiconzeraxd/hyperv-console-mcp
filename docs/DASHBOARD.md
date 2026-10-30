@@ -19,6 +19,33 @@ python -I scripts\run_dashboard.py
 
 `--vm <name>` picks the VM up front. Without it the window opens the fleet, and nothing in this program names a VM of its own. When `HYPERV_MCP_ALLOWED_VMS` is set it narrows what is listed, so an allowlist of one still opens without a prompt. After installation, `hyperv-dashboard` is equivalent, and so is `hyperv-console-mcp` with no arguments — the same command a client's config names, which opens the window when a person runs it and serves stdio when a client does. Use the same protected environment as the MCP host; a `.env` file is not loaded automatically.
 
+## In the browser: `--serve`
+
+The same page can be opened in the operator's own browser instead of the WebView2 window:
+
+```powershell
+hyperv-console-mcp --serve              # prints the URL, opens the browser
+hyperv-console-mcp --serve --port 8080  # a fixed port, for a bookmark
+hyperv-console-mcp --serve --vm Lab-VM  # open on one VM
+```
+
+It prints `http://127.0.0.1:<port>/?token=<token>` and opens it. Three things are worth knowing:
+
+- **The token is per run.** It is generated when the listener starts, printed with the URL, and
+  required on every call; it is never written to disk. A URL without it answers 401, and a new
+  run has a different one — so a bookmark needs `--port`, not a saved token.
+- **The listener is loopback only.** It binds `127.0.0.1` and refuses a `Host` or `Origin` that is
+  not a loopback name, which is what stops DNS rebinding and a page on another site from driving
+  it. For another machine, tunnel to the loopback; nothing here listens on the network.
+- **It is the same window.** Every call goes to the same `Api` the WebView2 page uses and so to
+  the same service, the same policy and the same audit trail. What the page shows and what it
+  refuses are identical in both modes; only the transport differs — the bridge in the window,
+  HTTP here.
+
+The page in a tab is a picture of the same thing, not a second implementation: the live feeds
+(`events`, `logs`, `kd_output`) are the held-open service calls, so they stream over plain HTTP
+long-polling and this mode needs no websocket.
+
 ## The notification-area icon
 
 `hyperv-tray` (from `pip install hyperv-console-mcp[tray]`) is the same window one click away: **Open** starts it as a separate process, **Status** shows the host line, **Quit** closes the icon. The tooltip is the live answer — the number of VMs, how many are running, the profile, and `Hyper-V is off` or why the service is not answering — refreshed every twenty seconds and never naming a VM, because a tooltip sits on whatever desktop the tray is on. A host whose service will not start still gets an icon that says so: the icon is how an operator notices.
