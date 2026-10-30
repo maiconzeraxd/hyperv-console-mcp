@@ -11,7 +11,7 @@ import threading
 import time
 import tkinter as tk
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
@@ -1240,7 +1240,7 @@ class Dashboard(tk.Tk):
         self.destroy()
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--vm",
@@ -1250,7 +1250,7 @@ def main() -> None:
         "--classic", action="store_true",
         help="Use the tkinter window instead of the WebView2 one.",
     )
-    arguments = parser.parse_args()
+    arguments = parser.parse_args(argv)
     try:
         if not arguments.classic:
             from .webui.window import run

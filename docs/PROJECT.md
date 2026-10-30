@@ -1745,7 +1745,44 @@ rendered from a live VM — the capture path needs an elevated session.
 - Not validated live: the wizard has not been walked through on a real host with a real guest, and
   the "Store and test" answer against a live PowerShell Direct session is still a claim about code.
   Still to come in this wave: the bare-command and tray launcher, the PyInstaller build and release
-  CI, the beginner README.
+  CI, the beginner README. The bare-command launcher is wave 3, below.
+
+### 2026-10-29 — v0.3 install wave 3: one command, two doors
+
+- **The bare command is the window; a pipe gets the server.** `hyperv-console-mcp` is now
+  `cli:main`, and with no arguments it decides by stdin: an MCP client always hands the process a
+  pipe, so a pipe runs the server, while a terminal — or a shortcut's windowed interpreter, which
+  has no stdin at all — opens the window. One entry point means a client's existing config and the
+  Start Menu shortcut cannot disagree about what the command means.
+- **The guess has explicit forms.** `--stdio` runs the server whatever stdin looks like;
+  `--ui`/`--dashboard` open the window; `--vm NAME`, `--vm=NAME` and `--classic` are handed to the
+  dashboard unchanged because they are its own flags; `-h`/`--help`/`--version` are answered without
+  opening anything; an unrecognised argument is not refused, since a client that sends one is asking
+  for the server.
+- **`--ui` is dropped, not forwarded.** The first draft handed the whole list to the dashboard, whose
+  parser knows only `--vm` and `--classic`: `hyperv-console-mcp --ui` would have exited with
+  argparse's "unrecognized arguments" on a flag the launcher itself prints in its help. `WINDOW_ONLY`
+  names the two words that stop at the launcher.
+- **The shortcut's name matches what the install says.** `SHORTCUT_NAME` is `Hyper-V Console.lnk`;
+  `setup.py` already tells the operator to "Open 'Hyper-V Console' from the Start Menu", so the file
+  the old name created was one they had been told not to look for.
+- **The dashboard takes its arguments as a parameter.** `dashboard.main(argv=None)` parses what it is
+  given instead of always `sys.argv`, so the launcher can forward them; `hyperv-dashboard --vm X`
+  behaves as before.
+- Tests: `tests/test_cli.py` (23) — the four readings of stdin (a console, a pipe, none, a handle
+  that raises), the bare command under each, `--stdio` under all three, every window flag and what it
+  forwards, an unknown argument going to the server, `--version` and both help spellings opening
+  nothing, and the entry point in `pyproject.toml` naming the launcher so the shortcut's bare command
+  cannot drift back to the server. `test_the_shortcut_lands_in_the_start_menu` now asserts the name
+  the message uses, and `test_a_frozen_build_points_the_shortcut_at_itself` covers the half of the
+  shortcut that will only exist once there is a PyInstaller build.
+- Gate: 997 passed / 1 skipped, ruff clean, smoke 29 / 43 / 65 unchanged — the launcher adds no MCP
+  tool — all 14 PowerShell files parse, 0 analyzer findings on `scripts`.
+- Not validated live: the shortcut has not been created and double-clicked on this host, and the
+  frozen half of the guess (a windowed build with no stdin) is a claim until the PyInstaller bundle
+  exists.
+- Still to come in this wave: the tray icon, the PyInstaller build and release CI, the beginner
+  README.
 
 ## Phase 4 report
 

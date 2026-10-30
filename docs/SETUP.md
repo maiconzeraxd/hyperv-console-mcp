@@ -89,9 +89,9 @@ Example host configuration using Python directly:
 }
 ```
 
-After an editable/package installation, `hyperv-console-mcp` can be the command instead. The server runs only on stdio; it does not listen on TCP.
+After an editable/package installation, `hyperv-console-mcp` can be the command instead. It runs the server on stdio — it never listens on TCP — and, run by a person rather than by a client, the same command opens the window: an MCP client always hands the process a pipe, so a pipe gets the server, while a terminal or the Start Menu shortcut gets the window. `--stdio` and `--ui` say which one you meant.
 
-`hyperv-install --client claude` (also `codex` and `cursor`) writes that entry for you: it merges one `mcpServers.hyperv` entry into the client's own file, copies the file first, refuses one it cannot parse instead of rewriting it, and appends a single `[mcp_servers.hyperv]` section to Codex's TOML. `--uvx` writes `uvx hyperv-console-mcp` instead of the installing interpreter, `--profile lab` sets `HYPERV_MCP_PROFILE`, and `--shortcut` adds a Start Menu entry that opens the window. The command is not an MCP tool; nothing the AI can call reaches it.
+`hyperv-install --client claude` (also `codex` and `cursor`) writes that entry for you: it merges one `mcpServers.hyperv` entry into the client's own file, copies the file first, refuses one it cannot parse instead of rewriting it, and appends a single `[mcp_servers.hyperv]` section to Codex's TOML. `--uvx` writes `uvx hyperv-console-mcp` instead of the installing interpreter, `--profile lab` sets `HYPERV_MCP_PROFILE`, and `--shortcut` adds a **Hyper-V Console** Start Menu entry that opens the window. The command is not an MCP tool; nothing the AI can call reaches it.
 
 The process must have Hyper-V management permission. Run the MCP host elevated or grant the intended account Hyper-V Administrators access through your normal administrative process. The server never changes host group membership or UAC settings.
 

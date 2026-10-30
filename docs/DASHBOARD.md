@@ -17,7 +17,7 @@ Run from an elevated PowerShell when Hyper-V management requires elevation:
 python -I scripts\run_dashboard.py
 ```
 
-`--vm <name>` picks the VM up front. Without it the window opens the fleet, and nothing in this program names a VM of its own. When `HYPERV_MCP_ALLOWED_VMS` is set it narrows what is listed, so an allowlist of one still opens without a prompt. After installation, `hyperv-dashboard` is equivalent. Use the same protected environment as the MCP host; a `.env` file is not loaded automatically.
+`--vm <name>` picks the VM up front. Without it the window opens the fleet, and nothing in this program names a VM of its own. When `HYPERV_MCP_ALLOWED_VMS` is set it narrows what is listed, so an allowlist of one still opens without a prompt. After installation, `hyperv-dashboard` is equivalent, and so is `hyperv-console-mcp` with no arguments — the same command a client's config names, which opens the window when a person runs it and serves stdio when a client does. Use the same protected environment as the MCP host; a `.env` file is not loaded automatically.
 
 ## The window
 

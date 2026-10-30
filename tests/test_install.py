@@ -6,6 +6,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -119,7 +120,8 @@ def test_a_missing_toml_file_is_created_whole(tmp_path: Path) -> None:
 
 def test_the_shortcut_lands_in_the_start_menu(tmp_path: Path) -> None:
     path = install.shortcut_path({"APPDATA": str(tmp_path)})
-    assert path.name == "Hyper-V Console MCP.lnk"
+    # The name the install's own message tells the operator to look for.
+    assert path.name == "Hyper-V Console.lnk"
     assert "Start Menu" in str(path)
 
 
@@ -130,6 +132,31 @@ def test_a_shortcut_outside_windows_is_skipped_rather_than_faked(
     result = install.create_shortcut(tmp_path / "x.lnk")
     assert result["action"] == "skipped"
     assert not (tmp_path / "x.lnk").exists()
+
+
+def test_a_frozen_build_points_the_shortcut_at_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One windowed executable: no interpreter to name and no module path to pass.
+
+    It opens the window by itself when nothing writes into its stdin, which is
+    exactly what a shortcut does.
+    """
+    link = tmp_path / "x.lnk"
+    seen: list[str] = []
+    monkeypatch.setattr(install, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    def run(command: list[str], **_: Any) -> SimpleNamespace:
+        seen.append(" ".join(command))
+        link.write_text("", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(install.subprocess, "run", run)
+    result = install.create_shortcut(link)
+    assert result["action"] == "created"
+    assert f"$link.TargetPath = {json.dumps(str(Path(sys.executable)))};" in seen[0]
+    assert '$link.Arguments = "";' in seen[0]
 
 
 def test_the_command_writes_the_client_it_was_given(

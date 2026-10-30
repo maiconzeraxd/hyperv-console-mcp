@@ -26,7 +26,7 @@ from .errors import ValidationError
 
 CLIENTS = ("claude", "codex", "cursor")
 SERVER_NAME = "hyperv"
-SHORTCUT_NAME = "Hyper-V Console MCP.lnk"
+SHORTCUT_NAME = "Hyper-V Console.lnk"
 
 
 def client_config(client: str, environ: Mapping[str, str] | None = None) -> Path:
@@ -157,13 +157,20 @@ def create_shortcut(path: Path) -> dict[str, Any]:
     """A Start Menu entry that opens the window, made by the shell's own COM object."""
     if os.name != "nt":
         return {"shortcut": None, "action": "skipped", "reason": "Windows only"}
-    python = Path(sys.executable)
-    windowed = python.with_name("pythonw.exe")
+    if getattr(sys, "frozen", False):
+        # A frozen build ships one windowed executable: there is no interpreter
+        # to point at and no module path to pass, and the executable opens the
+        # window by itself when nothing is writing into its stdin.
+        target, arguments = Path(sys.executable), ""
+    else:
+        python = Path(sys.executable)
+        windowed = python.with_name("pythonw.exe")
+        target, arguments = (windowed if windowed.is_file() else python), "-m hyperv_console_mcp.dashboard"
     script = (
         "$shell = New-Object -ComObject WScript.Shell;"
         f"$link = $shell.CreateShortcut({json.dumps(str(path))});"
-        f"$link.TargetPath = {json.dumps(str(windowed if windowed.is_file() else python))};"
-        '$link.Arguments = "-m hyperv_console_mcp.dashboard";'
+        f"$link.TargetPath = {json.dumps(str(target))};"
+        f"$link.Arguments = {json.dumps(arguments)};"
         f"$link.WorkingDirectory = {json.dumps(str(Path.home()))};"
         f"$link.Description = {json.dumps('Hyper-V Console MCP')};"
         "$link.Save()"
