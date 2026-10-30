@@ -56,10 +56,20 @@ def _crash(crash: Any) -> dict[str, Any] | None:
     summary = {
         "analyzed": crash.get("analyzed"),
         "dump": crash.get("dump"),
+        "kd_log": crash.get("kd_log"),
         "bugcheck_code": bugcheck.get("bugcheck_code"),
+        "bugcheck_str": bugcheck.get("bugcheck_str"),
+        "bugcheck_parameters": bugcheck.get("bugcheck_parameters"),
         "failure_bucket_id": bugcheck.get("failure_bucket_id"),
+        "default_bucket_id": bugcheck.get("default_bucket_id"),
         "blamed_driver": bugcheck.get("blamed_driver"),
+        "symbol_name": bugcheck.get("symbol_name"),
         "symbols_resolved": bugcheck.get("symbols_resolved"),
+        # The stack is kept for the same reason the code is: a receipt that
+        # survives the transcript has to answer "where did it die" without the
+        # dump being opened a second time.
+        "top_frames": bugcheck.get("top_frames"),
+        "sources": bugcheck.get("sources"),
     }
     return {key: value for key, value in summary.items() if value is not None}
 

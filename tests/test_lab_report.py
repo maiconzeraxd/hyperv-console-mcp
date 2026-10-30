@@ -57,6 +57,28 @@ def test_the_record_keeps_what_two_runs_are_compared_on() -> None:
     assert record["debugger"]["all_loaded"] is True
 
 
+def test_the_record_keeps_the_stack_a_triage_shows() -> None:
+    """A receipt outlives the window that ran it, so it carries its own triage."""
+    crash = {
+        "analyzed": True, "dump": "C:/Evidence/run-1/minidumps/new.dmp",
+        "kd_log": "C:/Evidence/run-1/kd-analyze.log",
+        "bugcheck": {
+            "bugcheck_code": "0xd1", "bugcheck_str": "DRIVER_IRQL_NOT_LESS_OR_EQUAL",
+            "bugcheck_parameters": ["0x1", "0x2", "0x3", "0x4"],
+            "failure_bucket_id": "AV_MyDriver", "blamed_driver": "MyDriver.sys",
+            "symbols_resolved": True, "sources": ["kd", "host"],
+            "top_frames": [{"frame": 0, "address": "fffff800`10000000",
+                            "symbol": "MyDriver!Crash+0x42"}],
+        },
+    }
+    record = lab_report.build(sample(crash=crash))
+    kept = record["crash"]
+    assert kept["bugcheck_str"] == "DRIVER_IRQL_NOT_LESS_OR_EQUAL"
+    assert kept["top_frames"][0]["symbol"] == "MyDriver!Crash+0x42"
+    assert kept["sources"] == ["kd", "host"]
+    assert kept["kd_log"].endswith("kd-analyze.log")
+
+
 def test_the_expected_digest_is_kept_even_when_the_package_did_not_verify() -> None:
     """A run that never executed still has to say what it was asked to run."""
     record = lab_report.build(sample(
