@@ -67,6 +67,8 @@ The **fleet** is the home page: every VM Hyper-V reported, its state, the level 
 - **Lab** — diagnostics, package staging, verification, the cycle that runs a package, receipts with export, and the crash triage.
 - **Files** — the host's four roots beside the guest's own disk.
 
+Along the bottom of the window is the **log dock**: the unified stream from `logs_subscribe`, live, with a filter for the VM, one for the source (`worker`, `kd`, `serial`, `ssh`, `wmi`, `lab`, `service`), one for the minimum level, a search box, **Pause** and **Clear**. An operation's correlation id is drawn on the first line of its group and left blank on the rest, so a run reads as one run rather than as unrelated lines that happen to be adjacent. The dock keeps the tail it can draw — the oldest line leaves first — and stops asking while it is paused, keeping its offset so nothing is missed and nothing is drawn twice. It is the one place where the AI's work and the operator's clicks appear in the same column.
+
 Closing the window does not stop a VM or guarantee that an already-running guest command was cancelled, and changing pages does not cancel a background operation.
 
 ## What the window opens and what it does not rebuild

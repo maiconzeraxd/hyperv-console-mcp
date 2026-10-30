@@ -216,3 +216,17 @@ def test_the_listener_stops_when_it_is_closed() -> None:
             connection.getresponse()
         finally:
             connection.close()
+
+def test_a_closed_tab_is_not_an_error(listener) -> None:
+    """The dock long-polls, so a closed tab aborts a request mid-answer.
+
+    That arrives as a connection reset. Printing a traceback for it would fill
+    the service log with the normal end of a browser request.
+    """
+    handle, _ = listener
+
+    try:
+        raise ConnectionAbortedError(10053, "aborted by the host")
+    except ConnectionAbortedError:
+        # Returns quietly: nothing is written to stderr.
+        handle._server.handle_error(None, ("127.0.0.1", 0))

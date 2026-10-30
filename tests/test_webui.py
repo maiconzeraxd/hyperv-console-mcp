@@ -49,6 +49,22 @@ class FakeService:
         self.calls.append(("events_wait", {"after": after, "timeout_seconds": timeout_seconds}))
         return {"events": [], "latest_sequence": after}
 
+    def logs_subscribe(
+        self,
+        after: int = 0,
+        *,
+        vm: str | None = None,
+        source: str | None = None,
+        level: str | None = None,
+        correlation_id: str | None = None,
+        timeout_seconds: float = 15.0,
+    ) -> dict[str, Any]:
+        self.calls.append(("logs_subscribe", {
+            "after": after, "vm": vm, "source": source, "level": level,
+            "timeout_seconds": timeout_seconds,
+        }))
+        return {"records": [], "latest_sequence": after}
+
     def _secret(self) -> str:
         raise AssertionError("a private method must never be reachable from the page")
 
@@ -368,3 +384,14 @@ def test_a_host_without_pywebview_falls_back_instead_of_failing() -> None:
 
 def test_the_runtime_probe_answers_a_bool_everywhere() -> None:
     assert isinstance(window.webview2_installed(), bool)
+
+def test_the_dock_asks_the_service_for_the_lines_after_the_last_one(tmp_path: Path) -> None:
+    """An empty filter is no filter, and the wait is the service's own."""
+    api = _api(tmp_path)
+
+    api.logs(41, "", "kd", "", 7)
+
+    assert api.service.calls[-1] == ("logs_subscribe", {
+        "after": 41, "vm": None, "source": "kd", "level": None, "timeout_seconds": 7,
+    })
+

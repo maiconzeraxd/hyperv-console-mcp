@@ -125,6 +125,32 @@ class Api:
         """
         return self.call("events_wait", {"after": after, "timeout_seconds": timeout})
 
+    def logs(
+        self,
+        after: int = 0,
+        vm: str = "",
+        source: str = "",
+        level: str = "",
+        timeout: float = 10,
+    ) -> dict[str, Any]:
+        """The unified log stream, held open, for the window's dock.
+
+        Same shape as ``events``: the page asks from the last sequence it drew
+        and the service answers when there is a line or the wait runs out. The
+        filters are the service's, so a dock that asks for one VM does not make
+        the host send the others for the page to throw away.
+        """
+        return self.call(
+            "logs_subscribe",
+            {
+                "after": after,
+                "vm": vm or None,
+                "source": source or None,
+                "level": level or None,
+                "timeout_seconds": timeout,
+            },
+        )
+
     def choose(self, name: str) -> dict[str, Any]:
         """Point the window at another VM, without reopening it.
 

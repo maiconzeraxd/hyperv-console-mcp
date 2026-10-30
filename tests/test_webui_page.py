@@ -192,3 +192,35 @@ def test_the_page_speaks_http_when_it_was_served_with_a_token() -> None:
     assert 'addEventListener("pywebviewready", boot)' in text
     assert 'DOMContentLoaded", boot' in text
 
+def test_the_log_dock_offers_only_the_sources_the_service_names() -> None:
+    """A source the service refuses is a filter that can only answer 400.
+
+    The list is read from the service rather than repeated in the page, so
+    adding a source on one side fails until the other catches up — the same
+    shape as the crash-dump select.
+    """
+    from hyperv_console_mcp.logs import SOURCES
+
+    text = _page()
+    match = re.search(r'id="log-source".*?</select>', text, re.S)
+    assert match, "the dock's source filter is a select"
+    offered = {
+        value for value in re.findall(r'<option value="([a-z]+)">', match.group(0))
+    }
+    assert offered == set(SOURCES)
+
+
+def test_the_log_dock_can_be_paused_searched_and_grouped() -> None:
+    """The dock is a window on the stream: it can stop, narrow and group.
+
+    Grouping is what makes an operation read as one run: the correlation id is
+    drawn on the first line of a group and left blank on the rest.
+    """
+    text = _page()
+    assert 'id="log-pause"' in text and 'aria-pressed="false"' in text
+    assert 'id="log-search"' in text
+    assert "dock.lastCorrelation" in text
+    assert 'id="log-body"' in text
+    # A bounded window, not a growing store: the oldest line leaves first.
+    assert "body.childElementCount > 500" in text
+

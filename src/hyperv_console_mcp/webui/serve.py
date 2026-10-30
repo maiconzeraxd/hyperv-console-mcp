@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import sys
 import threading
 import webbrowser
 from http import HTTPStatus
@@ -85,7 +86,12 @@ def _handler(token: str, api: Api, page: str) -> type[BaseHTTPRequestHandler]:
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
             self.end_headers()
-            self.wfile.write(data)
+            try:
+                self.wfile.write(data)
+            except OSError:
+                # The tab closed while the answer was being written. Nothing to
+                # tell anyone: the request is over.
+                return
 
         def _token_ok(self, supplied: str | None) -> bool:
             return bool(supplied) and secrets.compare_digest(supplied, token)
@@ -190,6 +196,24 @@ def _handler(token: str, api: Api, page: str) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
+class _Server(ThreadingHTTPServer):
+    """A listener that treats a closed tab as the end of a request.
+
+    The dock long-polls: every ten seconds of quiet, the page asks again, and
+    closing the tab aborts a request that is still being answered. That arrives
+    here as a connection reset, and printing a traceback for it would fill the
+    service log with the normal end of a browser request.
+    """
+
+    daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        error = sys.exc_info()[1]
+        if isinstance(error, (ConnectionError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
+
+
 class ServeHandle:
     """A listener in a thread, with the URL and the token it was opened with."""
 
@@ -230,8 +254,7 @@ def start(
     """Bind 127.0.0.1, serve the page, and answer the page's calls."""
     text = (page or (ASSETS / "index.html")).read_text(encoding="utf-8")
     token = secrets.token_urlsafe(32)
-    server = ThreadingHTTPServer(("127.0.0.1", int(port)), _handler(token, api, text))
-    server.daemon_threads = True
+    server = _Server(("127.0.0.1", int(port)), _handler(token, api, text))
     thread = threading.Thread(target=server.serve_forever, daemon=True, name="hvmcp-serve")
     thread.start()
     handle = ServeHandle(server, token, thread)

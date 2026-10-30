@@ -89,8 +89,63 @@
   .app {
     display: grid;
     grid-template-columns: 232px minmax(0, 1fr) auto;
+    /* Two rows: the work above, the live log dock below. The dock is a row of
+       the grid rather than a fixed overlay, so it can never cover the last row
+       of a table — the thing a fixed footer always eventually does. */
+    grid-template-rows: minmax(0, 1fr) auto;
     height: 100vh;
   }
+  /* ---------- the log dock ---------- */
+  #dock {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+  }
+  #dock .dock-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: .78rem;
+    color: var(--muted);
+    flex: 0 0 auto;
+  }
+  #dock .dock-bar strong { color: var(--text); letter-spacing: .04em; }
+  #dock .dock-bar input, #dock .dock-bar select {
+    background: var(--surface); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 3px 6px; font: inherit;
+  }
+  #dock .dock-bar input#log-vm { width: 110px; }
+  #dock .dock-bar input#log-search { flex: 1 1 auto; min-width: 80px; }
+  #dock .dock-body {
+    flex: 1 1 auto;
+    max-height: 200px;
+    overflow-y: auto;
+    font-family: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+    font-size: .76rem;
+    padding: 4px 0;
+  }
+  #dock.collapsed .dock-body { display: none; }
+  #dock .log-line {
+    display: grid;
+    grid-template-columns: 62px 72px 58px 104px 64px minmax(0, 1fr);
+    gap: 8px;
+    padding: 1px 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  #dock .log-line:hover { background: var(--hover); }
+  #dock .log-line .t { color: var(--muted); }
+  #dock .log-line .src { color: var(--blue); }
+  #dock .log-line .corr { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+  #dock .log-line.warning .msg { color: var(--warning); }
+  #dock .log-line.error .msg { color: var(--error); }
+  #dock .log-empty { color: var(--muted); padding: 6px 12px; }
   /* ---------- navigation ---------- */
   nav {
     padding: 22px 14px;
@@ -394,6 +449,36 @@
     <p class="hint">The MCP server holds one operation open for each card. Nothing here is sent to the AI.</p>
     <div id="approval-list"></div>
   </aside>
+
+  <section id="dock" aria-label="Live log">
+    <header class="dock-bar">
+      <strong>Logs</strong>
+      <button class="act" id="log-toggle" aria-expanded="true" aria-controls="log-body">Hide</button>
+      <input id="log-vm" placeholder="VM" aria-label="Filter the dock by virtual machine">
+      <select id="log-source" aria-label="Filter the dock by source">
+        <option value="">every source</option>
+        <option value="worker">worker</option>
+        <option value="kd">kd</option>
+        <option value="serial">serial</option>
+        <option value="ssh">ssh</option>
+        <option value="wmi">wmi</option>
+        <option value="lab">lab</option>
+        <option value="service">service</option>
+      </select>
+      <select id="log-level" aria-label="Minimum level shown in the dock">
+        <option value="">every level</option>
+        <option value="debug">debug</option>
+        <option value="info">info</option>
+        <option value="warning">warning</option>
+        <option value="error">error</option>
+      </select>
+      <input id="log-search" placeholder="Search the dock" aria-label="Search the dock">
+      <button class="act" id="log-pause" aria-pressed="false">Pause</button>
+      <button class="act" id="log-clear">Clear</button>
+      <span id="log-status" role="status" aria-live="polite">connecting…</span>
+    </header>
+    <div class="dock-body" id="log-body" role="log" aria-live="polite" aria-label="Log lines"></div>
+  </section>
 </div>
 
 <div id="chooser">
@@ -2872,6 +2957,119 @@ async function finishWizard(withPassword) {
   drawWizard();
 }
 
+/* ---------- the log dock ---------- */
+/* One stream, one offset: the dock asks for what came after the last line it
+   drew, so nothing is missed and nothing is drawn twice. Pause stops asking
+   without losing the offset; the filters are the service's own, so the dock
+   never re-filters what the host already chose not to send. */
+const dock = { offset: 0, paused: false, lastCorrelation: "", failed: 0 };
+let watchingLogs = false;
+
+function setDockStatus(text, state) {
+  const node = document.getElementById("log-status");
+  node.textContent = text;
+  node.dataset.state = state || "";
+}
+
+function logLine(record) {
+  const time = String(record.timestamp || "").slice(11, 19);
+  // The first line of an operation carries the id; the rest of its group leaves
+  // the column blank, which is what makes a run read as one run.
+  const grouped = record.correlation_id && record.correlation_id === dock.lastCorrelation;
+  dock.lastCorrelation = record.correlation_id || "";
+  return el("div", { class: "log-line " + (record.level || "info") },
+    el("span", { class: "t" }, time),
+    el("span", { class: "src" }, record.source || ""),
+    el("span", { class: "level" }, record.level || ""),
+    el("span", { class: "vm" }, record.vm || ""),
+    el("span", { class: "corr", title: record.correlation_id || "" },
+      grouped ? "" : String(record.correlation_id || "").slice(0, 6)),
+    el("span", { class: "msg" }, record.message || ""));
+}
+
+function applyLogSearch() {
+  const needle = fieldValue("log-search").trim().toLowerCase();
+  for (const line of document.getElementById("log-body").children) {
+    line.hidden = Boolean(needle) && !line.textContent.toLowerCase().includes(needle);
+  }
+}
+
+function appendLog(record) {
+  const body = document.getElementById("log-body");
+  const atBottom = body.scrollTop + body.clientHeight >= body.scrollHeight - 8;
+  const empty = body.querySelector(".log-empty");
+  if (empty) empty.remove();
+  const line = logLine(record);
+  const needle = fieldValue("log-search").trim().toLowerCase();
+  if (needle) line.hidden = !line.textContent.toLowerCase().includes(needle);
+  body.append(line);
+  // The dock is a window on the stream, not a store: keep the tail it can draw.
+  while (body.childElementCount > 500) body.firstElementChild.remove();
+  if (atBottom) body.scrollTop = body.scrollHeight;
+}
+
+async function watchLogs() {
+  if (!api() || watchingLogs) return;
+  watchingLogs = true;
+  while (api()) {
+    if (dock.paused) {
+      await sleep(250);
+      continue;
+    }
+    let response = null;
+    try {
+      response = await api().logs(
+        dock.offset, fieldValue("log-vm"), fieldValue("log-source"), fieldValue("log-level"), 10,
+      );
+    } catch (error) {
+      response = null;
+    }
+    if (!response || response.error || !response.ok) {
+      dock.failed += 1;
+      setDockStatus(dock.failed > 2 ? "not answering" : "reconnecting…", "down");
+      await sleep(1200);
+      continue;
+    }
+    dock.failed = 0;
+    const answer = response.ok;
+    for (const record of answer.records || []) appendLog(record);
+    dock.offset = Math.max(dock.offset, answer.latest_sequence || 0);
+    setDockStatus("live", "up");
+  }
+}
+
+function wireDock() {
+  document.getElementById("log-toggle").addEventListener("click", (event) => {
+    const dockNode = document.getElementById("dock");
+    const collapsed = dockNode.classList.toggle("collapsed");
+    event.currentTarget.textContent = collapsed ? "Show" : "Hide";
+    event.currentTarget.setAttribute("aria-expanded", String(!collapsed));
+  });
+  document.getElementById("log-pause").addEventListener("click", (event) => {
+    dock.paused = !dock.paused;
+    event.currentTarget.setAttribute("aria-pressed", String(dock.paused));
+    event.currentTarget.textContent = dock.paused ? "Resume" : "Pause";
+    setDockStatus(dock.paused ? "paused" : "live", dock.paused ? "" : "up");
+  });
+  document.getElementById("log-clear").addEventListener("click", () => {
+    const body = document.getElementById("log-body");
+    body.replaceChildren(el("div", { class: "log-empty" }, "Cleared. New lines keep arriving."));
+    dock.lastCorrelation = "";
+  });
+  document.getElementById("log-search").addEventListener("input", applyLogSearch);
+  // A changed filter starts from where the stream is now, not from the
+  // beginning: the dock is a window on what happens next.
+  for (const id of ["log-vm", "log-source", "log-level"]) {
+    document.getElementById(id).addEventListener("change", () => {
+      dock.lastCorrelation = "";
+    });
+  }
+  const body = document.getElementById("log-body");
+  if (!body.children.length) {
+    body.append(el("div", { class: "log-empty" }, "Nothing yet. Operations appear here as they happen."));
+  }
+}
+
 /* ---------- boot ---------- */
 async function boot() {
   document.getElementById("chooser-open").addEventListener("click", () => pick(fieldValue("chooser-typed")));
@@ -2885,6 +3083,8 @@ async function boot() {
   await render();
   pollApprovals();
   watchEvents();
+  wireDock();
+  watchLogs();
   await openWizardIfNeeded();
 }
 

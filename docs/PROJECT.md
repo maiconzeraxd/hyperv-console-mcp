@@ -2342,6 +2342,43 @@ opens exactly one, on loopback, and the locks around it are the substance of the
   in the tests, but no browser has rendered the served page against a live host: WebView2 and
   `--serve` both still owe a real window and a real VM.
 
+### 2026-10-30 — v0.4 wave 4: the log dock, and the page seen in a real browser
+
+Wave 1 built the stream; this wave puts it on screen. The window gains a dock along the bottom
+— the roadmap's "where the AI and the operator are seen working side by side" — and, for the
+first time in this project, the page was rendered in a real browser rather than asserted as text.
+
+- **The dock is a grid row, not a fixed overlay.** `.app` grew a second row so the dock can never
+  cover the last row of a table, which is what a `position: fixed` footer eventually does.
+- **One offset, one stream.** `Api.logs` is the door (`logs_subscribe` with the page's filters and
+  a ten-second wait); the page keeps `dock.offset`, draws what arrives and asks again, so nothing
+  is drawn twice and nothing is missed. Pause stops asking without losing the offset; a filter
+  change keeps the offset too, because the dock is a window on what happens next.
+- **The correlation id is the grouping.** It is drawn on the first line of an operation and left
+  blank on the rest of its group, so a run reads as a run. 500 lines are kept; the oldest leaves
+  first, and the body only auto-scrolls while the operator is at the bottom.
+- **The dock's source list is the service's.** A page test compares the `<option>` values against
+  `logs.SOURCES`, the same shape as the crash-dump select: adding a source on one side fails until
+  the other catches up.
+- **A closed tab is not an error.** The probe run showed `ThreadingHTTPServer` printing a
+  `ConnectionAbortedError` traceback whenever a long-poll was answered after the page had gone —
+  which, with a dock, is every closed window. The listener now treats a connection reset as the
+  end of a request, and a write to a socket the peer closed returns instead of raising.
+- **Verified in a browser, not in WebView2.** A probe host (a fake service over `--serve`) was
+  rendered in headless Chrome at 1500×940: the fleet listed both VMs, the dock drew seven lines
+  with time, source, level, VM, correlation and message aligned in their columns, the toolbar
+  (`every source`, `every level`, search, Pause, Clear, `live`) readable, and nothing clipped. The
+  first-run wizard opened over the page, which is correct for a host where no VM has a level.
+- Tests: `tests/test_webui.py` one (the dock's filters reaching the service, with `""` becoming
+  `None`), `tests/test_webui_page.py` two (the sources match the service's; pause, search and
+  grouping exist, and the buffer is bounded), `tests/test_webui_serve.py` one (a connection reset
+  is not an error).
+- Gate: 1156 passed / 1 skipped, ruff clean, `node --check` clean.
+- **Not validated live:** the dock has never followed a real operation on `NORTH-Test` — the
+  seven lines it drew came from the probe — and the WebView2 window has still not been driven
+  against a live guest. The IDE shell the roadmap describes (terminals in the middle, fleet in a
+  sidebar, permission matrix on a login screen) is the next wave; this one is the dock it needs.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three
