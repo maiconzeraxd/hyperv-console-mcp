@@ -316,3 +316,33 @@ def test_an_empty_matrix_is_refused_instead_of_allowing_nothing() -> None:
     assert "if (level && kept && !kept.length) {" in page
     assert "Remove the level instead of allowing nothing." in page
 
+def test_the_login_screen_asks_once_and_never_keeps_the_password() -> None:
+    """A page that remembers a password has a place to leak it from."""
+    page = _page()
+    assert '["Login", "login",' in page
+    assert 'id: "cred-pass", type: "password"' in page
+    # The field is emptied before the call that carries it, not after.
+    save = page.index("async function saveCredential()")
+    cleared = page.index('if (input) input.value = "";', save)
+    sent = page.index("await api().set_credential(user, secret)", save)
+    assert cleared < sent
+    # And nothing writes it into the page's own state.
+    assert "state.password" not in page
+
+
+def test_opening_a_vm_with_no_credential_goes_to_the_login_screen() -> None:
+    """Otherwise the first workspace the operator sees is a wall of refusals."""
+    page = _page()
+    assert '.source === "missing" && state.page === "overview"' in page
+    assert 'state.page = "login";' in page
+
+def test_the_login_screen_names_the_other_lock_it_cannot_open() -> None:
+    """A credential is not the same permission as the guest capability.
+
+    Testing one while the other is unchecked comes back as a refusal, so the
+    screen says which one it is before the button is pressed.
+    """
+    page = _page()
+    assert 'id: "cred-blocked"' in page
+    assert "Re-check guest on Overview first." in page
+

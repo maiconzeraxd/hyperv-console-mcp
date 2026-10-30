@@ -118,6 +118,10 @@ class Api:
                 name: self.settings.allows(self.vm_name, name) if self.vm_name else False
                 for name in CAPABILITIES
             },
+            # Whether this VM has a credential, and which account it uses. The
+            # page needs the fact to know whether to ask; it never gets the
+            # secret, and nothing here reads it out of the vault.
+            "credential": self.credential(),
             "allowlist": sorted(self.settings.allowed_vms),
             "approvals": self.approval_error or "listening",
         }
@@ -236,6 +240,52 @@ class Api:
             "baseline": store.baselines().get(self.vm_name.casefold()),
             "policy": policy,
         }
+
+    def credential(self) -> dict[str, Any]:
+        """Where this VM's guest credential comes from, and for which account.
+
+        The answer is a word — ``credential_manager``, ``environment`` or
+        ``missing`` — plus the username. The page draws a login screen when it
+        is ``missing`` and nothing else otherwise, so reopening the window does
+        not ask for a password that is already in the vault.
+        """
+        if not self.vm_name:
+            return {"source": "missing", "username": None}
+        entry = None
+        try:
+            entry = credentials.CredentialStore().read(self.vm_name)
+        except HyperVError:
+            # A vault that cannot be read is the same problem as an empty one:
+            # the page must offer the login rather than fail to draw.
+            entry = None
+        return {
+            "source": credentials.source(self.settings, self.vm_name),
+            "username": (entry[0] if entry else None) or self.settings.guest_username or None,
+        }
+
+    def set_credential(self, username: str, password: str) -> dict[str, Any]:
+        """Put this VM's guest credential in the Windows vault, once.
+
+        The password is typed here and goes straight to the service, which
+        writes it to the Credential Manager. It is not kept in the page's state,
+        not echoed back in the answer, and not written to any log.
+        """
+        if not self.vm_name:
+            raise ValidationError("Choose a VM before storing its credential.")
+        return self.call(
+            "guest_credential_set",
+            {"vm_name": self.vm_name, "username": username, "password": password},
+        )
+
+    def check_credential(self) -> dict[str, Any]:
+        """Ask the service whether the stored credential actually works.
+
+        This is the slow one — it opens a session — so the page runs it on a
+        button, not on every draw.
+        """
+        if not self.vm_name:
+            raise ValidationError("Choose a VM before testing its credential.")
+        return self.call("guest_credential_status", {"vm_name": self.vm_name})
 
     def _store(self) -> AccessStore:
         return AccessStore(self.settings.access_path or access_file(self.environ))

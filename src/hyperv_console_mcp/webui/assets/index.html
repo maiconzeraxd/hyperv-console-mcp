@@ -541,6 +541,7 @@ const PAGES = [
   ["Recovery", "recovery", "Power, checkpoints and the forced actions that ask for a confirmation."],
   ["Media", "media", "The DVD drive, an ISO and boot order."],
   ["Debugger", "debugger", "COM1 serial, the kd session and the symbols it resolves."],
+  ["Login", "login", "The guest credential, typed once and kept in the Windows vault."],
   ["Guest", "guest", "Credential source, automation toggles and one command."],
   ["Lab", "lab", "Directories, packages, diagnostics, and the cycle that runs one."],
   ["Files", "files", "Two panels: the host roots this window may browse, and the guest's own disk."],
@@ -1285,6 +1286,47 @@ const builders = {
       preparePanel);
   },
 
+  async login() {
+    // The vault is the only place the password goes, so this screen exists to
+    // type it once. It opens by itself only when a VM has none: a window that
+    // asks again for a credential it already has is a window that lost it.
+    const credential = state.hello.credential || { source: "missing", username: null };
+    const stored = credential.source === "credential_manager";
+    const fromEnvironment = credential.source === "environment";
+    const status = el("p", { class: "hint", id: "cred-state" },
+      stored ? "Stored for " + (credential.username || "this VM") + " in the Windows Credential Manager."
+        : fromEnvironment ? "Coming from the environment this process was started with."
+          : "This VM has no credential yet, so its guest cannot be reached.");
+    // The credential and the guest capability are different locks, and this
+    // screen only turns one of them: saying so here saves a refused button.
+    const blocked = (state.hello.capabilities || {}).guest === false
+      ? el("p", { class: "hint", id: "cred-blocked", style: "color:var(--danger)" },
+        "The guest capability is unchecked for this VM, so the service will refuse the test. "
+        + "Re-check guest on Overview first.")
+      : null;
+    return el("div", { class: "grid" },
+      panel("Guest credential", "Typed once, here. It goes to the Windows Credential Manager and is never sent back to this page.",
+        status,
+        blocked,
+        el("div", { class: "row" },
+          field("Username", el("input", {
+            id: "cred-user", type: "text", autocomplete: "username",
+            value: credential.username || "", placeholder: "Administrator",
+          })),
+          field("Password", el("input", {
+            id: "cred-pass", type: "password", autocomplete: "current-password",
+            placeholder: stored ? "a credential is already stored" : "",
+          }))),
+        el("div", { class: "row", style: "margin:0" },
+          el("button", { class: "act primary", onclick: () => saveCredential() }, "Save and test"),
+          el("button", { class: "act", onclick: () => checkCredential() }, "Test stored"),
+          el("button", { class: "act danger", onclick: () => forgetCredential() }, "Forget")),
+        el("p", { class: "hint", style: "margin:10px 0 0" },
+          "Saving replaces what the vault holds for this VM. The password is not kept in this page, not logged, and not part of any audit record.")),
+      panel("What the service reports", "The same status the Guest page shows — source and account, never the secret.",
+        el("pre", { id: "cred-status", style: "margin:0;font-size:.78rem;white-space:pre-wrap" }, "Press \u201cTest stored\u201d to ask.")));
+  },
+
   async guest() {
     const [credential, config] = await Promise.all([
       api().call("guest_credential_status", vmArg()), api().call("guest_config_status", vmArg()),
@@ -1651,6 +1693,51 @@ async function writeLevel(level) {
     show(level ? "set_level" : "remove_level", response);
   } catch (error) {
     show("set_level", { error: { message: String(error) } });
+  }
+  await refreshHello();
+  await render();
+}
+
+/* The credential screen's three verbs. None of them keeps the password: it is
+   read once, handed to the service, and the field is cleared before the call
+   even starts, so nothing here can echo it back. */
+async function saveCredential() {
+  const user = fieldValue("cred-user").trim();
+  const secret = fieldValue("cred-pass");
+  const input = document.getElementById("cred-pass");
+  if (input) input.value = "";
+  if (!user || !secret) {
+    show("set_credential", { error: { message: "A username and a password are both needed." } });
+    return;
+  }
+  try {
+    show("set_credential", await api().set_credential(user, secret));
+  } catch (error) {
+    show("set_credential", { error: { message: String(error) } });
+  }
+  await refreshHello();
+  await render();
+  await checkCredential();
+}
+
+async function checkCredential() {
+  const pre = document.getElementById("cred-status");
+  try {
+    const status = await api().check_credential();
+    const body = (status && status.ok) || (status && status.error) || status;
+    if (pre) pre.textContent = JSON.stringify(body, null, 2);
+  } catch (error) {
+    if (pre) pre.textContent = String(error);
+  }
+  await refreshHello();
+}
+
+async function forgetCredential() {
+  try {
+    show("guest_credential_forget",
+      await api().call("guest_credential_forget", { ...vmArg(), confirm_vm: state.vm }));
+  } catch (error) {
+    show("guest_credential_forget", { error: { message: String(error) } });
   }
   await refreshHello();
   await render();
@@ -2708,6 +2795,11 @@ async function openVm(name) {
     return;
   }
   if (state.page === "fleet") state.page = "overview";
+  // A VM with no credential cannot be used at all, so opening one goes to the
+  // screen that fixes it rather than to a workspace full of refusals.
+  if (((state.hello && state.hello.credential) || {}).source === "missing" && state.page === "overview") {
+    state.page = "login";
+  }
   await render();
 }
 

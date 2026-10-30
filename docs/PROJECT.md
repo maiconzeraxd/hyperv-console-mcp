@@ -2464,6 +2464,48 @@ became a ceiling.
   narrowed policy is proved by tests, not by a live call from an MCP client. The login screen and
   the fleet sidebar are still to come.
 
+### 2026-10-30 — v0.4 wave 7: the login screen, and the window that stops asking
+
+The roadmap's §2 has a second half: reopening the interface must not re-ask for anything it
+already has. That needed a screen, and it needed a fact the page did not have.
+
+- **`hello()` now carries `credential`**: a word — `credential_manager`, `environment` or
+  `missing` — and the account, never the secret. It is answered by the vault's own `has()` and a
+  `read()` whose password half is dropped, so drawing the page cannot leak anything. A vault that
+  raises reads as `missing`, because a page that cannot draw is worse than a page that offers the
+  login again.
+- **`Api.set_credential(username, password)`** hands the password to the service's
+  `guest_credential_set`, which writes the Credential Manager entry. The answer is the usual
+  envelope and says where it went, not what it was. **`check_credential`** is the slow one — it
+  opens a session — so it runs on a button, never on a draw.
+- **A Login page** in the sidebar: the account prefilled from the vault, a `type="password"` field
+  that is emptied *before* the call that carries it, and three verbs — Save and test, Test stored,
+  Forget. The password lives in one variable for as long as the call takes; it is not in
+  `state`, not in the answer, and not in any audit record.
+- **Opening a VM with no credential goes to Login** instead of to a workspace whose every card
+  would say `access_denied`. A VM that already has one opens straight on Overview, which is the
+  behaviour the roadmap asks for and the one a live run confirmed.
+- **The screen names the other lock.** A credential and the `guest` capability are different
+  permissions: with `guest` unchecked the service refuses even the status probe, so the panel says
+  so before the button is pressed rather than after. The live run found this by pressing it.
+- Tests: `tests/test_webui.py` four (no credential says `missing`, a stored one reports the account
+  and never the secret, saving hands it to the service and keeps it out of the answer, testing asks
+  the service and not the vault), `tests/test_webui_page.py` three (the screen asks once and never
+  keeps the password — asserted by position, cleared before sent —, opening a credential-less VM
+  lands on Login, the screen names the guest lock).
+- **Verified live** on the served page: opening `NORTH-Test` landed on **Overview** because a
+  credential is stored (`mcn1`); the Login page reported "Stored for mcn1", the password field was
+  empty and of type password, and **Test stored** reached the service and came back with its
+  answer — a policy refusal, because the matrix had `guest` unchecked, which is exactly the case
+  the new warning line names. Screenshots: `login-blocked.png`.
+- Gate: 1183 passed / 1 skipped, ruff clean, `node --check` on the assembled script clean. (The one
+  warning is `test_dashboard`'s Tk `Variable` being collected off the main thread; it predates this
+  wave and is not a failure.)
+- **Not validated live:** no credential was typed into the vault during this run — the live path
+  proved the screen, the stored-credential detection and the service round trip, while
+  `set_credential` is proved by tests with a fake vault. Writing a throwaway credential into the
+  operator's real Credential Manager is not something a probe should do.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three

@@ -37,6 +37,21 @@ class FakeService:
         self.calls.append(("capture_screenshot", {"region": region, "max_width": max_width}))
         return Screenshot(b"fake-png-bytes", {"vm": vm_name, "region": region})
 
+    def guest_credential_set(
+        self, vm_name: str, username: str, password: str
+    ) -> dict[str, Any]:
+        # The password is deliberately not recorded: nothing the bridge does
+        # should leave it in a list a test (or a log) can read.
+        self.calls.append(("guest_credential_set", {"vm_name": vm_name, "username": username}))
+        return {"vm": vm_name, "source": "credential_manager", "username": username}
+
+    def guest_credential_status(self, vm_name: str) -> dict[str, Any]:
+        self.calls.append(("guest_credential_status", {"vm_name": vm_name}))
+        return {
+            "vm": vm_name, "source": "credential_manager", "username": "lab",
+            "psdirect": {"ok": True, "error": None}, "ssh": {"provisioned": False},
+        }
+
     def reload_policy(self) -> dict[str, Any]:
         self.calls.append(("reload_policy", {}))
         return {"levels": {}, "allowlist": []}
@@ -466,4 +481,72 @@ def test_the_window_reads_the_file_it_wrote_even_if_the_service_cannot_be_told(
     ]["capabilities"] == ["console"]
     assert api.hello()["capabilities"]["console"] is True
     assert api.hello()["capabilities"]["guest"] is False
+
+class FakeVault:
+    """The Windows Credential Manager, without the Windows part."""
+
+    def __init__(self, entry: tuple[str, str] | None = None) -> None:
+        self.entry = entry
+        self.written: list[tuple[str, str, str]] = []
+
+    def read(self, name: str):
+        return self.entry
+
+    def has(self, name: str) -> bool:
+        return self.entry is not None
+
+    def write(self, name: str, username: str, password: str) -> None:
+        self.written.append((name, username, password))
+        self.entry = (username, password)
+
+
+def test_a_vm_with_no_credential_says_so_without_reading_the_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The page asks whether to show a login screen, and gets a word."""
+    monkeypatch.setattr(
+        "hyperv_console_mcp.credentials.CredentialStore", lambda: FakeVault()
+    )
+
+    credential = _api(tmp_path).hello()["credential"]
+
+    assert credential == {"source": "missing", "username": None}
+
+
+def test_a_stored_credential_reports_its_account_and_never_its_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reopening the window must not ask again for a password it already has."""
+    vault = FakeVault(("lab", "not-in-the-answer"))
+    monkeypatch.setattr("hyperv_console_mcp.credentials.CredentialStore", lambda: vault)
+
+    credential = _api(tmp_path).hello()["credential"]
+
+    assert credential["source"] == "credential_manager"
+    assert credential["username"] == "lab"
+    assert "not-in-the-answer" not in json.dumps(credential)
+
+
+def test_saving_a_credential_hands_it_to_the_service_and_keeps_it_out_of_the_answer(
+    tmp_path: Path,
+) -> None:
+    """The password crosses this boundary exactly once, on the way in."""
+    api = _api(tmp_path)
+
+    result = api.set_credential("lab", "s3cret-value")
+
+    assert ("guest_credential_set", {"vm_name": "Lab-VM", "username": "lab"}) in api.service.calls
+    # The answer is the same envelope every other call returns, and it says
+    # where the credential went without repeating it.
+    assert result["ok"]["source"] == "credential_manager"
+    assert "s3cret-value" not in json.dumps(result)
+
+
+def test_testing_a_credential_asks_the_service_not_the_vault(tmp_path: Path) -> None:
+    """Only the service can open a session, so only the service can say it works."""
+    api = _api(tmp_path)
+
+    api.check_credential()
+
+    assert api.service.calls[-1] == ("guest_credential_status", {"vm_name": "Lab-VM"})
 
