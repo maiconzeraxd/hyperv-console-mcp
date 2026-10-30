@@ -2549,6 +2549,41 @@ dependency eagerly is simply wrong.
   `1191 passed` with Tk present.
 - Gate: 1191 passed / 1 skipped, ruff clean.
 
+### 2026-10-30 — v0.4 fixes 2: the worker's actions are service calls, so the scripts can go
+
+The two personal scripts (`Start-NorthLabWorker.ps1`, `Invoke-NorthLab.ps1`) were a convenience
+around this service. They are not in this repository, and they do not need to be: every action they
+performed is a method the service already had, with nothing in it that stops to ask a person.
+
+| Action | Service methods |
+| --- | --- |
+| Status | `host_status`, `get_vm`, `guest_status`, `guest_transport_status`, `lab_diagnostics` |
+| StagePackage | `lab_stage`, `guest_publish_package` |
+| SyncSymbols | `kd_symbols` |
+| Checkpoint | `create_checkpoint`, `list_checkpoints` |
+| Reboot | `power` |
+| LiveTest | `lab_run`, `lab_cycle` |
+
+The table lives in code — `hyperv_console_mcp.lab.worker.WORKER_ACTIONS` — and `tests/test_lab_worker.py`
+reads it back against the façade and against this page, so a row cannot name a method that does not
+exist or drift from what is written here. The MCP tool names differ for some of them (`power` is
+`vm_power`, `create_checkpoint` is `checkpoint`); the table names the service method, which is what
+the scripts were doing and what the window calls.
+
+**Why the scripts could be dropped, asserted rather than assumed:**
+
+- `-NonInteractive` on every PowerShell launch the package emits (checked by looking ahead from each
+  launch, since the command lines are built by concatenation), and on the host backend's argument
+  list, which is what runs every Hyper-V command.
+- `-Confirm:$false` on every destructive cmdlet in the bridge (`Stop-VM`, `Restart-VM`,
+  `Checkpoint-VM`, `Restore-VMSnapshot`, `Remove-VMSnapshot`, `Set-VMFirmware`, `Debug-VM`, …).
+- No `Get-Credential` and no `Read-Host` anywhere in the package: the guest credential is built as a
+  `PSCredential` from the vault entry the request carries, and `New-PSSession -Credential` uses it.
+
+**How the worker is replaced in practice:** the operator no longer runs a `.ps1` at all. The service
+is started once (`hyperv-console-mcp`, or the installed service), the interface drives it, and the AI
+drives the same methods over MCP. There is no separate bootstrap path left to keep in sync.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three
