@@ -167,13 +167,19 @@ def create_server(
     )
 
     enabled = service.settings.toolsets
+    # Registered tools, by the family that owns them. The host report carries
+    # these counts so the surface a profile really produces can be checked
+    # against the table in the README instead of the table being the only claim.
+    counts: dict[str, int] = {}
 
     def tool(name: str, *, annotations: ToolAnnotations, description: str) -> Callable:
         # A tool outside the enabled toolsets is never registered, so its schema
         # never reaches the conversation. The decorator still returns the
         # function, which keeps the definition readable.
-        if toolset_for(name) not in enabled:
+        family = toolset_for(name)
+        if family not in enabled:
             return lambda function: function
+        counts[family] = counts.get(family, 0) + 1
         return mcp.tool(
             name=name,
             description=description,
@@ -182,8 +188,10 @@ def create_server(
         )
 
     def image_tool(name: str, *, annotations: ToolAnnotations, description: str) -> Callable:
-        if toolset_for(name) not in enabled:
+        family = toolset_for(name)
+        if family not in enabled:
             return lambda function: function
+        counts[family] = counts.get(family, 0) + 1
         return mcp.tool(
             name=name,
             description=description,
@@ -200,6 +208,8 @@ def create_server(
         result["toolsets"] = {
             "enabled": sorted(enabled),
             "disabled": sorted(TOOLSETS - enabled),
+            "counts": {family: counts[family] for family in sorted(counts)},
+            "total": sum(counts.values()),
         }
         return result
 

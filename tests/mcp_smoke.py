@@ -1,9 +1,11 @@
 """Real MCP stdio smoke test; only read-only or policy-denied live calls.
 
-It starts the server twice: once with the safe profile's default tool surface
-and once with every toolset enabled, so the smoke proves both that the
-conversation-sized surface is what the profile promises and that enabling the
-rest still exposes the whole server.
+It starts the server three times: once with the safe profile's default tool
+surface, once with the lab profile, and once with every toolset enabled, so the
+smoke proves the conversation-sized surface is what each profile promises and
+that enabling the rest still exposes the whole server. The host report carries
+the registered count per toolset, which is what makes "per toolset" checkable
+without starting eleven servers.
 """
 
 from __future__ import annotations
@@ -17,15 +19,39 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-# (label, extra environment, expected tool count). Keep these in step with the
-# tool table in README.md and with tests/test_server.py.
+# (label, extra environment, expected tool count, expected counts per toolset).
+# Keep these in step with the tool table in README.md and with tests/test_server.py.
 CONFIGURATIONS = (
-    ("safe", {}, 29),
-    ("all toolsets", {"HYPERV_MCP_TOOLSETS": "all"}, 55),
+    (
+        "safe",
+        {},
+        29,
+        {
+            "core": 8, "guest": 6, "console": 4, "config": 3,
+            "credentials": 2, "media": 3, "ssh": 3,
+        },
+    ),
+    (
+        "lab profile",
+        {"HYPERV_MCP_PROFILE": "lab"},
+        42,
+        {"core": 8, "guest": 6, "console": 4, "config": 3, "lab": 10, "kd": 9, "debug": 2},
+    ),
+    (
+        "all toolsets",
+        {"HYPERV_MCP_TOOLSETS": "all"},
+        55,
+        {
+            "core": 8, "guest": 6, "console": 4, "config": 3, "credentials": 2,
+            "media": 3, "ssh": 3, "serial": 5, "lab": 10, "kd": 9, "debug": 2,
+        },
+    ),
 )
 
 
-async def check(label: str, extra: dict[str, str], expected: int) -> dict:
+async def check(
+    label: str, extra: dict[str, str], expected: int, per_toolset: dict[str, int]
+) -> dict:
     root = Path(__file__).resolve().parents[1]
     environment = os.environ.copy()
     environment.update(
@@ -54,18 +80,27 @@ async def check(label: str, extra: dict[str, str], expected: int) -> dict:
             await session.initialize()
             tools = await session.list_tools()
             assert len(tools.tools) == expected, (label, len(tools.tools))
+            # The lab profile switches every capability on; the explicit
+            # "false" values above still win, so the denied call below stays a
+            # policy refusal rather than a power operation on a real VM.
             denied = await session.call_tool(
                 "vm_power", {"vm_name": "NORTH-Test", "action": "start"}
             )
             assert denied.is_error
             assert "not_authorized" in denied.content[0].text
             status = await session.call_tool("hyperv_host_status", {})
+            assert not status.is_error
+            report = status.structured_content
+            counts = report["toolsets"]["counts"]
+            assert counts == per_toolset, (label, counts)
+            assert report["toolsets"]["total"] == expected, (label, counts)
             return {
                 "surface": label,
                 "mcp_initialize": "ok",
                 "tool_count": len(tools.tools),
+                "per_toolset": counts,
                 "disabled_mutation_blocked": True,
-                "live_read_succeeded": not status.is_error,
+                "live_read_succeeded": True,
             }
 
 

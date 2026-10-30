@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 import anyio
@@ -130,6 +131,23 @@ def test_enabling_every_toolset_exposes_the_whole_surface() -> None:
     assert "password" not in tools["kd_attach"].input_schema["properties"]
 
 
+def test_the_host_report_states_the_surface_it_registered() -> None:
+    """The counts come from the registration, so the report cannot drift from it."""
+    service = HyperVService(
+        FakeBackend(),
+        Settings(allowed_vms=frozenset({"NORTH-Test"}), toolsets=TOOLSETS),
+    )
+    result = anyio.run(create_server(service).call_tool, "hyperv_host_status", {})
+    assert result.is_error is False
+    toolsets = result.structured_content["toolsets"]
+    assert toolsets["counts"] == {
+        "core": 8, "guest": 6, "console": 4, "config": 3, "credentials": 2,
+        "media": 3, "ssh": 3, "serial": 5, "lab": 10, "kd": 9, "debug": 2,
+    }
+    assert toolsets["total"] == 55
+    assert toolsets["disabled"] == []
+
+
 def test_every_tool_belongs_to_a_known_toolset() -> None:
     import ast
 
@@ -151,13 +169,23 @@ def test_every_tool_belongs_to_a_known_toolset() -> None:
     assert len(names) == 55
     assert {toolset_for(name) for name in names} <= TOOLSETS
     # The budget the roadmap asks for is "~40" per profile. `safe` holds it
-    # exactly; `lab` is 43 since phase 6 added Driver Verifier and the driver
+    # exactly; `lab` is 42 since phase 6 added Driver Verifier and the driver
     # service, and the read side of the verifier lives in `lab_diagnostics`
     # rather than in a second listing tool.
     for profile, limit in (("safe", 40), ("lab", 43)):
         enabled = DEFAULT_TOOLSETS[profile]
         visible = [name for name in names if toolset_for(name) in enabled]
         assert len(visible) <= limit, (profile, len(visible))
+    # The counts the host report publishes, and the ones tests/mcp_smoke.py
+    # asserts over a real stdio client, come from this same map.
+    counts = Counter(toolset_for(name) for name in names)
+    assert counts == {
+        "core": 8, "guest": 6, "console": 4, "config": 3, "credentials": 2,
+        "media": 3, "ssh": 3, "serial": 5, "lab": 10, "kd": 9, "debug": 2,
+    }
+    assert sum(counts.values()) == 55
+    assert sum(counts[family] for family in DEFAULT_TOOLSETS["safe"]) == 29
+    assert sum(counts[family] for family in DEFAULT_TOOLSETS["lab"]) == 42
 
 
 def test_tool_calls_service_and_returns_structured_output(server) -> None:
