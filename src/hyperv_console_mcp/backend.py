@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import base64
 import json
+import os
 import queue
 import subprocess
 import threading
@@ -16,6 +17,51 @@ from typing import Any, Mapping
 from .errors import BackendError
 
 _MARKER = "HVMCP1:"
+
+
+def worker_environment(
+    executable: str, environ: Mapping[str, str] | None = None
+) -> dict[str, str] | None:
+    """The environment for the worker, with PowerShell 7's modules kept out of 5.1.
+
+    Windows PowerShell 5.1 autoloads a module from the first `PSModulePath`
+    entry that holds it, and a parent started by `pwsh` leaves PowerShell 7's
+    module directories in the inherited value. Loading PS7's copy of
+    `Microsoft.PowerShell.Security` into 5.1 applies a type-data file whose
+    members 5.1 already has, so the import fails with "The member AuditToString
+    is already present" and every later `ConvertTo-SecureString` reports that
+    the module "could not be loaded" — which is how a guest credential is built.
+
+    The entries are dropped, not reordered: a user module in
+    `Documents\\WindowsPowerShell\\Modules` or a machine one in
+    `Program Files\\WindowsPowerShell\\Modules` is left exactly where it was.
+    Anything that is not `powershell.exe` — `pwsh` itself, a test double — is
+    given the environment untouched, because for those the entries are correct.
+    """
+    source = os.environ if environ is None else environ
+    if Path(executable).name.casefold() != "powershell.exe":
+        return None
+    module_path = source.get("PSModulePath")
+    if not module_path:
+        return None
+    kept = [
+        entry
+        for entry in module_path.split(os.pathsep)
+        if not _is_powershell_seven_modules(entry)
+    ]
+    if len(kept) == len(module_path.split(os.pathsep)):
+        return None
+    environment = dict(source)
+    environment["PSModulePath"] = os.pathsep.join(kept)
+    return environment
+
+
+def _is_powershell_seven_modules(entry: str) -> bool:
+    """True for a PowerShell 7 module directory, false for 5.1's own."""
+    normalized = entry.replace("/", "\\").casefold().rstrip("\\")
+    if "\\windowspowershell\\" in normalized:
+        return False
+    return "\\powershell\\" in normalized or normalized.endswith("\\powershell")
 
 
 class HyperVBackend:
@@ -143,6 +189,7 @@ class PowerShellBackend:
                 bufsize=1,
                 shell=False,
                 cwd=str(self.script_path.parent),
+                env=worker_environment(self.executable),
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except OSError as exc:
