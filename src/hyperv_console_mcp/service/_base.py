@@ -131,6 +131,23 @@ class ServiceBase:
         from ..events import EVENTS
         return EVENTS.snapshot(after)
 
+    def events_wait(self, after: int = 0, timeout_seconds: float = 15.0) -> dict[str, Any]:
+        """The same events, but held open until something arrives or time runs out.
+
+        This is what a live feed needs and a snapshot cannot give: the caller
+        asks once and is answered when there is news, instead of asking again
+        every few hundred milliseconds and being told "nothing" each time. The
+        bus already implements the wait, so this is a door onto it rather than a
+        second bus.
+        """
+        from ..events import EVENTS
+        if not isinstance(after, int) or isinstance(after, bool) or after < 0:
+            raise ValidationError("after must be a non-negative integer.")
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+            raise ValidationError("timeout_seconds must be a number.")
+        # A window that asks for an hour would hold a worker thread for an hour.
+        return EVENTS.wait(after, min(max(float(timeout_seconds), 0.0), 30.0))
+
     def reload_policy(self) -> dict[str, Any]:
         """Re-read the environment and the operator's access file.
 

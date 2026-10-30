@@ -66,6 +66,27 @@
   nav button:hover { background: var(--surface); color: var(--text); }
   nav button.active { background: var(--surface); color: var(--text); font-weight: 600; }
   nav .caps { margin-top: auto; color: var(--muted); font-size: .78rem; white-space: pre-line; padding-top: 18px; }
+  /* ---------- workspace tabs ---------- */
+  nav #tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 8px; }
+  nav #tabs .tab {
+    display: flex; align-items: center; gap: 6px; max-width: 100%;
+    padding: 4px 8px; border-radius: 7px; background: var(--surface);
+    color: var(--muted); font-size: .78rem; cursor: pointer; border: 1px solid transparent;
+  }
+  nav #tabs .tab span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  nav #tabs .tab.active { color: var(--text); border-color: var(--border); }
+  nav #tabs .tab .x { opacity: .55; padding: 0 2px; }
+  nav #tabs .tab .x:hover { opacity: 1; color: var(--error); }
+  nav .conn { margin-top: 12px; font-size: .74rem; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  nav .conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
+  nav .conn.up .dot { background: var(--accent); }
+  nav .conn.down .dot { background: var(--error); }
+  /* A VM name in the fleet is a button: it opens a workspace, it is not a form. */
+  table.events button.link { background: none; border: 0; color: var(--blue); font: inherit; cursor: pointer; padding: 0; text-align: left; }
+  table.events button.link:hover { text-decoration: underline; }
+  table.events .badge { font-size: .74rem; padding: 1px 7px; border-radius: 999px; background: var(--surface); color: var(--muted); border: 1px solid var(--border); }
+  table.events .badge.lab { color: var(--accent); border-color: #2f6b57; }
+  table.events .badge.control { color: var(--blue); border-color: #2b4a72; }
   /* ---------- content ---------- */
   main { padding: 24px 26px; overflow-y: auto; min-width: 0; }
   header.page { margin-bottom: 18px; }
@@ -187,8 +208,10 @@
     <div class="sub">Control Center</div>
     <div class="vm" id="vm-name">no VM</div>
     <div class="meta" id="vm-meta"></div>
+    <div id="tabs"></div>
     <div id="nav-buttons"></div>
     <div class="caps" id="caps"></div>
+    <div class="conn" id="conn"><span class="dot"></span>connecting…</div>
   </nav>
 
   <main id="main">
@@ -226,6 +249,7 @@
 "use strict";
 
 const PAGES = [
+  ["Fleet", "fleet", "Every VM Hyper-V reported, the level this host allows each one, and its power."],
   ["Overview", "overview", "The VM's state, its checkpoints and what the AI may do with it."],
   ["Activity", "activity", "Cross-process operation history, including what the MCP server did."],
   ["Console", "console", "Keyboard, mouse and a screenshot of the guest display."],
@@ -236,7 +260,15 @@ const PAGES = [
   ["Lab", "lab", "Directories, packages, diagnostics, and the cycle that runs one."],
 ];
 
-const state = { vm: "", page: "overview", hello: null, events: [], output: null };
+const state = {
+  vm: "", page: "fleet", hello: null, output: null,
+  // The tabs are the workspaces: one per VM opened from the fleet, each one a
+  // full set of pages for that VM. Several may be open; only one is active.
+  tabs: [],
+  // The live feed. `cursor` is the last sequence shown, so a reconnected window
+  // asks for what it missed instead of starting over.
+  events: [], cursor: 0, connected: null,
+};
 
 /* ---------- small helpers ---------- */
 const api = () => window.pywebview && window.pywebview.api;
@@ -299,7 +331,7 @@ async function call(method, kwargs) {
   }
 }
 
-function action(label, method, payload, style) {
+function action(label, method, payload, style, then) {
   return el("button", {
     class: "act" + (style ? " " + style : ""),
     onclick: async (event) => {
@@ -307,12 +339,15 @@ function action(label, method, payload, style) {
       button.disabled = true;
       try {
         await call(method, payload());
+        if (then) await then();
       } finally {
         button.disabled = false;
       }
     },
   }, label);
 }
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Not `value`: pywebview answers a JS -> Python call by evaluating `var value; ...`
 // in the global scope, and a second `const value` makes that script a SyntaxError,
@@ -324,6 +359,57 @@ const confirmed = () => ({ vm_name: state.vm, confirm_vm: state.vm });
 
 /* ---------- pages ---------- */
 const builders = {
+  async fleet() {
+    const response = await api().vms();
+    const vms = (response && response.ok && response.ok.vms) || [];
+    const levels = (state.hello && state.hello.levels_by_vm) || {};
+    const levelOf = (name) => levels[String(name || "").toLowerCase()] || null;
+    const badge = (level) => el("span", { class: "badge" + (level ? " " + level : "") }, level || "no level");
+    const gib = (bytes) => (bytes ? (bytes / 2 ** 30).toFixed(1) + " GiB" : "—");
+
+    const rows = vms.map((vm) => {
+      const name = String(vm.name || "");
+      const running = vm.state === "Running";
+      return el("tr", {},
+        el("td", {}, el("button", { class: "link", onclick: () => openVm(name) }, name)),
+        el("td", {}, vm.state || "—"),
+        el("td", {}, badge(levelOf(name))),
+        el("td", {}, vm.cpu_usage_percent === undefined ? "—" : vm.cpu_usage_percent + "%"),
+        el("td", {}, gib(vm.memory_assigned_bytes || vm.memory_startup_bytes)),
+        el("td", {}, el("div", { class: "row", style: "margin:0;flex-wrap:wrap" },
+          running
+            ? [action("Shutdown", "power", () => ({ vm_name: name, action: "shutdown" }), null, render),
+               action("Save", "power", () => ({ vm_name: name, action: "save" }), null, render),
+               action("Turn off", "power", () => ({ vm_name: name, action: "turn_off", confirm_vm: name }), "danger", render)]
+            : [action("Start", "power", () => ({ vm_name: name, action: "start" }), null, render)],
+          el("button", { class: "act", onclick: () => openVm(name) }, "Open"))));
+    });
+
+    const empty = vms.length
+      ? null
+      : panel("No VM was reported", "Either Hyper-V returned none, or the allowlist hides them all.",
+          el("p", { class: "hint", style: "margin:0" },
+            "The allowlist is " + ((state.hello && state.hello.allowlist) || []).join(", ") +
+            ". A VM outside it is not listed and cannot be opened."));
+
+    return el("div", { class: "grid" },
+      panel("Fleet", "What Hyper-V reports, and what this host allows each VM. The level is the operator's file, not this window's.",
+        empty || el("table", { class: "events fleet" },
+          el("thead", {}, el("tr", {}, ...["Name", "State", "Level", "CPU", "Memory", ""].map((h) => el("th", {}, h)))),
+          el("tbody", {}, ...rows))),
+      panel("This window", "A thin client of the same service the MCP server calls.",
+        facts([
+          ["Profile", state.hello ? state.hello.profile : "—"],
+          ["Elevated", state.hello ? String(state.hello.elevated) : "—"],
+          ["Service", state.hello ? (state.hello.shared_service ? "shared host" : "private copy") : "—"],
+          ["Approvals", state.hello ? state.hello.approvals : "—"],
+          ["Open workspaces", state.tabs.length ? state.tabs.join(", ") : "none"],
+        ]),
+        el("div", { class: "row", style: "margin:12px 0 0" },
+          action("Refresh", "list_vms", () => ({}), null, render),
+          el("button", { class: "act", onclick: openChooser }, "Type a VM name"))));
+  },
+
   async overview() {
     const [host, vm, checkpoints] = await Promise.all([
       api().call("host_status", {}), api().call("get_vm", vmArg()), api().call("list_checkpoints", vmArg()),
@@ -366,21 +452,21 @@ const builders = {
   },
 
   async activity() {
-    const snapshot = await api().call("event_snapshot", { after: 0 });
-    state.events = (snapshot && snapshot.ok && snapshot.ok.events) || [];
-    const rows = state.events.slice(-300).reverse().map((event) => el("tr", {},
-      el("td", {}, String(event.started_utc || "").slice(11, 19)),
-      el("td", {}, event.actor || ""),
-      el("td", {}, event.operation || ""),
-      el("td", {}, event.vm_name || "host"),
-      el("td", {}, event.phase + (event.progress !== null && event.progress !== undefined ? " " + event.progress + "%" : "")),
-      el("td", { class: event.error_code ? "err" : "" }, event.error_code || "")));
-    return panel("Operation history", "Timestamps, actor, operation and outcome — never commands or text.",
-      el("table", { class: "events" },
-        el("thead", {}, el("tr", {}, ...["Time", "Actor", "Operation", "VM", "Phase", "Error"].map((h) => el("th", {}, h)))),
-        el("tbody", {}, ...rows)),
+    // The feed arrives on its own; this only seeds the buffer when the page is
+    // opened before anything has happened. Refresh re-seeds it from scratch.
+    if (!state.events.length) {
+      const snapshot = await api().call("event_snapshot", { after: 0 });
+      state.events = (snapshot && snapshot.ok && snapshot.ok.events) || [];
+      state.cursor = Math.max(state.cursor, (snapshot && snapshot.ok && snapshot.ok.latest_sequence) || 0);
+    }
+    return panel("Operation history", "Timestamps, actor, operation and outcome — never commands or text. New events appear as they happen.",
+      el("div", { id: "activity-body" }),
       el("div", { class: "row", style: "margin:12px 0 0" },
-        action("Refresh", "event_snapshot", () => ({ after: 0 }))));
+        action("Refresh", "event_snapshot", () => ({ after: 0 }), null, async () => {
+          state.events = [];
+          state.cursor = 0;
+          await render();
+        })));
   },
 
   async console() {
@@ -620,10 +706,37 @@ async function grabScreenshot() {
 }
 
 /* ---------- chrome ---------- */
+function renderConn() {
+  const node = document.getElementById("conn");
+  if (!node) return;
+  node.className = "conn " + (state.connected === true ? "up" : state.connected === false ? "down" : "");
+  node.replaceChildren(el("span", { class: "dot" }),
+    state.connected === true ? "service connected"
+      : state.connected === false ? "service unreachable" : "connecting…");
+}
+
 function renderNav() {
+  const tabs = document.getElementById("tabs");
+  tabs.replaceChildren(...state.tabs.map((name) =>
+    el("div", {
+      class: "tab" + (name === state.vm ? " active" : ""),
+      title: name,
+      onclick: () => openVm(name),
+    },
+    el("span", {}, name),
+    el("span", {
+      class: "x",
+      title: "Close this workspace",
+      onclick: (event) => { event.stopPropagation(); closeTab(name); },
+    }, "×"))));
+
+  // The fleet is always reachable; the per-VM pages need a VM to be about.
   const buttons = document.getElementById("nav-buttons");
-  buttons.replaceChildren(...PAGES.map(([label, key]) =>
-    el("button", { class: key === state.page ? "active" : "", onclick: () => go(key) }, label)));
+  buttons.replaceChildren(...PAGES
+    .filter(([, key]) => key === "fleet" || state.vm)
+    .map(([label, key]) =>
+      el("button", { class: key === state.page ? "active" : "", onclick: () => go(key) }, label)));
+
   document.getElementById("vm-name").textContent = state.vm || "no VM";
   const level = state.hello ? state.hello.level : null;
   document.getElementById("vm-meta").textContent = [
@@ -637,6 +750,22 @@ function renderNav() {
     state.hello && !state.hello.elevated
       ? el("div", { class: "banner" }, "This process is not elevated. Hyper-V reads may fail with access_denied; that is the shell, not the service.")
       : "");
+  renderConn();
+}
+
+function drawActivity() {
+  const host = document.getElementById("activity-body");
+  if (!host) return;
+  const rows = state.events.slice(-300).reverse().map((event) => el("tr", {},
+    el("td", {}, String(event.started_utc || "").slice(11, 19)),
+    el("td", {}, event.actor || ""),
+    el("td", {}, event.operation || ""),
+    el("td", {}, event.vm_name || "host"),
+    el("td", {}, event.phase + (event.progress !== null && event.progress !== undefined ? " " + event.progress + "%" : "")),
+    el("td", { class: event.error_code ? "err" : "" }, event.error_code || "")));
+  host.replaceChildren(el("table", { class: "events" },
+    el("thead", {}, el("tr", {}, ...["Time", "Actor", "Operation", "VM", "Phase", "Error"].map((h) => el("th", {}, h)))),
+    el("tbody", {}, ...rows)));
 }
 
 async function render() {
@@ -644,10 +773,10 @@ async function render() {
   const entry = PAGES.find(([, key]) => key === state.page) || PAGES[0];
   const page = document.getElementById("page");
   page.replaceChildren(el("header", { class: "page" }, el("h1", {}, entry[0]), el("p", {}, entry[2])));
-  if (!state.vm) {
-    page.append(panel("No VM yet", "Choose one from the list Hyper-V reported.",
+  if (!state.vm && state.page !== "fleet") {
+    page.append(panel("No VM is open", "Pick one from the fleet to open a workspace.",
       el("div", { class: "row", style: "margin:0" },
-        el("button", { class: "act primary", onclick: openChooser }, "Choose a VM"))));
+        el("button", { class: "act primary", onclick: () => go("fleet") }, "Open the fleet"))));
     return;
   }
   try {
@@ -655,11 +784,94 @@ async function render() {
   } catch (error) {
     page.append(panel("This page could not read the host", String(error)));
   }
+  if (state.page === "activity") drawActivity();
 }
 
 function go(key) {
   state.page = key;
   render();
+}
+
+/* ---------- workspaces ---------- */
+async function openVm(name) {
+  const chosen = String(name || "").trim();
+  if (!chosen) return;
+  if (!state.tabs.some((tab) => tab.toLowerCase() === chosen.toLowerCase())) state.tabs.push(chosen);
+  try {
+    state.hello = await api().choose(chosen);
+    state.vm = state.hello.vm;
+  } catch (error) {
+    show("choose", { error: { message: String(error) } });
+    return;
+  }
+  if (state.page === "fleet") state.page = "overview";
+  await render();
+}
+
+async function closeTab(name) {
+  // Hyper-V names are case-insensitive, and the fleet may spell one differently
+  // from the name the tab was opened with.
+  const same = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
+  state.tabs = state.tabs.filter((tab) => !same(tab, name));
+  if (!same(state.vm, name)) {
+    await render();
+    return;
+  }
+  const next = state.tabs[0];
+  if (next) {
+    state.page = "overview";
+    await openVm(next);
+    return;
+  }
+  try {
+    state.hello = await api().choose("");
+  } catch (error) {
+    show("choose", { error: { message: String(error) } });
+  }
+  state.vm = "";
+  state.page = "fleet";
+  await render();
+}
+
+/* ---------- the live feed ---------- */
+let watching = false;
+async function watchEvents() {
+  if (!api() || watching) return;
+  watching = true;
+  try {
+    while (api()) {
+      let failed = false;
+      try {
+        const response = await api().events(state.cursor, 10);
+        if (response && response.ok) {
+          state.connected = true;
+          const arrived = response.ok.events || [];
+          if (arrived.length) {
+            state.events.push(...arrived);
+            // The window is not a log store: keep the tail the page can draw.
+            if (state.events.length > 800) state.events = state.events.slice(-800);
+            state.cursor = Math.max(state.cursor, response.ok.latest_sequence || 0);
+            if (state.page === "activity") drawActivity();
+          } else if ((response.ok.latest_sequence || 0) > state.cursor) {
+            state.cursor = response.ok.latest_sequence;
+          }
+        } else {
+          failed = true;
+        }
+      } catch (error) {
+        failed = true;
+      }
+      if (failed) {
+        // The host is restarting or the pipe is busy; say so and try again
+        // rather than drawing a feed that stopped updating without saying it.
+        state.connected = false;
+        await sleep(2000);
+      }
+      renderConn();
+    }
+  } finally {
+    watching = false;
+  }
 }
 
 async function refreshHello() {
@@ -727,23 +939,22 @@ async function openChooser() {
 async function pick(name) {
   const chosen = String(name || "").trim();
   if (!chosen) return;
-  try {
-    state.hello = await api().choose(chosen);
-    state.vm = state.hello.vm;
-  } catch (error) {
-    show("choose", { error: { message: String(error) } });
-  }
   document.getElementById("chooser").classList.remove("open");
-  render();
+  await openVm(chosen);
 }
 
 /* ---------- boot ---------- */
 async function boot() {
   document.getElementById("chooser-open").addEventListener("click", () => pick(fieldValue("chooser-typed")));
   await refreshHello();
+  // The VM the window started on is already open, so it gets a tab.
+  if (state.vm) {
+    state.tabs = [state.vm];
+    state.page = "overview";
+  }
   await render();
   pollApprovals();
-  if (!state.vm) openChooser();
+  watchEvents();
 }
 
 window.addEventListener("pywebviewready", boot);

@@ -136,10 +136,16 @@ def test_the_queue_holds_several_requests_and_answers_only_the_one_clicked(windo
 
 def test_a_card_whose_request_timed_out_leaves_the_queue(window) -> None:
     """The broker stops waiting on its own clock; the card must follow it."""
+    # The broker registers the id before it asks for a card, and the pruning
+    # timer runs on its own clock — so the card has to be shown while the id
+    # is still pending, or `update()` can prune it before the assertion.
+    window.pending["stale"] = queue.Queue(maxsize=1)
     window._show_approval(_request("stale"))
     window.update()
     assert "stale" in window.approvals.cards
 
+    # What a timeout does: the broker forgets the id and stops listening.
+    window.pending.pop("stale")
     window._prune_approvals()
     window.update()
 

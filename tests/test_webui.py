@@ -41,6 +41,10 @@ class FakeService:
         self.calls.append(("reload_policy", {}))
         return {"levels": {}, "allowlist": []}
 
+    def events_wait(self, after: int = 0, timeout_seconds: float = 15.0) -> dict[str, Any]:
+        self.calls.append(("events_wait", {"after": after, "timeout_seconds": timeout_seconds}))
+        return {"events": [], "latest_sequence": after}
+
     def _secret(self) -> str:
         raise AssertionError("a private method must never be reachable from the page")
 
@@ -85,6 +89,19 @@ def test_hello_says_what_the_window_may_do(tmp_path: Path) -> None:
     assert hello["approvals"] == "listening"
 
 
+def test_the_page_waits_for_events_instead_of_polling_them(tmp_path: Path) -> None:
+    """One held call per burst of news, through the same envelope as any tool."""
+    api = _api(tmp_path)
+    envelope = api.events(7, 5)
+    assert envelope["ok"] == {"events": [], "latest_sequence": 7}
+    assert api.service.calls[-1] == ("events_wait", {"after": 7, "timeout_seconds": 5})
+
+
+def test_hello_badges_every_vm_with_its_own_level(tmp_path: Path) -> None:
+    """A level belongs to the VM, not to the workspace that happens to be open."""
+    assert _api(tmp_path).hello()["levels_by_vm"] == {"lab-vm": "lab"}
+
+
 def test_a_vm_with_no_level_reports_no_capability(tmp_path: Path) -> None:
     hello = _api(tmp_path, level=None).hello()
     assert hello["level"] is None
@@ -96,8 +113,13 @@ def test_choosing_another_vm_changes_what_the_window_asks_about(tmp_path: Path) 
     hello = api.choose("Other-VM")
     assert api.vm_name == "Other-VM"
     assert hello["vm"] == "Other-VM"
-    with pytest.raises(Exception):
-        api.choose("  ")
+
+    # Closing the last workspace leaves no VM open: the page then shows the
+    # fleet instead of keeping a VM the operator just closed.
+    cleared = api.choose("  ")
+    assert api.vm_name == ""
+    assert cleared["vm"] == ""
+    assert not any(cleared["capabilities"].values())
 
 
 def test_setting_a_level_writes_the_operator_s_file_and_reloads(tmp_path: Path) -> None:

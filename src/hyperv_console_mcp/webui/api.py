@@ -71,6 +71,9 @@ class Api:
             "vm": self.vm_name,
             "level": level,
             "levels": list(LEVELS),
+            # The fleet badges every VM with its own level, and a level is a
+            # property of the VM, not of the window's current choice.
+            "levels_by_vm": dict(self.settings.levels),
             "profile": self.settings.profile,
             "elevated": is_elevated(),
             "shared_service": self.settings.shared_service,
@@ -86,12 +89,24 @@ class Api:
         """The VMs Hyper-V reports, so the header can offer a choice."""
         return self.call("list_vms")
 
+    def events(self, after: int = 0, timeout: float = 10) -> dict[str, Any]:
+        """Wait for the next events, so the feed is live instead of polled.
+
+        The page calls this in a loop with the sequence it has already shown;
+        the service holds the call until something new arrives or the timeout
+        expires. Asking again after a timeout is not an error — an empty answer
+        means "nothing happened", which is the truth.
+        """
+        return self.call("events_wait", {"after": after, "timeout_seconds": timeout})
+
     def choose(self, name: str) -> dict[str, Any]:
-        """Point the window at another VM, without reopening it."""
-        chosen = str(name or "").strip()
-        if not chosen:
-            raise ValidationError("A VM name is required.")
-        self.vm_name = chosen
+        """Point the window at another VM, without reopening it.
+
+        An empty name means "no VM is open", which is what closing the last
+        workspace leaves behind: the page then shows the fleet and the per-VM
+        pages are hidden, rather than keeping a VM the operator just closed.
+        """
+        self.vm_name = str(name or "").strip()
         return self.hello()
 
     # -- the service ------------------------------------------------------

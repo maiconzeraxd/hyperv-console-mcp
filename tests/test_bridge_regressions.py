@@ -572,7 +572,7 @@ function Get-VM {
         State = [Microsoft.HyperV.PowerShell.VMState]::Running
         Status = 'Operating normally'; Generation = 2; Version = [version]'10.0'
         ProcessorCount = 2; MemoryStartup = [Int64]2147483648
-        MemoryAssigned = [Int64]2147483648; Uptime = [timespan]::FromMinutes(5)
+        CPUUsage = 3; MemoryAssigned = [Int64]2147483648; Uptime = [timespan]::FromMinutes(5)
         CheckpointType = 'Production'; AutomaticCheckpointsEnabled = $true
         AutomaticStartAction = 'StartIfRunning'; AutomaticStopAction = 'Save'
     }

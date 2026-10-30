@@ -1469,6 +1469,36 @@ rendered from a live VM — the capture path needs an elevated session.
   against a real dump, and bugcheck-versus-hang with no debugger — because each needs a guest
   reboot or a payload, and running a payload is the operator's separate decision.
 
+### 2026-10-29 — dashboard wave 1: the fleet, a live feed, and workspaces
+
+- **The page no longer polls for state the service can push.** `events_wait` is a service
+  method now: it holds the caller on the event bus's own condition until something is
+  published or the timeout expires, so the window is told when there is news instead of
+  asking every 800 ms. The hold is clamped to 30 seconds, because a page that asks for an
+  hour would park a thread for an hour.
+- **The live feed does not take the worker lock.** `events_wait` answers from the bus alone,
+  and the host now dispatches `event_snapshot`/`events_wait` through `dispatch_request`
+  without `SERVICE_LOCK`. Taking it would stop every other client for the length of the wait,
+  which is worse than no live feed.
+- **`Convert-Vm` reports `cpu_usage_percent`** — the percentage Hyper-V itself sampled at
+  `Get-VM`, shown as-is rather than computed from a second read.
+- **The window has a fleet page and workspace tabs.** Every VM Hyper-V reported is listed with
+  its state, its own level badge, CPU, memory and its power actions; opening one adds a tab
+  and the per-VM pages appear. Closing the last tab clears the VM (`choose("")`), so the page
+  falls back to the fleet instead of keeping a VM the operator just closed.
+- **A connection indicator** says whether the last `events_wait` reached the service; a failed
+  one retries after two seconds rather than drawing a feed that stopped updating silently.
+- Tests: the wait returns at once when nothing happened and returns what was published while
+  it waited; a non-sequence cursor is refused; the 30 s clamp and the zero floor are asserted
+  against the bus; `dispatch_request` enters the lock for `list_vms` and never for
+  `events_wait`; `hello` carries `levels_by_vm`; the page's `events` call crosses the envelope.
+- Two tests were wrong about the window rather than about the code: the approval-pruning test
+  showed a card whose id the broker had never registered (the 100 ms pruner could drop it
+  before the assertion), and the chooser test still expected an empty name to be an error.
+- Still open: waves 2–5 (interactive console, checkpoints, file manager, lab/debugger, matrix),
+  the `docs/DASHBOARD.md` rewrite, and the console cadence measurements for
+  `docs/PERFORMANCE.md`.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,

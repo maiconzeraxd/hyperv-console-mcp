@@ -94,6 +94,9 @@ function Convert-Vm {
         generation = [int]$Vm.Generation
         version = $Vm.Version.ToString()
         processor_count = [int]$Vm.ProcessorCount
+        # The percentage Hyper-V itself reports, sampled when Get-VM was called.
+        # The fleet shows it as-is rather than computing one from a second read.
+        cpu_usage_percent = [int]$Vm.CPUUsage
         memory_startup_bytes = [Int64]$Vm.MemoryStartup
         memory_assigned_bytes = [Int64]$Vm.MemoryAssigned
         uptime_seconds = [Math]::Round($Vm.Uptime.TotalSeconds, 3)

@@ -43,6 +43,26 @@ CONNECT_TIMEOUT_MS = 2_000
 # managers are not built for two callers interleaving a checkpoint with a
 # restore, and the audit trail reads better with one line per operation.
 SERVICE_LOCK = threading.Lock()
+# The methods that answer from the event bus alone. They are dispatched without
+# the lock above: `events_wait` blocks by design, and a live feed that stops
+# every other client for its duration is worse than no live feed.
+LOCK_FREE = frozenset({"event_snapshot", "events_wait"})
+
+
+def dispatch_request(
+    service: Any, request: Mapping[str, Any], lock: threading.Lock
+) -> dict[str, Any]:
+    """Dispatch one request, taking the worker lock unless the method is bus-only.
+
+    The lock serializes the backend worker, which is a single persistent
+    PowerShell process. A method that only reads the event bus touches no
+    worker, and `events_wait` holds its caller for up to 30 seconds by design —
+    taking the lock for that would stop every other client for the same time.
+    """
+    if request.get("method") in LOCK_FREE:
+        return dispatch(service, request)
+    with lock:
+        return dispatch(service, request)
 
 
 def pipe_name(suffix: str = "") -> str:
@@ -174,8 +194,7 @@ class ServiceHost:
                     request = _receive(handle)
                     if not isinstance(request, dict):
                         raise ValueError("A service request must be an object.")
-                    with self.lock:
-                        response = dispatch(self.service, request)
+                    response = dispatch_request(self.service, request, self.lock)
                     _send(handle, response)
                 except (OSError, ValueError, json.JSONDecodeError):
                     # A malformed or abandoned request must not end this instance.
@@ -373,6 +392,7 @@ __all__ = [
     "MAX_MESSAGE_BYTES",
     "ServiceClient",
     "ServiceHost",
+    "dispatch_request",
     "ensure_running",
     "open_service",
     "pipe_name",

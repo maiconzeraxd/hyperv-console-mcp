@@ -8,6 +8,7 @@ Windows pipe is a byte channel around exactly these functions.
 from __future__ import annotations
 
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -105,6 +106,89 @@ def test_the_event_snapshot_crosses_the_boundary() -> None:
     snapshot = proxy().event_snapshot()
     assert isinstance(snapshot["events"], list)
     assert snapshot["latest_sequence"] == EVENTS.snapshot()["latest_sequence"]
+
+
+def test_events_wait_answers_at_once_when_nothing_happened() -> None:
+    """An empty answer means "nothing happened", which is not an error."""
+    from hyperv_console_mcp.events import EVENTS
+
+    before = EVENTS.snapshot()["latest_sequence"]
+    result = proxy().events_wait(before, 0.05)
+    assert result["events"] == []
+    assert result["latest_sequence"] == before
+
+
+def test_events_wait_returns_what_was_published_while_it_waited() -> None:
+    """The point of the call: the feed is told, instead of asking again."""
+    from hyperv_console_mcp.events import EVENTS
+
+    before = EVENTS.snapshot()["latest_sequence"]
+    timer = threading.Timer(
+        0.05, lambda: EVENTS.publish("feed-probe", "started", correlation_id="feed-probe")
+    )
+    timer.start()
+    try:
+        result = proxy().events_wait(before, 5)
+    finally:
+        timer.cancel()
+    assert [event["operation"] for event in result["events"]] == ["feed-probe"]
+
+
+@pytest.mark.parametrize("after", [-1, "0", 1.5, True])
+def test_events_wait_refuses_a_cursor_that_is_not_a_sequence(after: Any) -> None:
+    with pytest.raises(ValidationError):
+        proxy().events_wait(after, 0.1)
+
+
+def test_events_wait_caps_the_hold_so_a_page_cannot_park_a_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hyperv_console_mcp.events import EVENTS
+
+    seen: list[float] = []
+
+    def wait(after: int, timeout: float = 20) -> dict[str, Any]:
+        seen.append(timeout)
+        return {"events": [], "latest_sequence": after}
+
+    monkeypatch.setattr(EVENTS, "wait", wait)
+    proxy().events_wait(0, 3600)
+    proxy().events_wait(0, -5)
+    assert seen == [30.0, 0.0]
+
+
+class RecordingLock:
+    """A lock that only records being entered, so the test cannot hang."""
+
+    def __init__(self) -> None:
+        self.entries = 0
+
+    def __enter__(self) -> None:
+        self.entries += 1
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+
+class BusOnly:
+    def events_wait(self, after: int = 0, timeout_seconds: float = 15.0) -> dict[str, Any]:
+        return {"events": [], "latest_sequence": after}
+
+    def list_vms(self) -> dict[str, Any]:
+        return {"vms": []}
+
+
+def test_the_live_feed_never_takes_the_worker_lock() -> None:
+    """A 30-second wait must not stop every other client for 30 seconds."""
+    from hyperv_console_mcp.service.host import dispatch_request
+
+    lock = RecordingLock()
+    result = dispatch_request(BusOnly(), {"method": "events_wait", "kwargs": {"after": 3}}, lock)
+    assert result == {"ok": {"events": [], "latest_sequence": 3}}
+    assert lock.entries == 0
+
+    dispatch_request(BusOnly(), {"method": "list_vms", "kwargs": {}}, lock)
+    assert lock.entries == 1
 
 
 def test_an_error_keeps_its_code_and_fix() -> None:
