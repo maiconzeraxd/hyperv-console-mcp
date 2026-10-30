@@ -1584,7 +1584,14 @@ rendered from a live VM — the capture path needs an elevated session.
   `progress` events the transfer already publishes, so it cannot drift from the Activity page.
 - Tests: the page names only methods `HyperVService` has, checked by `tests/test_webui_contract.py`
   for the eleven file-manager names as for every other button.
-- Still open: waves 4–5, a light theme for the window, and live numbers for the console cadence.
+- **Live, halfway.** `tests/live_files.py` ran against `NORTH-Test` from this shell: `file_roots`,
+  `host_make_dir` and a recursive `host_delete` all succeeded, so the host half is validated on a
+  real machine, and a `guest_delete` with the wrong `confirm_path` returned `not_authorized` before
+  reaching the guest. The guest calls came back `access_denied`: the shell was not elevated, which
+  is the shell and not the service. The guest half — mkdir, upload with its digest, listing,
+  download, rename and recursive delete — still needs one run from an elevated prompt.
+- Still open: waves 4–5, a light theme for the window, live numbers for the console cadence, and
+  that elevated run of `tests/live_files.py`.
 
 ## Phase 4 report
 
