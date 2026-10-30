@@ -75,6 +75,7 @@ Session:
 | `kd_breakpoint` | `action="set"` for `bp`/`bu` (`deferred=true`), `action="clear"` for `bc *`, `action="on_load"` for `sxe ld:<module>` / `sxd ld:<module>` |
 | `kd_inspect(what="stack")` | `k <depth>` |
 | `kd_inspect(what="modules")` | `lm` |
+| `kd_inspect(what="symbols", module=…)` | `!lmi <module>`, falling back to `lm m <module>`: whether its `.pdb` resolved |
 | `kd_inspect(what="analyze")` | `!analyze -v`, parsed |
 | `kd_inspect(what="dump", dump_path=…)` | opens a `.dmp` under the evidence root and runs `!analyze -v` |
 

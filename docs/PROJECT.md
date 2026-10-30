@@ -1996,6 +1996,61 @@ widening a DACL.
   written to a real profile from the window. What is proved without a VM is the reading and the
   refusal paths.
 
+### 2026-10-30 — v0.3 dashboard closing round: parity in the other direction, and a page a keyboard can drive
+
+The waves were done; what the roadmap's global definition of done still owed was the properties
+that no single wave produces — parity checked in both directions, a page testable without a
+WebView, and a window that survives a light theme and a keyboard.
+
+- **Parity was only ever checked one way.** `test_webui_contract.py` proved every name the page
+  calls exists on `HyperVService`; nothing proved the converse, that an operation the operator can
+  click is one the AI can ask for. `mcp_service_methods()` now AST-walks `server.py` for
+  `service.<attr>` and the test fails if a page operation is in neither that set nor a batch. It
+  found a real gap on the first run: the receipts table asks `kd_symbols` for the per-driver badge
+  and no tool asked it, so `kd_inspect` grew `what="symbols"` with the `module` it is about rather
+  than a tenth kd tool. A second test reads the `ConsoleAction` discriminator's literals to prove
+  the five per-action console calls really are the actions `console_batch` takes, so the mapping is
+  checked rather than asserted in a comment.
+- **A fake answers the whole contract.** `tests/test_webui_fake_service.py` gives `Api` a service
+  that answers any public name with the name and the arguments it was given, and drives every name
+  the page calls through it. The interesting half is the refusals: an unknown name and a wrong
+  argument set are `invalid_argument` answers that name the method, because the page draws
+  refusals and a traceback would be a blank window, and a private name (`_approve`) never crosses
+  the bridge at all.
+- **Two palettes, one set of names.** The colours moved out of the rules and into a dark `:root`
+  block plus a `:root[data-theme="light"]` block that redefines the same names. `test_webui_page.py`
+  compares the two sets in both directions and scans the rest of the stylesheet for a hex literal —
+  the first version of that scan failed on ten colours I had written straight into the new button
+  rules, which is exactly the rot it exists to catch. The only allowed literal is `#000`, the
+  guest's own screen, because that is a picture of a display and not a surface of this window.
+  `applyTheme()` reads a saved choice from the window's `localStorage` and otherwise follows
+  `prefers-color-scheme`, listening for the system changing under it; `color-scheme` is set per
+  theme so scrollbars and form controls follow. The choice never reaches the service.
+- **The keyboard reaches every control.** Tabs became two real buttons (the name opens, `×` closes,
+  both labelled), the nav marks the current page with `aria-current`, and a receipt row became a
+  `role="button"` with a tab stop and an Enter/Space handler — a table row that responds to a click
+  had otherwise been a control only a pointer could reach. The console image is `role="application"`
+  and keeps a visible `:focus-visible` outline it had been removing. The test that holds this is a
+  scan for `el("div", {… onclick …})`: an element that is not an interactive tag and does not
+  declare a role, a tab stop and a key handler together is a pointer-only control. It failed on
+  `img` and `tr`, which is how those two got promoted.
+- **The layout stops stretching and stops overflowing.** `.grid` gained `align-items: start` and
+  the transport card a two-row span, which closed the hole the grid had been leaving under the
+  Overview's short cards; the Fleet table moved to a full-width card because its power buttons
+  wrapped in a third of the row; wide tables scroll inside their own card (`scroller()`) rather
+  than pushing the page sideways. Below 1100px it is one column.
+- Tests: `tests/test_webui_page.py` (nine — the two palettes, no colour outside them,
+  `color-scheme` per theme, the system-following default, visible focus, the narrow layout, the
+  pointer-only scan, the tabs, the live regions); `tests/test_webui_fake_service.py` (five);
+  `tests/test_webui_contract.py` (three, the parity ones); `tests/test_server.py` for
+  `kd_inspect`'s new action and its required `module`.
+- Gate: 1098 passed / 1 skipped, ruff clean, `node --check` on the page's script clean, smoke
+  30 / 45 / 67.
+- Not validated live: the page has been exercised with a stub bridge in Edge headless and with a
+  fake service in pytest, never in WebView2 against a real service; the light theme and the
+  keyboard paths have been rendered and scanned but not used by a person. `kd_inspect(what="symbols")`
+  has not been asked of a real kd session.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three

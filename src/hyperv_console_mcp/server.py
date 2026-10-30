@@ -1024,21 +1024,28 @@ def create_server(
         "kd_inspect", annotations=READ_ONLY,
         description="Read a debug target without changing it. what='stack' returns the call stack (k) "
         "of the broken target, depth frames deep; 'modules' lists loaded modules with base addresses "
-        "and symbols (lm); 'analyze' runs !analyze -v on the attached session and returns the parsed "
+        "and symbols (lm); 'symbols' answers for one module whether kd resolved its names and from "
+        "which PDB (!lmi, falling back to lm m), so MyDriver!Crash and MyDriver+0x1a are told apart; "
+        "'analyze' runs !analyze -v on the attached session and returns the parsed "
         "bugcheck code, parameters, blamed driver, bucket id and top frames; 'dump' analyzes a host "
         ".dmp under the evidence root with kd -z instead of the live session.",
     )
     async def kd_inspect(
         vm_name: str,
-        what: Literal["stack", "modules", "analyze", "dump"] = "analyze",
+        what: Literal["stack", "modules", "symbols", "analyze", "dump"] = "analyze",
         depth: int = 20,
         dump_path: str | None = None,
         commands: list[str] | None = None,
+        module: str | None = None,
     ) -> dict[str, Any]:
         if what == "stack":
             return await _invoke(service.kd_stack, vm_name, depth)
         if what == "modules":
             return await _invoke(service.kd_modules, vm_name)
+        if what == "symbols":
+            if not module:
+                raise ToolError("validation_error: what='symbols' needs module.")
+            return await _invoke(service.kd_symbols, vm_name, module)
         if what == "dump":
             if not dump_path:
                 raise ToolError("validation_error: what='dump' needs dump_path.")

@@ -42,6 +42,20 @@ The **fleet** is the home page: every VM Hyper-V reported, its state, the level 
 
 Closing the window does not stop a VM or guarantee that an already-running guest command was cancelled, and changing pages does not cancel a background operation.
 
+## Two palettes, one set of names
+
+Every colour is a variable on `:root`, and the light theme is a second block that redefines the same names — not a second stylesheet. That is a rule with a test behind it (`tests/test_webui_page.py`): a name the light block forgets is a colour that stays dark on a light page, and a hex written straight into a rule is a colour the light theme can never reach. The only literal allowed outside the two blocks is `#000` for the guest's own screen, because that is a picture of a display rather than a surface of this window.
+
+The page follows the system until it is told otherwise. **theme** at the foot of the sidebar switches and remembers the choice in the window's own `localStorage`; it never reaches the service, because how the window looks is not a fact about the host. `color-scheme` is set per theme too, so scrollbars and form controls follow instead of staying dark on a light page.
+
+## The keyboard
+
+Every control the script builds is reachable without a pointer. Tabs are two real buttons — the name opens and **×** closes, both with `aria-label` — the nav marks the current page with `aria-current`, and a receipt row is a `role="button"` with a tab stop and an Enter/Space handler, so a table that responds to a click does not become a control only a mouse can reach. The console image is `role="application"` and takes focus, because typing into the guest is what it is for. Focus is drawn everywhere with `:focus-visible`, including on the console, which otherwise removes the browser outline so the image does not shift.
+
+`tests/test_webui_page.py` scans the script for `el("div", {… onclick …})` and reports any element that is not an interactive tag and does not declare a role, a tab stop and a key handler together. That is the check that stops the page rotting into pointer-only as it grows.
+
+A narrow window is a layout, not a scrollbar: below 1100px the grid collapses to one column and cards holding wide tables scroll inside themselves rather than pushing the page sideways. Sizes are in `rem` against one `font-size` on `:root`, so the page follows the window's own scaling rather than being laid out against a hard-coded pixel width.
+
 ## The first run
 
 A window on a host where nothing has been configured can list every VM and use none of them, because a VM becomes reachable only when it has a level. The wizard closes that gap in three questions: pick the VM, pick the level, type the guest password once. It opens by itself while no VM is reachable, and never again once one is — unless the operator asks for it from the fleet (**Set up another VM**), which is how a second VM is added.
@@ -61,7 +75,9 @@ The human is a trusted actor, and three things are only theirs:
 - **Name the baseline checkpoint.** The protected checkpoint is recorded in the same access file. `delete_checkpoint` refuses it for every actor and `create_checkpoint` refuses to reuse its name, so the window and the AI are held to the same rule.
 - **Answer an approval.** See below.
 
-Everything else the window offers, the AI can do too, through the tool of the same name. That parity is enforced by a test: `tests/test_webui_contract.py` parses the page for the method names it calls and fails if one is missing from `HyperVService` or `Api`.
+Everything else the window offers, the AI can do too, through the tool of the same name. That parity is enforced in both directions by `tests/test_webui_contract.py`: it parses the page for the method names it calls and fails if one is missing from `HyperVService` or `Api`, and it reads `server.py` for every `service.<method>` an MCP tool reaches and fails if an operation the window offers is in neither that set nor a batch the AI sends as one call. The second direction is the one that catches drift — a method the page grew and no tool ever wrapped. It found one: the window asked `kd_symbols` for the per-driver badge in the receipts table, and no tool asked it, so `kd_inspect` grew `what="symbols"` with the module it is about rather than a tenth kd tool.
+
+The five per-action console calls are the one exception, and it is checked rather than asserted: `console_click`, `console_mouse_move`, `console_press_keys`, `console_type_text` and `console_ctrl_alt_delete` are what `console_batch` carries as its typed actions, and the test reads the discriminator's literals to prove the mapping still names real actions. A click is one call for a person and part of one approval for the AI, and both end at the same `console_input`.
 
 ## The console is an image, not video
 
@@ -127,6 +143,8 @@ The dashboard was delivered in waves, each one gated by the full test suite befo
 | 5 | Multi-VM matrix with the side-by-side comparison, console recording attached to the receipt, the per-VM transport light and switch, the symbols badge and receipt export. |
 
 Each wave was closed with the whole suite green — pytest, ruff, the PowerShell parse, `Invoke-ScriptAnalyzer`, the stdio smoke test and `node --check` on the page's script — before it was committed.
+
+The round that closed the roadmap's global definition of done added no page. It added the second palette and the keyboard paths described above, the parity check in the direction that catches drift, and `tests/test_webui_fake_service.py`: a fake that answers every name the page calls with the name and the arguments it was given, so the page's whole contract is exercised with no WebView, no Hyper-V and no guest. What that fake proves is that the list of names is answerable and that a name the service does not have, or one called with the wrong arguments, comes back as a refusal the page can draw instead of a traceback that blanks the window. What it cannot prove is that the real service returns the shapes the page draws — that is what the service's own tests are for, and what a run against a real host is for.
 
 ## Cross-process activity
 

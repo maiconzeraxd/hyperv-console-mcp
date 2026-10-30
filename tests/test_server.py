@@ -112,8 +112,11 @@ def test_enabling_every_toolset_exposes_the_whole_surface() -> None:
     for name in ("kd_status", "kd_wait_event", "kd_inspect", "debug_status"):
         assert tools[name].annotations.read_only_hint is True, name
     assert set(tools["kd_inspect"].input_schema["properties"]["what"]["enum"]) == {
-        "stack", "modules", "analyze", "dump"
+        "stack", "modules", "symbols", "analyze", "dump"
     }
+    # The window shows a per-driver symbol badge, so the same question has to be
+    # askable from here; `symbols` is the only action that needs a module name.
+    assert "module" in tools["kd_inspect"].input_schema["properties"]
     assert set(tools["kd_attach"].input_schema["properties"]["transport"]["enum"]) == {
         "serial", "kdnet"
     }
@@ -283,6 +286,7 @@ def test_consolidated_tools_dispatch_to_the_right_operation() -> None:
             "part of action='prepare'",
         ),
         ("kd_inspect", {"vm_name": "NORTH-Test", "what": "dump"}, "needs dump_path"),
+        ("kd_inspect", {"vm_name": "NORTH-Test", "what": "symbols"}, "needs module"),
     ],
 )
 def test_a_consolidated_action_requires_its_own_argument(

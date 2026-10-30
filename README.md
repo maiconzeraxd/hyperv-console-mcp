@@ -162,7 +162,9 @@ ordered list of `text`, `keys`, `key_state`, `mouse_buttons`, `move`, `click`, `
 `guest_report` takes `status`/`processes`/`services`/`events`/`transport`; `guest_credential` takes
 `rotate`/`forget`; `lab_receipts` takes `list`/`get`/`compare`/`export`; `kd_execution` takes
 `break`/`go`; `kd_breakpoint` takes
-`set`/`clear`/`on_load`; `kd_inspect` takes `stack`/`modules`/`analyze`/`dump`; and
+`set`/`clear`/`on_load`; `kd_inspect` takes `stack`/`modules`/`symbols`/`analyze`/`dump`
+(`symbols` takes the `module` it is about, the same question the window's per-driver badge
+asks); and
 `debug_setup` crosses `transport` (`serial`/`kdnet`) with `action` (`prepare`/`guest`/
 `deprovision`). `vm_get(wait_for=[...])` absorbs the old `vm_wait`. Read-only tools stay
 separate from mutating ones, so a listing never asks for approval.
@@ -185,7 +187,7 @@ Start the native dashboard with `python -I scripts\run_dashboard.py` or, after i
 
 `hyperv-tray` (`pip install hyperv-console-mcp[tray]`) puts the window in the notification area: **Open** starts it, **Status** reports the host, **Quit** closes the icon. Its tooltip carries the live line — `3 VMs · 2 running · lab profile`, or why the service is not answering — so a host that stopped answering is visible without opening anything. It is a client of the same service, keeps no state of its own, and names no VM on the tooltip.
 
-The window is a WebView2 page (`pip install hyperv-console-mcp[ui]`, or pywebview already present). It is loaded from a single HTML file with every asset inline, so it starts no local HTTP server and opens no port. On a host without the WebView2 runtime or without pywebview, `hyperv-dashboard` opens the tkinter window instead of failing; `--classic` asks for that window on any host.
+The window is a WebView2 page (`pip install hyperv-console-mcp[ui]`, or pywebview already present). It is loaded from a single HTML file with every asset inline, so it starts no local HTTP server and opens no port. It has a light and a dark theme — following the system until the operator switches it, with the choice kept in the window's own storage and never sent to the service — and every control is reachable by keyboard, including the workspace tabs, the console and the receipt rows. On a host without the WebView2 runtime or without pywebview, `hyperv-dashboard` opens the tkinter window instead of failing; `--classic` asks for that window on any host.
 
 A host where no VM has a level yet opens on a three-question wizard — which VM, what the AI may do with it, and the guest password once — instead of sending a first-time operator to a config file. It writes the same access file the Overview page writes and stores the password through the service, so it grants nothing extra; it stops opening by itself as soon as one VM has a level, and **Set up another VM** on the fleet brings it back. See [the dashboard guide](docs/DASHBOARD.md#the-first-run).
 

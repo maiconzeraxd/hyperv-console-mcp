@@ -5,22 +5,73 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hyper-V Control Center</title>
 <style>
+  /* One palette in two sets of values. The page is built by the script, so the
+     script is also what decides which set applies: it reads the operator's saved
+     choice, falls back to the system's preference, and sets data-theme. A page
+     with no script has nothing to paint either way, so the choice does not need
+     a CSS-only fallback — and the mapping below is written once instead of twice. */
   :root {
     color-scheme: dark;
     --bg: #0b1120;
     --panel: #111b2e;
     --surface: #17243a;
+    --hover: #243955;
     --border: #273851;
     --text: #e5edf8;
     --muted: #8fa5bf;
     --accent: #6ee7b7;
+    --accent-border: #2f6b57;
     --blue: #60a5fa;
+    --blue-border: #2b4a72;
     --warning: #fbbf24;
     --error: #fb7185;
+    --banner-bg: #3a2a10;
+    --banner-border: #6b4b12;
+    --banner-text: #ffe6b0;
+    --primary: #175c4b;
+    --primary-text: #d9fff1;
+    --primary-hover: #207862;
+    --danger: #4a1d28;
+    --danger-text: #ffd8de;
+    --danger-hover: #632434;
+    --error-border: #6b2f2f;
+    --warning-border: #6b4b12;
+    --overlay: #0e1626;
     --radius: 10px;
     --gap: 14px;
     font-size: 15px;
   }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f4f6fb;
+    --panel: #ffffff;
+    --surface: #e9eef7;
+    --hover: #dbe4f2;
+    --border: #ccd6e6;
+    --text: #131c2b;
+    --muted: #51607a;
+    --accent: #0b6b4f;
+    --accent-border: #9fd6c2;
+    --blue: #1c56a8;
+    --blue-border: #a9c3e6;
+    --warning: #8a5a00;
+    --error: #b3273b;
+    --banner-bg: #fff4d6;
+    --banner-border: #e0b854;
+    --banner-text: #6b4a00;
+    --primary: #0f6b53;
+    --primary-text: #ffffff;
+    --primary-hover: #0d5b47;
+    --danger: #a3243a;
+    --danger-text: #ffffff;
+    --danger-hover: #8d1e31;
+    --error-border: #e3b3bb;
+    --warning-border: #e0b854;
+    --overlay: #ffffff;
+  }
+  /* Keyboard focus is always visible: the console swallows the pointer, and a
+     page driven from a keyboard must say where the keyboard is. */
+  :focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
   body {
@@ -66,16 +117,26 @@
   nav button:hover { background: var(--surface); color: var(--text); }
   nav button.active { background: var(--surface); color: var(--text); font-weight: 600; }
   nav .caps { margin-top: auto; color: var(--muted); font-size: .78rem; white-space: pre-line; padding-top: 18px; }
+  /* The theme switch is the window's own preference, not a service call: it
+     reads and writes one localStorage key and nothing else. */
+  nav .theme { margin-top: 10px; width: auto; padding: 6px 10px; border: 1px solid var(--border); font-size: .76rem; }
   /* ---------- workspace tabs ---------- */
   nav #tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 8px; }
   nav #tabs .tab {
-    display: flex; align-items: center; gap: 6px; max-width: 100%;
-    padding: 4px 8px; border-radius: 7px; background: var(--surface);
-    color: var(--muted); font-size: .78rem; cursor: pointer; border: 1px solid transparent;
+    display: flex; align-items: center; gap: 2px; max-width: 100%;
+    padding: 2px 4px 2px 2px; border-radius: 7px; background: var(--surface);
+    color: var(--muted); font-size: .78rem; border: 1px solid transparent;
   }
-  nav #tabs .tab span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Both halves are buttons, because a tab is opened and closed from the
+     keyboard as well as with the pointer. */
+  nav #tabs .tab button {
+    width: auto; padding: 3px 6px; border: 0; background: none; color: inherit;
+    font: inherit; text-align: left; border-radius: 5px;
+  }
+  nav #tabs .tab button.tab-open { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  nav #tabs .tab button:hover { background: var(--hover); color: var(--text); }
   nav #tabs .tab.active { color: var(--text); border-color: var(--border); }
-  nav #tabs .tab .x { opacity: .55; padding: 0 2px; }
+  nav #tabs .tab .x { opacity: .55; padding: 3px 5px; }
   nav #tabs .tab .x:hover { opacity: 1; color: var(--error); }
   nav .conn { margin-top: 12px; font-size: .74rem; color: var(--muted); display: flex; align-items: center; gap: 6px; }
   nav .conn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
@@ -85,14 +146,27 @@
   table.events button.link { background: none; border: 0; color: var(--blue); font: inherit; cursor: pointer; padding: 0; text-align: left; }
   table.events button.link:hover { text-decoration: underline; }
   table.events .badge { font-size: .74rem; padding: 1px 7px; border-radius: 999px; background: var(--surface); color: var(--muted); border: 1px solid var(--border); }
-  table.events .badge.lab { color: var(--accent); border-color: #2f6b57; }
-  table.events .badge.control { color: var(--blue); border-color: #2b4a72; }
+  table.events .badge.lab { color: var(--accent); border-color: var(--accent-border); }
+  table.events .badge.control { color: var(--blue); border-color: var(--blue-border); }
   /* ---------- content ---------- */
   main { padding: 24px 26px; overflow-y: auto; min-width: 0; }
   header.page { margin-bottom: 18px; }
   header.page h1 { margin: 0 0 4px; font-size: 1.5rem; }
   header.page p { margin: 0; color: var(--muted); }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: var(--gap); }
+  /* `start` so a short card is short: a row of cards does not make the one with
+     three facts as tall as the one with a table. */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: var(--gap); align-items: start; }
+  /* A card holding a table of columns does not fit in a third of the window:
+     it takes the whole row, and a table too wide for it scrolls inside its own
+     box rather than pushing the page sideways. The wrapper is what scrolls —
+     `display: block` on the table itself would shrink it to its content. */
+  .grid > .card.wide { grid-column: 1 / -1; min-width: 0; }
+  /* A card that is a tall list of readings takes the second row with it, so the
+     row of short cards beside it is not followed by a hole. Only when the grid
+     has the columns to spare: stacked, spanning two rows means nothing. */
+  @media (min-width: 1101px) { .grid > .card.tall { grid-row: span 2; } }
+  .scroll-x { overflow-x: auto; max-width: 100%; }
+  .scroll-x table.events { white-space: nowrap; }
   .card {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -124,11 +198,11 @@
     font-size: .86rem;
     cursor: pointer;
   }
-  button.act:hover { background: #243955; }
-  button.act.primary { background: #175c4b; color: #d9fff1; font-weight: 600; }
-  button.act.primary:hover { background: #207862; }
-  button.act.danger { background: #4a1d28; color: #ffd8de; }
-  button.act.danger:hover { background: #632434; }
+  button.act:hover { background: var(--hover); }
+  button.act.primary { background: var(--primary); color: var(--primary-text); font-weight: 600; }
+  button.act.primary:hover { background: var(--primary-hover); }
+  button.act.danger { background: var(--danger); color: var(--danger-text); }
+  button.act.danger:hover { background: var(--danger-hover); }
   button.act:disabled { opacity: .5; cursor: not-allowed; }
   .facts { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: .86rem; }
   .facts dt { color: var(--muted); }
@@ -149,6 +223,9 @@
     background: #000; cursor: crosshair; outline: none;
   }
   .screen:focus { border-color: var(--accent); }
+  /* The image removes the ring so a click does not leave one behind; the
+     keyboard gets it back, because the console is a place you type into. */
+  .screen:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .screen-note {
     position: absolute; right: 8px; bottom: 8px; font-size: .72rem; color: var(--text);
     background: rgba(0, 0, 0, .6); padding: 2px 8px; border-radius: 999px; pointer-events: none;
@@ -158,7 +235,7 @@
   .checkpoint-row .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .checkpoint-row .when, .checkpoint-row .id { color: var(--muted); font-size: .72rem; }
   .checkpoint-row.baseline { background: rgba(70, 160, 120, .10); }
-  .checkpoint-row .base { font-size: .72rem; color: var(--accent); border: 1px solid #2f6b57; border-radius: 999px; padding: 0 7px; white-space: nowrap; }
+  .checkpoint-row .base { font-size: .72rem; color: var(--accent); border: 1px solid var(--accent-border); border-radius: 999px; padding: 0 7px; white-space: nowrap; }
   .checkpoint-row .branch { color: var(--muted); font-family: ui-monospace, Consolas, monospace; }
   .confirm { font-size: .78rem; color: var(--warning); }
   table.events { width: 100%; border-collapse: collapse; font-size: .82rem; }
@@ -187,9 +264,9 @@
   .triage-code { margin: 0 0 10px; font-family: Consolas, "Cascadia Mono", monospace; font-size: 1.4rem; color: var(--error); }
   .triage-code small { margin-left: 10px; font-size: .78rem; color: var(--muted); }
   .outcome { border: 1px solid var(--border); border-radius: 999px; padding: 0 7px; font-size: .72rem; white-space: nowrap; }
-  .outcome.ok { color: var(--accent); border-color: #2f6b57; }
-  .outcome.bugcheck, .outcome.failed, .outcome.hang, .outcome.timeout { color: var(--error); border-color: #6b2f2f; }
-  .outcome.not_verified { color: var(--warning); border-color: #6b4b12; }
+  .outcome.ok { color: var(--accent); border-color: var(--accent-border); }
+  .outcome.bugcheck, .outcome.failed, .outcome.hang, .outcome.timeout { color: var(--error); border-color: var(--error-border); }
+  .outcome.not_verified { color: var(--warning); border-color: var(--warning-border); }
   table.events tr.picked { background: rgba(70, 160, 120, .10); }
   table.events.changed td { font-family: Consolas, "Cascadia Mono", monospace; font-size: .78rem; vertical-align: top; }
   table.events.changed td:first-child { color: var(--muted); font-family: inherit; }
@@ -219,7 +296,7 @@
     border-left: 1px solid var(--border);
     overflow-y: auto;
     display: none;
-    background: #0e1626;
+    background: var(--overlay);
   }
   aside.approvals.open { display: block; }
   aside.approvals h2 { margin: 0 0 4px; font-size: 1rem; color: var(--warning); }
@@ -246,7 +323,7 @@
   #wizard ol li { display: flex; gap: 10px; align-items: baseline; font-size: .84rem; color: var(--muted); }
   #wizard ol li .n { flex: 0 0 22px; height: 22px; border-radius: 50%; border: 1px solid var(--border); display: grid; place-items: center; font-size: .74rem; }
   #wizard ol li.done { color: var(--text); }
-  #wizard ol li.done .n { background: #175c4b; border-color: #2f6b57; color: #d9fff1; }
+  #wizard ol li.done .n { background: var(--primary); border-color: var(--accent-border); color: var(--primary-text); }
   #wizard ol li.current { color: var(--text); }
   #wizard ol li.current .n { border-color: var(--accent); color: var(--accent); }
   #wizard ol li .hint { display: block; color: var(--muted); font-size: .78rem; }
@@ -257,7 +334,7 @@
   #wizard .step-note { margin: 0 0 12px; font-size: .82rem; color: var(--warning); }
   #wizard .step-note.ok { color: var(--accent); }
   #wizard .step-note.bad { color: var(--error); }
-  .banner { background: #3a2a10; border: 1px solid #6b4b12; color: #ffe6b0; border-radius: 8px; padding: 10px 12px; font-size: .84rem; margin-bottom: 14px; }
+  .banner { background: var(--banner-bg); border: 1px solid var(--banner-border); color: var(--banner-text); border-radius: 8px; padding: 10px 12px; font-size: .84rem; margin-bottom: 14px; }
   /* ---------- narrow window ---------- */
   @media (max-width: 1100px) {
     .app { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr) auto; }
@@ -282,7 +359,8 @@
     <div id="tabs"></div>
     <div id="nav-buttons"></div>
     <div class="caps" id="caps"></div>
-    <div class="conn" id="conn"><span class="dot"></span>connecting…</div>
+    <button class="theme" id="theme" type="button" aria-label="Switch colour theme">theme</button>
+    <div class="conn" id="conn" role="status" aria-live="polite"><span class="dot" aria-hidden="true"></span>connecting…</div>
   </nav>
 
   <main id="main">
@@ -293,7 +371,7 @@
         <span id="output-title">Result</span>
         <button class="act" onclick="document.getElementById('output').classList.remove('open')">Hide</button>
       </header>
-      <pre id="output-body"></pre>
+      <pre id="output-body" role="status" aria-live="polite"></pre>
     </section>
   </main>
 
@@ -372,6 +450,45 @@ const state = {
 };
 
 /* ---------- small helpers ---------- */
+/* The theme is presentation, not policy: nothing here decides what the service
+   may do, so it lives in the page and in one localStorage key. "auto" follows
+   the system, which is what an operator who never pressed the button keeps. */
+const THEME_KEY = "hyperv-console-mcp.theme";
+function savedTheme() {
+  try {
+    const value = localStorage.getItem(THEME_KEY);
+    return value === "light" || value === "dark" ? value : "";
+  } catch (error) {
+    // A window with storage disabled still has a theme; it just cannot remember one.
+    return "";
+  }
+}
+function systemTheme() {
+  return window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches
+    ? "light" : "dark";
+}
+function applyTheme(choice) {
+  const theme = choice || systemTheme();
+  document.documentElement.setAttribute("data-theme", theme);
+  const button = document.getElementById("theme");
+  if (!button) return;
+  // The label says what the click does, which is what a keyboard user reads.
+  button.textContent = theme === "light" ? "dark theme" : "light theme";
+  button.setAttribute("aria-label",
+    theme === "light" ? "Switch to the dark theme" : "Switch to the light theme");
+}
+function toggleTheme() {
+  const next = document.documentElement.getAttribute("data-theme") === "light" ? "dark" : "light";
+  try { localStorage.setItem(THEME_KEY, next); } catch (error) { /* applied, not remembered */ }
+  applyTheme(next);
+}
+applyTheme(savedTheme());
+if (window.matchMedia) {
+  const preference = window.matchMedia("(prefers-color-scheme: light)");
+  const follow = () => { if (!savedTheme()) applyTheme(""); };
+  if (preference.addEventListener) preference.addEventListener("change", follow);
+}
+
 const api = () => window.pywebview && window.pywebview.api;
 const el = (tag, attrs = {}, ...children) => {
   const node = document.createElement(tag);
@@ -390,6 +507,19 @@ const el = (tag, attrs = {}, ...children) => {
 
 function panel(title, hint, ...body) {
   return el("section", { class: "card" }, el("h2", {}, title), hint ? el("p", { class: "hint" }, hint) : null, ...body);
+}
+
+/* A card whose content is wider than a column — a table with one column per
+   VM — says so, rather than being squeezed and clipped. */
+function widePanel(title, hint, ...body) {
+  const node = panel(title, hint, ...body);
+  node.classList.add("wide");
+  return node;
+}
+
+/* A table that may be wider than its card scrolls here, inside its own box. */
+function scroller(table) {
+  return el("div", { class: "scroll-x" }, table);
 }
 
 function field(label, input) {
@@ -494,7 +624,9 @@ const builders = {
             ". A VM outside it is not listed and cannot be opened."));
 
     return el("div", { class: "grid" },
-      panel("Fleet", "What Hyper-V reports, and what this host allows each VM. The level is the operator's file, not this window's.",
+      // A row per VM with its power buttons in it: the whole width, or the
+      // buttons wrap into the columns beside them.
+      widePanel("Fleet", "What Hyper-V reports, and what this host allows each VM. The level is the operator's file, not this window's.",
         empty || el("table", { class: "events fleet" },
           el("thead", {}, el("tr", {}, ...["Name", "State", "Level", "CPU", "Memory", ""].map((h) => el("th", {}, h)))),
           el("tbody", {}, ...rows))),
@@ -633,6 +765,12 @@ const builders = {
       id: "screen",
       class: "screen",
       alt: "guest display",
+      // A keyboard user has to know what this focusable picture does before
+      // pressing a key into a guest that may be at a logon prompt.
+      "aria-label": "Guest display. Click to click in the guest; type to send keys.",
+      // Keys typed here go to the guest rather than to the page, which is what
+      // `application` tells a screen reader before the first keystroke.
+      role: "application",
       tabindex: "0",
       // Clicking the picture is a click in the guest, at the guest's own
       // coordinates: the image is the video head scaled, not a new space.
@@ -1879,7 +2017,23 @@ function receiptTable(items, lab) {
     el("thead", {}, el("tr", {}, ...["Run", "Finished", "Outcome", "Package", "Blame", "Symbols", "Files", ""].map((head) => el("th", {}, head)))),
     el("tbody", {}, ...items.map((item) => {
       const picked = lab.picked.includes(item.run_id);
-      return el("tr", { class: picked ? "picked" : null, style: "cursor:pointer", onclick: () => pickReceipt(item.run_id) },
+      // A row is a pointer convenience; the same pick has to work from the
+      // keyboard, so the row is also a focusable control of its own.
+      return el("tr", {
+        class: picked ? "picked" : null,
+        style: "cursor:pointer",
+        role: "button",
+        tabindex: "0",
+        "aria-pressed": picked ? "true" : "false",
+        "aria-label": "Pick run " + (item.run_id || ""),
+        onclick: () => pickReceipt(item.run_id),
+        onkeydown: (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            pickReceipt(item.run_id);
+          }
+        },
+      },
         el("td", { class: "mono" }, item.run_id || "—"),
         el("td", {}, String(item.finished_utc || "").replace("T", " ").slice(0, 19)),
         el("td", {}, outcomeBadge(item.outcome)),
@@ -1997,7 +2151,7 @@ function transportPanel(response) {
   const light = failure || healthy === false ? "down" : healthy === true ? "up" : "";
   const millis = (value) => (value === null || value === undefined ? "—" : value + " ms");
   const yes = (value) => (value === null || value === undefined ? "—" : value ? "yes" : "no");
-  return panel("Guest transport",
+  const card = panel("Guest transport",
     "Which path carries a command into the guest, whether it answers right now, and how long that took.",
     el("div", { class: "row", style: "margin:0 0 8px;align-items:center" },
       el("span", { class: "conn " + light }, el("span", { class: "dot" }),
@@ -2028,6 +2182,8 @@ function transportPanel(response) {
       action("Apply", "guest_transport_set", () => ({ vm_name: state.vm, transport: fieldValue("transport-choice") }), "primary", render),
       el("span", { class: "hint", style: "margin:0" },
         "auto lets the host prefer SSH when it answers; a saved choice applies to the next call.")));
+  card.classList.add("tall");
+  return card;
 }
 
 /* ---------- the matrix ---------- */
@@ -2065,7 +2221,13 @@ function drawMatrix() {
   const relevant = state.events.filter((event) => event.operation === "lab_matrix");
   const last = relevant[relevant.length - 1];
   if (!last) {
-    host.textContent = "No matrix has run in this window yet.";
+    // The event feed is the live view; a matrix that finished before this page
+    // was opened still has its answer, and that is worth more than a blank.
+    const result = matrixState().result;
+    host.textContent = result
+      ? "The last matrix finished with " + (result.count || 0) + " VMs: "
+        + (result.same_outcome ? "every one reached the same outcome." : "their outcomes differ, below.")
+      : "No matrix has run in this window yet.";
     return;
   }
   const same = relevant.filter((event) => event.correlation_id === last.correlation_id);
@@ -2083,21 +2245,32 @@ function drawMatrix() {
       el("span", {}, String(last.started_utc || "").slice(11, 19))));
 }
 
+/* One field, in the words the row table above it uses: a comparison that says
+   `true` where the table says `loaded` reads as two different answers. */
+const FIELD_WORDS = {
+  symbols_all_loaded: (value) => value === true ? "loaded" : value === false ? "missing" : null,
+  recording: (value) => value || null,
+};
+
 function matrixPanel(result) {
   if (!result) {
-    return panel("The comparison", "Run a matrix and the outcomes land here, side by side.",
+    return widePanel("The comparison", "Run a matrix and the outcomes land here, side by side.",
       el("p", { class: "hint", style: "margin:0" }, "No matrix has run in this window yet."));
   }
   const rows = result.vms || [];
   const vms = rows.map((row) => String(row.vm));
   const fields = result.fields || [];
-  return panel("The comparison",
+  const same = rows.length > 1 && fields.length > 0 && fields.every((item) => item.same);
+  return widePanel("The comparison",
     "One row per VM, then the compared fields with each VM's value. A VM that refused the run is a row of its own, not the end of the matrix.",
     el("p", { class: "hint", style: "margin:0 0 10px" },
-      result.same
-        ? "Every VM agreed on all " + fields.length + " compared fields."
+      result.same_outcome
+        ? "Every VM reached the same outcome (" + shown(result.outcomes[vms[0]]) + ")."
+        : "The outcomes differ: " + vms.map((vm) => vm + " " + shown(result.outcomes[vm])).join(", ") + ".",
+      " ",
+      same ? "All " + fields.length + " compared fields agreed."
         : "These fields differ: " + (result.differs || []).join(", ") + "."),
-    el("table", { class: "events" },
+    scroller(el("table", { class: "events" },
       el("thead", {}, el("tr", {}, ...["VM", "Run", "Outcome", "Duration (s)", "Bugcheck", "Blamed driver", "Symbols", "Recording"].map((head) => el("th", {}, head)))),
       el("tbody", {}, ...rows.map((row) => el("tr", {},
         el("td", { title: row.detail || null }, row.vm),
@@ -2108,12 +2281,13 @@ function matrixPanel(result) {
         el("td", {}, row.blamed_driver || "—"),
         el("td", {}, row.symbols_all_loaded === null || row.symbols_all_loaded === undefined
           ? "—" : row.symbols_all_loaded ? "loaded" : "missing"),
-        el("td", { class: "mono" }, row.recording || "—"))))),
-    el("table", { class: "events changed", style: "margin-top:12px" },
+        el("td", { class: "mono" }, row.recording || "—")))))),
+    scroller(el("table", { class: "events changed", style: "margin-top:12px" },
       el("thead", {}, el("tr", {}, ...["Field", ...vms].map((head) => el("th", {}, head)))),
       el("tbody", {}, ...fields.map((item) => el("tr", { class: item.same ? null : "picked" },
         el("td", {}, item.field),
-        ...vms.map((vm) => el("td", {}, shown(item.values[vm]))))))));
+        ...vms.map((vm) => el("td", {}, shown(
+          (FIELD_WORDS[item.field] || ((value) => value))(item.values[vm]))))))))));
 }
 
 /* ---------- chrome ---------- */
@@ -2129,17 +2303,19 @@ function renderConn() {
 function renderNav() {
   const tabs = document.getElementById("tabs");
   tabs.replaceChildren(...state.tabs.map((name) =>
-    el("div", {
-      class: "tab" + (name === state.vm ? " active" : ""),
-      title: name,
-      onclick: () => openVm(name),
-    },
-    el("span", {}, name),
-    el("span", {
-      class: "x",
-      title: "Close this workspace",
-      onclick: (event) => { event.stopPropagation(); closeTab(name); },
-    }, "×"))));
+    el("div", { class: "tab" + (name === state.vm ? " active" : ""), title: name },
+      // Both halves are buttons: a workspace is opened and closed from the
+      // keyboard, and a span with an onclick is reachable by the pointer only.
+      el("button", {
+        class: "tab-open", type: "button",
+        "aria-current": name === state.vm ? "page" : null,
+        onclick: () => openVm(name),
+      }, name),
+      el("button", {
+        class: "x", type: "button", title: "Close this workspace",
+        "aria-label": "Close " + name,
+        onclick: (event) => { event.stopPropagation(); closeTab(name); },
+      }, "×"))));
 
   // The fleet and the matrix are about the host, not one VM, so they stay
   // reachable with no workspace open; every other page needs a VM to be about.
@@ -2147,7 +2323,11 @@ function renderNav() {
   buttons.replaceChildren(...PAGES
     .filter(([, key]) => key === "fleet" || key === "matrix" || state.vm)
     .map(([label, key]) =>
-      el("button", { class: key === state.page ? "active" : "", onclick: () => go(key) }, label)));
+      el("button", {
+        class: key === state.page ? "active" : "",
+        "aria-current": key === state.page ? "page" : null,
+        onclick: () => go(key),
+      }, label)));
 
   document.getElementById("vm-name").textContent = state.vm || "no VM";
   const level = state.hello ? state.hello.level : null;
@@ -2576,6 +2756,7 @@ async function finishWizard(withPassword) {
 /* ---------- boot ---------- */
 async function boot() {
   document.getElementById("chooser-open").addEventListener("click", () => pick(fieldValue("chooser-typed")));
+  document.getElementById("theme").addEventListener("click", toggleTheme);
   await refreshHello();
   // The VM the window started on is already open, so it gets a tab.
   if (state.vm) {
