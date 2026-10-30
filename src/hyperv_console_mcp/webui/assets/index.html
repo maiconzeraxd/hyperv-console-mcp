@@ -233,7 +233,7 @@ const PAGES = [
   ["Media", "media", "The DVD drive, an ISO and boot order."],
   ["Debugger", "debugger", "COM1 serial, the kd session and the symbols it resolves."],
   ["Guest", "guest", "Credential source, automation toggles and one command."],
-  ["Lab", "lab", "Directories, packages and diagnostics. Running a payload stays manual."],
+  ["Lab", "lab", "Directories, packages, diagnostics, and the cycle that runs one."],
 ];
 
 const state = { vm: "", page: "overview", hello: null, events: [], output: null };
@@ -563,7 +563,35 @@ const builders = {
           action("Collect", "lab_collect", () => ({
             vm_name: state.vm, package_id: fieldValue("lab-verify-package"),
             run_id: fieldValue("lab-run"), include_kernel_dump: checked("lab-dump"),
-          }), "primary"))));
+          }), "primary"))),
+      // Running a package exists only in the lab profile: elsewhere the server
+      // refuses the call, so the page does not offer a button that cannot work.
+      state.hello && state.hello.profile === "lab"
+        ? panel("Run the package", "Checkpoints first, then executes the staged package. The manifest hash above is the one the run must match.",
+            el("div", { class: "row" },
+              field("Run id", input_("lab-cycle-run", "run-1")),
+              field("Timeout (s)", input_("lab-timeout", "600", "number")),
+              field("Debugger", el("select", { id: "lab-debugger" },
+                ...["none", "serial", "kdnet"].map((name) => el("option", { value: name }, name))))),
+            el("div", { class: "row" },
+              field("Revert the checkpoint afterwards", el("input", { id: "lab-revert", type: "checkbox" }))),
+            el("div", { class: "row", style: "margin:0" },
+              action("Run", "lab_run", () => ({
+                vm_name: state.vm, package_id: fieldValue("lab-verify-package"),
+                run_id: fieldValue("lab-cycle-run"), expected_manifest_sha256: fieldValue("lab-sha"),
+                timeout_seconds: Number(fieldValue("lab-timeout")) || 600,
+              })),
+              action("Cycle", "lab_cycle", () => ({
+                vm_name: state.vm, package_id: fieldValue("lab-verify-package"),
+                run_id: fieldValue("lab-cycle-run"), expected_manifest_sha256: fieldValue("lab-sha"),
+                timeout_seconds: Number(fieldValue("lab-timeout")) || 600,
+                revert_after: checked("lab-revert"),
+                include_kernel_dump: checked("lab-dump"),
+                debugger: fieldValue("lab-debugger") || "none",
+              }), "primary")))
+        : panel("Manual run", "Outside the lab profile a package runs only by hand: an elevated operator invokes the runner in the guest with the approval phrase it asks for. Nothing here executes it.",
+            el("div", { class: "row", style: "margin:0" },
+              el("code", {}, "Invoke-DriverLabRun.ps1 -PackageId … -RunId … -ExpectedManifestSha256 … -ApproveExecution 'EXECUTE <package> <run>'"))));
   },
 };
 

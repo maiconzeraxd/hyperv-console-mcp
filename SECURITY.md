@@ -49,7 +49,28 @@ What the boundaries are **not** for:
 
 The lab profile is the operator's decision to hand an autonomous loop full control of the
 allowlisted VMs — including executing a staged package. It does not widen the allowlist, skip
-a `confirm_*` field, or stop the audit and event records.
+a `confirm_*` field, or stop the audit and event records. In this profile `lab_run` and
+`lab_cycle` exist at all: they create the checkpoint, re-verify the published package, run the
+guest runner with an approval phrase the **server** generates, and classify the outcome. The
+phrase is never typed by the caller, which is why those two tools are refused outside the lab
+profile rather than merely gated.
+
+## One background service
+
+The MCP server and the window are clients of a single background service that owns the worker,
+the serial and kd sessions, the state and the event records. They reach it over a local named
+pipe, and the pipe is created with `FILE_FLAG_FIRST_PIPE_INSTANCE` and a check that the
+listening process is the one expected, so another local process cannot squat the name and
+answer in its place. No port is opened and nothing listens on the network.
+
+The consequence worth knowing: **the host reads its policy once, at startup, and whichever
+client starts it decides that policy for both.** A window that joins a host the AI's server
+started inherits the AI's environment, so an operator who wants a stricter surface must start
+the host themselves or give the VM a level in the access file, which is re-read on change
+rather than frozen. `HYPERV_MCP_SHARED_SERVICE=false` keeps a private host for a run that must
+not disturb a live one, and `HYPERV_MCP_SERVICE_PIPE` names a different pipe. The approval
+broker is fail-closed: with `HYPERV_MCP_REQUIRE_DASHBOARD_APPROVAL=true` and no reachable
+window, a mutation is denied rather than waved through.
 
 ## Credentials
 
@@ -70,7 +91,9 @@ requires it there, and it is masked in every guest echo and every tool result. T
 under the KD log root records the port, never the key.
 
 `tests/test_secrets.py` drives these paths with test values and scans every result, the daily
-event log, the audit log, the session log and the state files for them.
+event log, the audit log, the session log and the state files for them. It also runs the same
+scan against a deliberately leaking build and against one planted file per scanner: a check
+that cannot turn red proves nothing, so the negative control is part of the test.
 
 ## Guest execution and files
 
@@ -147,6 +170,20 @@ separate guest runner requires an elevated operator, a hypervisor, an exact run-
 approval phrase and a package-provided `Run-Lab.ps1`. This repository does not provide a mapper,
 driver or payload runner, and no tool loads a driver or changes Secure Boot, HVCI or
 test-signing on the host.
+
+`lab_verifier` and `lab_driver_service` change the guest, so both record what they replaced
+under `C:\DriverLab\State\` and both have a revert. Signature enforcement is never bypassed:
+a driver the guest refuses is reported with its Win32 error and NTSTATUS and stays refused, and
+test signing remains the operator's boot setting (`lab_guest_configure`), applied in the guest
+and never on the host. Neither tool restarts the VM, and Driver Verifier takes effect on the
+next one.
+
+A crash reading is a copy of guest memory. The dump a `bugcheck` cycle collects, the
+`kd-analyze.log` written beside it and the `lab-cycle.json` record all land under
+`HYPERV_MCP_EVIDENCE_ROOT` and may contain guest data, symbol paths and the names of drivers
+that were loaded; they are evidence for the operator, not something to publish. `lab-cycle.json`
+carries hashes and outcomes, never a secret: the manifest hash and the evidence hash are the
+package's, not a credential's.
 
 ## Reporting a vulnerability
 

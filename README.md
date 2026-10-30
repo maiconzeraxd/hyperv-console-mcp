@@ -2,7 +2,7 @@
 
 A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/) server for **Hyper-V on Windows**. It combines VM management, checkpoints, PowerShell Direct diagnostics, synthetic keyboard/mouse input, console screenshots without VMConnect, installation media, serial consoles, and serial WinDbg preparation and a live kd.exe kernel-debugging session in one stdio server.
 
-**Alpha status:** 762 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
+**Alpha status:** 843 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test; the smoke checks each profile's tool surface, per toolset, over a real stdio client. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
 
 ## Highlights
 
@@ -85,7 +85,7 @@ It merges one `mcpServers.hyperv` entry and leaves every other server and settin
 
 Every tool belongs to one toolset. A profile decides which toolsets are registered, and a
 tool that is not registered is never advertised, so its schema never enters the model's
-context. The `safe` profile registers 29 tools, `lab` registers 43, `HYPERV_MCP_TOOLSETS`
+context. The `safe` profile registers 29 tools, `lab` registers 42, `HYPERV_MCP_TOOLSETS`
 replaces the set outright, and `all` enables everything (55 tools).
 
 | Toolset | Tools | safe | lab |
@@ -140,6 +140,7 @@ For kernel work, choose **KDNET** after reviewing a suitable network path, or **
 `kd_attach` then drives a real `kd.exe` from the server: one session per VM, a per-session marker that delimits every command's output (never a sleep), an explicit `disconnected → waiting_for_target → running ↔ broken` state reported by `kd_status`, break-in through the console with `vm_inject_nmi` as the fallback, and a full log under `%LOCALAPPDATA%\HyperVConsoleMCP\kd\<vm>\`. `debug_setup(transport="kdnet", action="prepare")` sets up the internal lab switch, a UDP port in 50000–50039 and a host firewall rule that names `kd.exe`; the generated key lives only in the Windows Credential Manager and is masked in everything the tool returns. Symbols come from the Microsoft symbol server into a local cache, plus any staged lab package that ships a `.pdb`. In the lab profile, `lab_cycle(..., debugger="kdnet")` attaches kd before the run, arms `sxe ld:<driver>` for each `.sys` in the package manifest, and reports a bugcheck with the parsed `!analyze -v` instead of calling it a hang, together with whether the test driver's symbols actually resolved.
 
 - [Performance rationale and benchmarks](docs/PERFORMANCE.md)
+- [Driver testing: the QA flow](docs/DRIVER-TESTING.md)
 - [WinDbg, KDNET, and serial setup](docs/WINDBG.md)
 - [Optional SSH transport](docs/SSH.md)
 - [Guest access: autologon, no prompts, revert](docs/GUEST-ACCESS.md)
@@ -166,6 +167,8 @@ See [security policy](SECURITY.md) and [project journal](docs/PROJECT.md) for im
 python -m pytest
 python -m build
 ```
+
+CI runs the suite on Windows 3.11/3.12/3.13 with ruff, PowerShell parsing and PSScriptAnalyzer, the MCP smoke and the build, and runs the unit suite on Linux, where the Windows-only tests skip themselves. `tests/test_secrets.py` also scans a deliberately leaking build, so a scan that cannot turn red fails the run instead of passing quietly.
 
 The PowerShell bridge accepts fixed operations and JSON over stdin, not generated PowerShell source. The fake bridge allows transport tests without Hyper-V. Live testing must be separately authorized and restricted to a disposable VM.
 

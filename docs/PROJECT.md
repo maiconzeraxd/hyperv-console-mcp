@@ -1408,6 +1408,53 @@ rendered from a live VM — the capture path needs an elevated session.
 - **It is written last, and never fails the cycle.** A host that cannot write it still has the run
   report: the record is a copy of the answer, not the answer.
 
+### 2026-10-29 — v0.3 phase 7: the secrets scan is proved able to fail
+
+- **A build that leaks must turn the scan red.** `LeakingService` returns a KDNET preparation whose
+  result carries the password, and the same `assert_clean` the real scenario uses is expected to
+  raise against it. A scanner that stays green on a leak cannot fail on anything.
+- **One planted leak per scanner.** A file under the evidence root, a JSONL event and an audit line,
+  each carrying a secret, so `assert_tree_clean`, `assert_events_clean` and `assert_audit_clean` are
+  each shown to read what they claim to read rather than passing because the directory was empty.
+- **The fixture no longer reads the operator's own event directory.** `Settings(...)` built directly
+  takes the field default, not `HYPERV_MCP_EVENT_DIRECTORY`, so the scan was reading
+  `%LOCALAPPDATA%\HyperVConsoleMCP\events` — and the negative control wrote a file there. The
+  fixture now passes `event_directory` explicitly, which also makes the events assertion mean
+  something on a machine that has never run the server.
+
+### 2026-10-29 — v0.3 phase 7: the smoke counts the surface per toolset
+
+- **`hyperv_host_status` reports `toolsets.counts` and `total`.** The counts come from the
+  registration wrappers, so the report cannot disagree with what was registered, and the README's
+  tool table stops being the only claim about it.
+- **The smoke starts three surfaces, not two.** `safe` (29), the `lab` profile (42) and every toolset
+  (55), each asserted per family — eleven server starts were not needed to check eleven families. The
+  `lab` run keeps the explicit `HYPERV_MCP_ALLOW_*=false` values, which still win over the profile,
+  so the denied mutation stays a policy refusal rather than a real power operation.
+- **The README said `lab` was 43.** It registers 42; the count is now asserted in
+  `tests/test_server.py` and in the smoke instead of only being written down.
+
+### 2026-10-29 — v0.3 phase 7: CI runs the suite on Linux too
+
+- **The `import-check` job became a `linux` job.** It keeps the explicit import of `capture`, `ipc`
+  and `serial` — the modules whose `ctypes.WinDLL` calls are all inside functions — and adds ruff and
+  the whole unit suite, which skips the Windows-only tests by their own `skipif`.
+- **`v0.3` pushes build.** The workflow listed `main` and the v0.2 branch only.
+
+### 2026-10-29 — v0.3 phase 7: the docs catch up with phase 6
+
+- **`docs/DRIVER-TESTING.md`** is the phase 6 flow in order: prepare the guest, build the package,
+  turn Driver Verifier on, run the cycle, read the crash and the symbol verdict, diff two
+  `lab-cycle.json` records. It also says what the flow does not do, including why the IOCTL harness
+  is the operator's `Run-Lab.ps1` rather than a tool.
+- **`SECURITY.md` gains the single-service model** — one pipe with `FILE_FLAG_FIRST_PIPE_INSTANCE`,
+  the policy read once by whichever client starts the host, and the fail-closed broker — plus the
+  Verifier, driver-service and crash-artifact surface, and the negative control the secrets test now
+  carries.
+- **The window's Lab page no longer says a payload stays manual.** In the lab profile it offers Run
+  and Cycle with the manifest hash the run must match; outside it, it states the manual boundary and
+  the phrase the guest runner asks for.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,
@@ -1520,3 +1567,37 @@ IOCTL robustness harness was not built — it is marked optional in the roadmap,
 generator behind an AI-callable tool is the one item here whose shape deserves the operator's own
 sign-off rather than a phase default; the same loop is expressible today inside the operator's
 `Run-Lab.ps1`, which the lab already runs with a checkpoint.
+
+## Phase 7 report
+
+**What changed.** The phase is mostly the work that makes the earlier phases checkable. In
+`tests/test_secrets.py`, the scan now runs against a deliberately leaking build and against one
+planted file per scanner, so a green run means the scan looked and found nothing rather than that it
+found nothing to look at; the fixture also stopped reading — and writing — the operator's real event
+directory, which it had been doing because a directly constructed `Settings` takes the field default
+rather than the environment variable. `hyperv_host_status` publishes the registered tool count per
+toolset, `tests/mcp_smoke.py` starts the `lab` profile as well and asserts all three surfaces per
+family, and `tests/test_server.py` asserts the same table, which is how the README's stale `lab = 43`
+was found and corrected to 42. The workflow's Linux job grew from an import check into ruff plus the
+unit suite. On the documentation side, `docs/DRIVER-TESTING.md` is new, `SECURITY.md` gained the
+single-service threat model and the phase 6 surface, `docs/LAB.md` links the new flow, and the
+window's Lab page describes the cycle it can now run instead of a runner it never had.
+
+**Tests added across the phase.** Two in `tests/test_secrets.py`: the leaking build and the
+per-scanner planted files. One in `tests/test_server.py`: the host report's counts and total. The
+per-toolset table is also asserted in `test_every_tool_belongs_to_a_known_toolset`, against the tool
+names parsed out of `server.py`, so a tool added to a family without the count moving fails there.
+Suite: 843 passing, 1 skipped. The MCP smoke passes for 29, 42 and 55 tools.
+
+**Validated live.** The MCP smoke over a real stdio client, three times, with the per-toolset counts
+coming back from a running server: `safe` 29, the `lab` profile 42, every toolset 55, each with its
+mutation refused. The Linux job is **not** validated live: there is no distribution installed under
+WSL on this host, so the claim that the suite runs clean on Linux rests on the `skipif` guards and on
+every `ctypes.WinDLL` call being inside a function, which the import step exercises — CI is where it
+gets proved.
+
+**Still pending, and why.** Nothing here needs a payload, so the phase's own items are all run. The
+one thing this phase could not close is the live validation the earlier phases still owe: an elevated
+run on `NORTH-Test` confirming `outcome: bugcheck` rather than `hang` with no debugger attached, and
+the phase 6 Verifier, driver-service and crash-triage paths against a real guest. Both need elevation
+and a payload, and running a payload remains a separate operator decision.

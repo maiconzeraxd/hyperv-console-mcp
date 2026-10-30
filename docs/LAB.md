@@ -156,4 +156,8 @@ enforcement is never bypassed: a driver the guest refuses is reported with its c
 stays the operator's boot setting (`lab_guest_configure`). Reading the state needs no confirmation;
 the other actions require `confirm_vm`.
 
+[DRIVER-TESTING.md](DRIVER-TESTING.md) puts these pieces in order as a workflow: prepare the
+guest, stage a test-signed driver, turn Verifier on, run the cycle, read the crash and the symbol
+verdict, and diff two runs' `lab-cycle.json`.
+
 The run is synchronous: the guest worker is busy for its duration, while `vm_get`, console and dashboard calls keep working on the host worker. `lab_run` and `lab_cycle` are refused outside the lab profile — the approval phrase is never typed by the caller, and the profile is the operator's decision to let a loop execute staged packages.
