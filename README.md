@@ -34,6 +34,9 @@ A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/)
 
 ## Install
 
+Never used PowerShell? [docs/QUICKSTART.md](docs/QUICKSTART.md) is the install in plain
+language, with the three questions the window asks on its first run.
+
 Three ways in, in the order to consider them:
 
 1. **The installer.** `HyperVConsoleMCP-Setup-<version>.exe` from the
@@ -197,6 +200,7 @@ For kernel work, choose **KDNET** after reviewing a suitable network path, or **
 
 `kd_attach` then drives a real `kd.exe` from the server: one session per VM, a per-session marker that delimits every command's output (never a sleep), an explicit `disconnected → waiting_for_target → running ↔ broken` state reported by `kd_status`, break-in through the console with `vm_inject_nmi` as the fallback, and a full log under `%LOCALAPPDATA%\HyperVConsoleMCP\kd\<vm>\`. `debug_setup(transport="kdnet", action="prepare")` sets up the internal lab switch, a UDP port in 50000–50039 and a host firewall rule that names `kd.exe`; the generated key lives only in the Windows Credential Manager and is masked in everything the tool returns. Symbols come from the Microsoft symbol server into a local cache, plus any staged lab package that ships a `.pdb`. In the lab profile, `lab_cycle(..., debugger="kdnet")` attaches kd before the run, arms `sxe ld:<driver>` for each `.sys` in the package manifest, and reports a bugcheck with the parsed `!analyze -v` instead of calling it a hang, together with whether the test driver's symbols actually resolved.
 
+- [Start here: install and first run, in plain language](docs/QUICKSTART.md)
 - [Performance rationale and benchmarks](docs/PERFORMANCE.md)
 - [Driver testing: the QA flow](docs/DRIVER-TESTING.md)
 - [WinDbg, KDNET, and serial setup](docs/WINDBG.md)

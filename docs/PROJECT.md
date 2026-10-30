@@ -1877,8 +1877,16 @@ rendered from a live VM — the capture path needs an elevated session.
   compiled and no `Setup.exe` exists. The workflow has never run, nothing has been signed, and
   **no install has been tried on a clean machine** — that is wave 6's test, not a claim made
   here.
-- Still to come in this wave: the beginner README with the wizard's screens and the SmartScreen
-  section, and the service under `HyperVConsoleMCPSvc`.
+- **The beginner page is text, not pictures.** `docs/QUICKSTART.md` is the install for someone
+  who has never opened PowerShell: one copyable line that answers "can this machine run it",
+  the download, the three questions the window asks (`vm`, `level`, `credential` — the order
+  `webui/wizard.py` asks them in), a table of the five failures that actually happen with the
+  fix beside each, the SmartScreen box explained, and how to uninstall. The section's GIFs and
+  wizard screenshots are **not** in it: there is no installer binary to capture them from and
+  the wizard has never been opened on a clean machine, so the page describes the window instead
+  of linking to an image that does not exist.
+- Still to come in this wave: those screenshots, after the first clean-machine install, and the
+  service under `HyperVConsoleMCPSvc`.
 
 ## Phase 4 report
 
