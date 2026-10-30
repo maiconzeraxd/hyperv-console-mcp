@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 PAGE = (
     Path(__file__).resolve().parents[1]
     / "src" / "hyperv_console_mcp" / "webui" / "assets" / "index.html"
@@ -223,4 +225,49 @@ def test_the_log_dock_can_be_paused_searched_and_grouped() -> None:
     assert 'id="log-body"' in text
     # A bounded window, not a growing store: the oldest line leaves first.
     assert "body.childElementCount > 500" in text
+
+def test_the_page_ships_its_terminals_inline() -> None:
+    """xterm is inlined when the page is read, not linked.
+
+    The window hands WebView2 a string, so a relative `<script src>` would have
+    nothing to resolve against, and `--serve` publishes one page rather than a
+    directory. The markers are the only seam: the assembled page has neither.
+    """
+    from hyperv_console_mcp.webui import page as assembly
+
+    text = assembly.page_text()
+
+    assert assembly.CSS_MARKER not in text
+    assert assembly.JS_MARKER not in text
+    assert "Terminal" in text
+    assert len(text) > (assembly.ASSETS / "index.html").stat().st_size
+
+
+def test_a_missing_vendor_file_is_an_error_not_a_page_without_terminals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hyperv_console_mcp.webui import page as assembly
+
+    monkeypatch.setitem(assembly.VENDOR_FILES, assembly.JS_MARKER, tmp_path / "absent.js")
+
+    with pytest.raises(RuntimeError, match="absent.js"):
+        assembly.page_text()
+
+def test_the_guest_terminal_is_a_terminal_and_not_a_styled_box() -> None:
+    """xterm over `guest_exec`, painted from the palette rather than restated.
+
+    A `<pre>` would look like a terminal and behave like a log: no cursor, no
+    line editing, no scrollback. The widget is xterm, and its colours are read
+    from the page's own tokens so the light theme keeps working and no colour is
+    written twice.
+    """
+    text = _page()
+    assert "new window.Terminal(" in text
+    assert 'api().call("guest_exec"' in text
+    assert 'id: "guest-term"' in text
+    assert "terminalTheme" in text
+    assert 'css("--bg")' in text
+    # One command at a time: the guest transport is serial, so the input is
+    # held while a call is in flight rather than queued behind it.
+    assert "if (term.busy) return;" in text
 

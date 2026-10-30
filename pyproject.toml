@@ -50,7 +50,7 @@ version = { attr = "hyperv_console_mcp.__version__" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-hyperv_console_mcp = ["bridge/*.ps1", "lab/guest/*.ps1", "lab/guest/*.psm1", "transport/*.ps1", "webui/assets/*.html"]
+hyperv_console_mcp = ["bridge/*.ps1", "lab/guest/*.ps1", "lab/guest/*.psm1", "transport/*.ps1", "webui/assets/*.html", "webui/assets/vendor/*"]
 
 [tool.ruff]
 src = ["src"]

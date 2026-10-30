@@ -157,3 +157,20 @@ def test_the_winget_hash_is_a_hash_or_the_placeholder() -> None:
     assert match is not None, "the installer manifest names no InstallerSha256"
     value = match.group(1)
     assert value == "0" * 64 or re.fullmatch(r"[0-9a-f]{64}", value), value
+
+def test_the_wheel_carries_the_vendored_terminal() -> None:
+    """A page whose terminal is inlined needs the vendor files in the package.
+
+    `webui/page.py` raises when one is missing, so a wheel without them would
+    install cleanly and fail at the first window — this is the check that keeps
+    that from shipping.
+    """
+    root = Path(__file__).resolve().parents[1]
+    with (root / "pyproject.toml").open("rb") as handle:
+        package_data = tomllib.load(handle)["tool"]["setuptools"]["package-data"]
+    assert "webui/assets/vendor/*" in package_data["hyperv_console_mcp"]
+    vendor = root / "src" / "hyperv_console_mcp" / "webui" / "assets" / "vendor"
+    assert (vendor / "xterm.js").is_file()
+    assert (vendor / "xterm.css").is_file()
+    assert (vendor / "NOTICE.md").is_file()
+

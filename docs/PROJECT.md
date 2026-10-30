@@ -2379,6 +2379,44 @@ first time in this project, the page was rendered in a real browser rather than 
   against a live guest. The IDE shell the roadmap describes (terminals in the middle, fleet in a
   sidebar, permission matrix on a login screen) is the next wave; this one is the dock it needs.
 
+### 2026-10-30 — v0.4 wave 5: a real terminal in the window, and the vendored file that makes it one
+
+The roadmap asks for embedded terminals, which means xterm.js and a decision about how a
+third-party asset reaches a page that is one HTML string. Both halves are here.
+
+- **`webui/page.py` assembles the page.** `index.html` carries two markers — one in the
+  stylesheet, one before the page's own script — and `page_text()` replaces them with the
+  vendored files at read time. The window and `--serve` both get the page from there, so the
+  property the project has held since v0.3 stays true: one page, every asset inline, no port, no
+  CDN. A missing vendor file raises instead of shipping a page whose terminal silently never
+  appears.
+- **`webui/assets/vendor/`** holds `xterm.js` 5.3.0 and its stylesheet exactly as published, with
+  a `NOTICE.md` naming the version, the licence and the URL they came from. `pyproject.toml`
+  ships the directory, and a packaging test fails if either the entry or a file goes missing.
+- **The Guest page gains a terminal**: xterm over `guest_exec`, one line per command, output and
+  exit code printed as they come back, Ctrl+C clearing the line, and input held while a call is in
+  flight because the guest transport is serial. Its colours are read from the page's own tokens at
+  runtime, so the light theme works and no colour is written twice — which is also what keeps the
+  palette scan honest.
+- **The `no remote asset` test got stricter, not looser.** It now scans the *assembled* page and
+  strips block comments first: the vendored file carries its MIT header, and a URL in a comment is
+  not a load, while a `src`, a `link`, a dynamic import or an absolute URL in code still fails it.
+- **Verified in a real browser, end to end.** A CDP driver (the browser tools refuse a loopback
+  URL) opened the served page in headless Chrome, clicked the workspace, opened **Guest**, typed
+  `hostname` through real key events into xterm's own input path, and pressed Enter. The terminal
+  showed `probe ran: hostname` and `[exit 0]` from the service call, then prompted again. The first
+  attempt failed for a reason worth keeping: a constructed `KeyboardEvent` carries no `keyCode`, so
+  the widget ignored it — the probe now sends `Input.dispatchKeyEvent`, which is what a keyboard
+  does.
+- Tests: `tests/test_webui_page.py` three (the page ships its terminals inline, a missing vendor
+  file is an error, and the terminal is a widget over `guest_exec` painted from tokens),
+  `tests/test_packaging.py` one (the wheel carries the vendor directory).
+- Gate: 1160 passed / 1 skipped, ruff clean, `node --check` on the assembled script clean.
+- **Not validated live:** the terminal has run against a probe host, not against a guest on
+  `NORTH-Test`; and it is one terminal, not the divisible grid of KD, serial and guest terminals
+  the roadmap describes. The KD and serial terminals need their own streams (`kd_output_subscribe`
+  exists; serial needs a reader door), and the sidebar/permission-matrix layout is still to come.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three

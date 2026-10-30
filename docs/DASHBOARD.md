@@ -63,7 +63,10 @@ The **fleet** is the home page: every VM Hyper-V reported, its state, the level 
 - **Recovery** — power and checkpoint actions, including the forced ones that ask for a confirmation.
 - **Media** — an ISO, the DVD drive and boot order.
 - **Debugger** — COM1 serial, the kd session and the symbols it resolves.
-- **Guest** — the credential source, the automation toggles, the guest-only BCD toggles and one command.
+- **Guest** — the credential source, the automation toggles, the guest-only BCD toggles, one command, and a
+  **terminal**: xterm over `guest_exec`, one line per command, with the output and exit code printed as they
+  come back. The transcript lives in the widget, so a redraw starts a new session and the page stores no
+  command. Ctrl+C clears the line.
 - **Lab** — diagnostics, package staging, verification, the cycle that runs a package, receipts with export, and the crash triage.
 - **Files** — the host's four roots beside the guest's own disk.
 

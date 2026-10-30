@@ -146,6 +146,17 @@
   #dock .log-line.warning .msg { color: var(--warning); }
   #dock .log-line.error .msg { color: var(--error); }
   #dock .log-empty { color: var(--muted); padding: 6px 12px; }
+  /* A real terminal widget: xterm paints its own canvas, so this is only the
+     frame. Its colours come from the palette at runtime, which keeps the light
+     theme working without a second definition. */
+  .terminal {
+    height: 300px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px;
+    overflow: hidden;
+  }
   /* ---------- navigation ---------- */
   nav {
     padding: 22px 14px;
@@ -416,6 +427,8 @@
     main { padding: 16px; }
     aside.approvals { width: auto; border-left: 0; border-top: 1px solid var(--border); max-height: 45vh; }
   }
+  /* Vendored: xterm.js 5.3.0, MIT. Inlined by webui/page.py. */
+  /*__VENDOR_CSS__*/
 </style>
 </head>
 <body>
@@ -504,6 +517,8 @@
 </div>
 
 <script>
+/* Vendored: xterm.js 5.3.0, MIT. Inlined by webui/page.py. */
+/*__VENDOR_JS__*/
 "use strict";
 
 const PAGES = [
@@ -1282,7 +1297,21 @@ const builders = {
       panel("One command", "Through PowerShell Direct or SSH, whichever the transport reports.",
         el("div", { class: "row" }, el("textarea", { id: "guest-command", placeholder: "hostname" })),
         el("div", { class: "row", style: "margin:0" },
-          action("Run", "guest_exec", () => ({ vm_name: state.vm, command: fieldValue("guest-command") }), "primary"))));
+          action("Run", "guest_exec", () => ({ vm_name: state.vm, command: fieldValue("guest-command") }), "primary"))),
+      (() => {
+        // The terminal needs an element with a size, so it is mounted once this
+        // render is in the document rather than while it is being built.
+        const host = el("div", {
+          class: "terminal", id: "guest-term", role: "application",
+          "aria-label": "Guest terminal. Type a command and press Enter.",
+        });
+        requestAnimationFrame(() => mountTerminal(host, state.vm));
+        return panel(
+          "Terminal",
+          "A terminal over guest_exec: one line is one command, and the transcript stays in this widget.",
+          host,
+        );
+      })());
   },
 
   async lab() {
@@ -3068,6 +3097,102 @@ function wireDock() {
   if (!body.children.length) {
     body.append(el("div", { class: "log-empty" }, "Nothing yet. Operations appear here as they happen."));
   }
+}
+
+/* ---------- the guest terminal ---------- */
+/* xterm over `guest_exec`: one line is one command, run through the transport
+   the service chose. The transcript lives in the widget and nowhere else — the
+   page stores no command and no output, and a redraw starts a new session. */
+const term = { instance: null, buffer: "", busy: false, vm: "" };
+
+function terminalTheme() {
+  // Read from the palette rather than restating it, so the light theme works
+  // and no colour is written twice.
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return {
+    background: css("--bg"),
+    foreground: css("--text"),
+    cursor: css("--accent"),
+    selectionBackground: css("--surface"),
+  };
+}
+
+function promptTerminal() {
+  if (term.instance) term.instance.write("\r\n" + (term.vm || "guest") + "> ");
+}
+
+async function submitTerminal() {
+  const instance = term.instance;
+  const command = term.buffer;
+  term.buffer = "";
+  instance.write("\r\n");
+  if (!command.trim()) {
+    promptTerminal();
+    return;
+  }
+  term.busy = true;
+  let response = null;
+  try {
+    response = await api().call("guest_exec", { vm_name: term.vm, command });
+  } catch (error) {
+    response = { error: { message: String(error) } };
+  }
+  term.busy = false;
+  if (response && response.ok) {
+    const execution = response.ok.execution || {};
+    const output = String(execution.output || "");
+    instance.write(output || "(no output)");
+    if (execution.exit_code !== undefined && execution.exit_code !== null) {
+      instance.write("\r\n[exit " + execution.exit_code + "]");
+    }
+  } else {
+    const failure = (response && response.error) || {};
+    instance.write("\u001b[31m" + (failure.message || "the call failed") + "\u001b[0m");
+  }
+  promptTerminal();
+}
+
+function mountTerminal(host, vm) {
+  if (!window.Terminal) {
+    host.textContent = "The terminal component did not load, so this panel stays empty.";
+    return;
+  }
+  if (term.instance) {
+    try { term.instance.dispose(); } catch (error) { /* already gone with the page */ }
+  }
+  const instance = new window.Terminal({
+    convertEol: true, fontSize: 12, scrollback: 2000, theme: terminalTheme(),
+    cursorBlink: true,
+  });
+  instance.open(host);
+  term.instance = instance;
+  term.vm = vm;
+  term.buffer = "";
+  instance.write((vm || "guest") + "> ");
+  instance.onData((data) => {
+    if (term.busy) return;  // one command at a time: the transport is serial
+    if (data === "\r") {
+      submitTerminal();
+      return;
+    }
+    if (data === "\u007f") {
+      if (term.buffer) {
+        term.buffer = term.buffer.slice(0, -1);
+        instance.write("\b \b");
+      }
+      return;
+    }
+    if (data === "\u0003") {  // Ctrl+C clears the line, as in a shell
+      term.buffer = "";
+      instance.write("^C");
+      promptTerminal();
+      return;
+    }
+    if (data >= " " || data === "\t") {
+      term.buffer += data;
+      instance.write(data);
+    }
+  });
 }
 
 /* ---------- boot ---------- */

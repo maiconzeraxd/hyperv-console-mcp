@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import inspect
 import os
-from pathlib import Path
 from typing import Any, Mapping
 
 from ..config import Settings
@@ -58,7 +57,9 @@ def available() -> bool:
 
 def page() -> str:
     """The window's only file, inline CSS and JS included."""
-    return (Path(__file__).with_name("assets") / "index.html").read_text(encoding="utf-8")
+    from .page import page_text
+
+    return page_text()
 
 
 def _start_options(webview: Any) -> dict[str, Any]:

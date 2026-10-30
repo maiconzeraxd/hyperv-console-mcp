@@ -40,13 +40,13 @@ from urllib.parse import parse_qs, urlparse
 
 from ..errors import HyperVError
 from .api import Api
+from .page import page_text
 
 TOKEN_HEADER = "X-HyperV-Token"
 # The names a loopback origin can legitimately carry. A host header that is not
 # one of these is a name the attacker controls pointing at 127.0.0.1.
 LOOPBACK_NAMES = frozenset({"127.0.0.1", "localhost", "::1"})
 MAX_BODY_BYTES = 8 * 1024 * 1024
-ASSETS = Path(__file__).with_name("assets")
 EMPTY_META = 'name="hyperv-token" content=""'
 
 
@@ -252,7 +252,7 @@ def start(
     page: Path | None = None,
 ) -> ServeHandle:
     """Bind 127.0.0.1, serve the page, and answer the page's calls."""
-    text = (page or (ASSETS / "index.html")).read_text(encoding="utf-8")
+    text = page.read_text(encoding="utf-8") if page else page_text()
     token = secrets.token_urlsafe(32)
     server = _Server(("127.0.0.1", int(port)), _handler(token, api, text))
     thread = threading.Thread(target=server.serve_forever, daemon=True, name="hvmcp-serve")

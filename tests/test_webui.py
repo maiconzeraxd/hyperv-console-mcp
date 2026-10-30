@@ -341,8 +341,14 @@ def test_hyperv_manager_is_the_manager_and_not_a_reimplementation(
 
 
 def test_the_page_asks_for_no_network_and_loads_nothing_remote() -> None:
-    """The window is a file, not a site: no port, no CDN, no fetch."""
-    html = window.page()
+    """The window is a file, not a site: no port, no CDN, no fetch.
+
+    The scan strips block comments first, because the vendored xterm carries its
+    MIT header and a URL inside a comment is not a load. Everything that could
+    fetch — a `src`, a `link`, a dynamic import, an absolute URL in code — still
+    fails it.
+    """
+    html = re.sub(r"/\*.*?\*/", "", window.page(), flags=re.S)
     assert "http://" not in html
     assert "https://" not in html
     assert "<script src" not in html
