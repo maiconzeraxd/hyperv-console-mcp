@@ -155,6 +155,10 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
         ssh_root=tmp_path / "ssh",
         evidence_root=tmp_path / "evidence",
         audit_log=tmp_path / "audit.jsonl",
+        # The field default is the user's own directory, not the environment
+        # variable, so a scan that only sets the variable would read and write
+        # the real one. This fixture must never touch anything outside tmp_path.
+        event_directory=tmp_path / "events",
     )
 
 
@@ -339,3 +343,68 @@ def test_the_ssh_private_key_stays_in_its_file(
     # Everything except the key file itself must be clean.
     assert_tree_clean(Path(settings.ssh_root), allow=(key_path,))
     assert_audit_clean(settings)
+
+
+# -- the scan, as a negative control ---------------------------------------
+
+
+class LeakingService(HyperVService):
+    """The defect this file exists to catch: a result that carries the secret.
+
+    Nothing else about the build changes, so a scanner that stays green against
+    it is a scanner that cannot fail, and every assertion above is decoration.
+    """
+
+    def debug_kdnet_prepare(self, vm_name: str, confirm_vm: str, **kwargs: Any):
+        prepared = super().debug_kdnet_prepare(vm_name, confirm_vm, **kwargs)
+        prepared["key"] = PASSWORD
+        return prepared
+
+
+def test_the_scan_turns_red_on_a_build_that_leaks(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = FakeStore()
+    monkeypatch.setattr(kdnet, "generate_key", lambda: KDNET_KEY)
+    monkeypatch.setattr(kdnet, "key_store", lambda: store)
+    monkeypatch.setattr(kdnet, "find_debugger", lambda *a, **k: Path("C:/Debuggers/kd.exe"))
+    monkeypatch.setattr(
+        kdnet,
+        "host_address",
+        lambda s: (ipaddress.ip_network("10.77.0.0/24"), "10.77.0.1"),
+    )
+    monkeypatch.setattr(kdnet, "PowerShellDirectTransport", FakeGuestTransport)
+
+    prepared = LeakingService(FakeBackend(), settings).debug_kdnet_prepare(VM, VM)
+
+    # The same check the real scenario runs, against the same kind of result.
+    with pytest.raises(AssertionError, match="a test secret appeared"):
+        assert_clean("debug_kdnet_prepare", prepared)
+
+
+def test_every_scanner_fails_on_the_file_it_is_meant_to_read(
+    settings: Settings,
+) -> None:
+    """One leak per scanner, so none of the four can pass by not looking."""
+    root = Path(settings.evidence_root)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "collected.txt").write_text(f"password={PASSWORD}\n", encoding="utf-8")
+    with pytest.raises(AssertionError, match="a test secret appeared"):
+        assert_tree_clean(root)
+
+    directory = Path(settings.event_directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "events-2026-01-01.jsonl").write_text(
+        json.dumps({"operation": "guest_exec", "detail": SSH_KEY_MARKER}) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="a test secret appeared"):
+        assert_events_clean(settings)
+
+    assert settings.audit_log is not None
+    settings.audit_log.write_text(
+        json.dumps({"operation": "kd_attach", "net": f"key={KDNET_KEY}"}) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="a test secret appeared"):
+        assert_audit_clean(settings)
