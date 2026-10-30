@@ -1,8 +1,13 @@
 # Local dashboard
 
-The native Windows dashboard observes and controls the same policy-gated service used by the MCP server. It does not open an HTTP listener and does not bypass capability flags, the VM allowlist, or exact confirmation fields.
+The dashboard is a **thin client of the same service the MCP server uses**. It draws a page; it does not decide anything. Every button is a call to a `HyperVService` method through the same `dispatch` envelope the named pipe carries, so a page cannot reach past the allowlist, the per-VM level, the protected baseline, or a `confirm_*` field — those rules live in Python, and the AI meets them at the same door.
 
-The window itself is a WebView2 page: one HTML file with its CSS and JavaScript inline, loaded through pywebview with no local HTTP server and no port. It needs the Evergreen WebView2 runtime (present on current Windows 10/11 and with Edge) and `pywebview` (`pip install hyperv-console-mcp[ui]`). Without either, the tkinter window opens instead; `--classic` asks for it on any host. The page is a client of the same service, through the same `dispatch` envelope the pipe uses, so nothing here is a second door past the policy.
+Two consequences are worth stating plainly:
+
+- **No business rule lives in JavaScript.** The page composes paths and maps pixels; it does not decide what is allowed. When the window needs something the service does not offer, the service grows a method — which is also what makes the feature reachable by the AI through an MCP tool, because the two share it.
+- **No secret reaches the page.** The guest password, the SSH key and the KDNET key never enter the WebView, its console or its logs. The window asks for a rotation, a test or a revert; the value is generated, stored and used inside the service.
+
+The window is one HTML file with its CSS and JavaScript inline, loaded through pywebview with no local HTTP server and no port. It needs the Evergreen WebView2 runtime (present on current Windows 10/11 and with Edge) and `pywebview` (`pip install hyperv-console-mcp[ui]`). Without either, the classic tkinter window opens instead; `--classic` asks for it on any host.
 
 ## Start
 
@@ -12,26 +17,61 @@ Run from an elevated PowerShell when Hyper-V management requires elevation:
 python -I scripts\run_dashboard.py
 ```
 
-`--vm <name>` picks the VM up front. Without it the window opens the only VM Hyper-V reports on this host, and asks from a list when there is more than one — nothing in this program names a VM of its own. When `HYPERV_MCP_ALLOWED_VMS` is set it narrows that list, so an allowlist of one still opens without a prompt.
+`--vm <name>` picks the VM up front. Without it the window opens the fleet, and nothing in this program names a VM of its own. When `HYPERV_MCP_ALLOWED_VMS` is set it narrows what is listed, so an allowlist of one still opens without a prompt. After installation, `hyperv-dashboard` is equivalent. Use the same protected environment as the MCP host; a `.env` file is not loaded automatically.
 
-After installation, `hyperv-dashboard` is equivalent. Use the same protected environment as the MCP host; a `.env` file is not loaded automatically.
+## The window
 
-The debugger page's pipe name is derived from the chosen VM (`<vm>-kd`, lowercased, with anything the provider rejects turned into a hyphen), so two VMs configured from the same installation never share one.
+The **fleet** is the home page: every VM Hyper-V reported, its state, the level this host allows it, CPU and memory, and the power actions that level permits. Opening a VM creates a **workspace tab**; several may be open at once and only one is active. A workspace is the full set of per-VM pages:
 
-The sidebar shows the chosen VM's access level next to its name, and the capability list below it is that VM's — not the host-wide flags — so a `read-only` VM reads as read-only here even under the `lab` profile. Levels are set with `hyperv-access set "<vm>" read-only|control|lab`; see the README for what each one allows.
+- **Overview** — the VM's state, the level it is held to, and what the AI may do with it.
+- **Activity** — the live feed: actor, operation, VM, phase, progress and error code, for the AI and for this window, read from the same event bus. This is where the operator watches the AI work.
+- **Console** — the guest display as an image you can click and type into.
+- **Checkpoints** — the tree of states, with the operator's baseline marked and locked.
+- **Recovery** — power and checkpoint actions, including the forced ones that ask for a confirmation.
+- **Media** — an ISO, the DVD drive and boot order.
+- **Debugger** — COM1 serial, the kd session and the symbols it resolves.
+- **Guest** — the credential source, the automation toggles and one command.
+- **Lab** — diagnostics, package staging, verification and the cycle that runs a package.
+- **Files** — the host's four roots beside the guest's own disk.
 
-## Pages
+Closing the window does not stop a VM or guarantee that an already-running guest command was cancelled, and changing pages does not cancel a background operation.
 
-- **Overview:** host and VM state, capability indicators, guest diagnostics and explicit power/checkpoint actions.
-- **Activity:** operation actor, phase, progress and error code. Events from MCP and dashboard processes are read from the local event directory.
-- **Driver lab:** fixed-tool initialization, package staging, hash verification and evidence collection.
-- **Guest access:** the credential the host keeps in the Windows Credential Manager for this user, with buttons to set it locally, rotate it, test PowerShell Direct and SSH, and forget it. The password is typed into the dashboard, written straight into the vault, and never reaches the AI, the event log or the audit record. Below it, one row per automation setting (autologon, lock screen, Ctrl+Alt+Del, power and screen blanking, UAC consent, automatic update reboot), each with `leave` / `on` / `off`, plus an optional restart that waits for a desktop session.
-- **Console:** confirmed synthetic keyboard and mouse input.
-- **Recovery:** checkpoint inspection, creation, restore and deletion.
-- **Media:** host ISO selection and mount/eject on an existing DVD drive; the VM must already be Off.
-- **Debugger:** separate host COM1 and guest BCD preparation, serial attachment, output and confirmed serial input.
+## What the operator can do that the AI cannot
 
-Closing the dashboard does not stop a VM or guarantee that an already-running guest command was cancelled. Changing pages does not cancel a background operation.
+The human is a trusted actor, and three things are only theirs:
+
+- **Set or remove a VM's level.** `hyperv-access set "<vm>" read-only|control|lab` and the Overview page write the same file; no MCP tool reaches it. The level is the operator's decision about what the AI may do.
+- **Name the baseline checkpoint.** The protected checkpoint is recorded in the same access file. `delete_checkpoint` refuses it for every actor and `create_checkpoint` refuses to reuse its name, so the window and the AI are held to the same rule.
+- **Answer an approval.** See below.
+
+Everything else the window offers, the AI can do too, through the tool of the same name. That parity is enforced by a test: `tests/test_webui_contract.py` parses the page for the method names it calls and fails if one is missing from `HyperVService` or `Api`.
+
+## The console is an image, not video
+
+The console page renders `console_screenshot(source="thumbnail")` a few frames per second and sends clicks as guest-display pixels, mapping the `<img>`'s CSS box back through the `source_width`/`source_height` in the screenshot metadata. `capture_scale` and `coordinates_match_mouse` say whether that mapping is honest, and the page repeats the answer instead of guessing. Typing is batched into one `console_input` call, and a paste box covers OOBE, where the guest has no clipboard to share. For full fidelity open VMConnect from the same page: this is a picture of the display, not a video stream, and it cannot show a session the VMConnect desktop is drawing exclusively.
+
+Capture stops for a reason: the loop pauses when the window is hidden or the operator paused it, and it *stops asking* — rather than retrying twice a second — when the service refuses, which is what an Off VM or a level without `control` looks like.
+
+## The file manager
+
+Two panels, one per side. The host panel is limited to the four roots this server was configured with — `HYPERV_MCP_LAB_ROOT`, `HYPERV_MCP_EVIDENCE_ROOT`, `HYPERV_MCP_TRANSFER_ROOT` and `HYPERV_MCP_ISO_ROOT` — and never to `C:\`: a path is resolved and then compared with the resolved root, so `..` and an absolute path elsewhere fail the same check. The guest panel reaches the lab machine's own disk through the configured transport.
+
+Both sides list, create a folder, rename, delete and copy to the other side. Copying a file either way is `guest_put_file`/`guest_get_file`, so the SHA-256 is verified at the destination and the digest shown is the one the far side computed. Deleting takes two clicks on the same row and the service still requires the path spelled back; a non-empty directory additionally needs the "delete folders recursively" box, and the guest script refuses the tree without it too. Progress comes from the event bus: the bar reads the `progress` events the transfer publishes, so it shows the same numbers on the Activity page.
+
+## Delivery waves
+
+The dashboard was delivered in waves, each one gated by the full test suite before it was committed:
+
+| Wave | Delivered |
+|---|---|
+| Transport | The page calls the service through the same envelope as the pipe; live events over the existing bus; a fake service the tests drive without a WebView. |
+| 1 | The fleet, the live activity feed, the non-modal approval queue, host status and a connection indicator. |
+| 2 | The clickable console, the checkpoint tree with a locked baseline, and in-place two-click confirmations. |
+| 3 | The host↔guest file manager: four roots, both directions, digest and progress. |
+| 4 | Lab plan/apply/receipts, the debugger's crash triage, the serial console and the prepare-guest buttons. |
+| 5 | Multi-VM matrix, run recording and per-VM transport health. |
+
+Waves 4 and 5 are not built yet.
 
 ## Cross-process activity
 
@@ -41,7 +81,7 @@ The default event directory is:
 %LOCALAPPDATA%\HyperVConsoleMCP\events
 ```
 
-Override it with `HYPERV_MCP_EVENT_DIRECTORY`. Both MCP and dashboard must use the same directory. Events are appended as one JSON line per record to `events-YYYYMMDD.jsonl`, under a process lock so MCP and dashboard can write concurrently; the dashboard tails those files by byte offset instead of re-reading the whole history every poll. `HYPERV_MCP_EVENT_RETENTION_DAYS` (default 14) deletes older daily files the first time a process writes in a day.
+Override it with `HYPERV_MCP_EVENT_DIRECTORY`. Both MCP and dashboard must use the same directory. Events are appended as one JSON line per record to `events-YYYYMMDD.jsonl`, under a process lock so both processes can write concurrently; the window tails those files by byte offset instead of re-reading the whole history every poll. `HYPERV_MCP_EVENT_RETENTION_DAYS` (default 14) deletes older daily files the first time a process writes in a day.
 
 Records contain operation metadata only; they exclude guest commands, typed text, credentials and file contents. Local event files may reveal VM names and operation history, so protect the profile directory normally.
 
@@ -55,10 +95,8 @@ $env:HYPERV_MCP_REQUIRE_DASHBOARD_APPROVAL = 'true'
 
 When enabled, every mutating MCP tool waits for one local decision. The gate sits at tool level, not at bridge level: one `lab_stage` asks once for the whole package instead of once per file and chunk, one `console_input` asks once for the whole batch, and nested calls inherit the approval. Read-only tools such as `lab_verify`, `lab_diagnostics`, `guest_report` and `events_snapshot` never ask. Local `serial_connect`, `serial_send`, `serial_disconnect` and `console_screenshot` requests pass through the same gate.
 
-A request becomes a card in the window's right-hand queue instead of a modal prompt. The queue appears when something is waiting and leaves when the last card is answered, so several requests stay readable at once and the window keeps working while an operation is held: the operator can read the VM's state, another page, or the previous run before deciding. A card is bound to the broker's request id, and it disappears on its own when the broker stops waiting, so a timed-out request cannot leave a live-looking button behind.
+The operator's own clicks do not ask themselves for permission: requests made by the window (`ui`/`dashboard`) are not queued, only those from the AI (`mcp`).
+
+A request becomes a card in the right-hand queue instead of a modal prompt. The queue appears when something is waiting and leaves when the last card is answered, so several requests stay readable at once and the window keeps working while an operation is held: the operator can read the VM's state, another page, or the previous run before deciding. A card is bound to the broker's request id and disappears when the broker stops waiting, so a timed-out request cannot leave a live-looking button behind.
 
 The current-user-only named pipe carries a request ID, operation, VM name and a secret-free summary built by the tool: the power action, checkpoint name or ID, guest path with size and SHA-256, package ID with file count and manifest hash, or the first 20 lines of a `guest_exec` command plus the SHA-256 of the full command. The card renders that summary in a scrollable panel; typed text and serial input are reported only by length, so a password never reaches the broker. Each response applies to one request; timeout, refusal or an unavailable broker denies the operation before it reaches the backend or local action. The first pipe instance is created with `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a second broker cannot share the name, and the client verifies the server process is a Python interpreter owned by the current user before sending anything.
-
-Dashboard-originated actions use their own confirmation dialogs. Exact `confirm_*` values in the MCP schema are consistency checks against accidental parameter mismatch, not independent proof of human intent.
-
-The dashboard never invokes the manual lab runner and never loads a driver or mapper.

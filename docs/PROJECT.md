@@ -1575,8 +1575,16 @@ rendered from a live VM — the capture path needs an elevated session.
   throttle), the four operations over both transports in the conformance file, and the
   service-layout test now counts `files` as a domain and reads only `*Service` classes so a
   private helper's `__init__` is not mistaken for a method with two homes.
-- Still open: the two-panel page itself, waves 4–5, the `docs/DASHBOARD.md` rewrite, and the
-  console cadence measurements for `docs/PERFORMANCE.md`.
+- **The page is two panels and a bar.** The Files tab lists both sides side by side: the root
+  picker is drawn from `file_roots` (never from a list in JavaScript), each panel keeps its own
+  path with an Up button, and every row offers what its side allows — Open for a directory,
+  “To guest →”/“To host →” for a file, Rename inline, and a Delete that only acts on the
+  second click. The overwrite box supplies the `confirm_path` the service demands, so the rule
+  is still the service's; the page only says which path it means. The progress bar reads the
+  `progress` events the transfer already publishes, so it cannot drift from the Activity page.
+- Tests: the page names only methods `HyperVService` has, checked by `tests/test_webui_contract.py`
+  for the eleven file-manager names as for every other button.
+- Still open: waves 4–5, a light theme for the window, and live numbers for the console cadence.
 
 ## Phase 4 report
 

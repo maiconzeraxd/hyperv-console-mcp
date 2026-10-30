@@ -165,6 +165,21 @@
   table.events th, table.events td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
   table.events th { color: var(--muted); font-weight: 600; }
   table.events td.err { color: var(--error); }
+  /* ---------- file manager ---------- */
+  /* Two listings side by side are the point of the page, so a cell never
+     widens its card: a long name wraps instead of pushing the other panel. */
+  .files .card { min-width: 0; }
+  .files table.events { table-layout: fixed; }
+  .files table.events td { vertical-align: top; overflow-wrap: anywhere; }
+  .files table.events td:last-child { white-space: nowrap; }
+  .files .path {
+    margin: 0 0 10px; font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: .8rem; color: var(--muted); overflow-wrap: anywhere;
+  }
+  table.events tr.pending { background: rgba(251, 191, 36, .10); }
+  progress.transfer { width: 100%; height: 10px; accent-color: var(--accent); }
+  .transfer-line { display: flex; justify-content: space-between; gap: 12px; font-size: .78rem; color: var(--muted); margin-top: 6px; }
+  .transfer-line .digest { font-family: Consolas, "Cascadia Mono", monospace; overflow-wrap: anywhere; }
   /* ---------- output ---------- */
   #output {
     position: sticky;
@@ -279,6 +294,7 @@ const PAGES = [
   ["Debugger", "debugger", "COM1 serial, the kd session and the symbols it resolves."],
   ["Guest", "guest", "Credential source, automation toggles and one command."],
   ["Lab", "lab", "Directories, packages, diagnostics, and the cycle that runs one."],
+  ["Files", "files", "Two panels: the host roots this window may browse, and the guest's own disk."],
 ];
 
 const state = {
@@ -292,6 +308,10 @@ const state = {
   // The checkpoint a click has asked to restore or delete, waiting for the
   // second click that means it. A modal would take the page away instead.
   confirm: null,
+  // The file manager's own state: which root, where each panel is looking, the
+  // row waiting for a second click, and the digest of the last transfer. It
+  // outlives a render, because navigating a directory is a render.
+  files: null,
 };
 
 /* ---------- small helpers ---------- */
@@ -793,6 +813,113 @@ const builders = {
             el("div", { class: "row", style: "margin:0" },
               el("code", {}, "Invoke-DriverLabRun.ps1 -PackageId … -RunId … -ExpectedManifestSha256 … -ApproveExecution 'EXECUTE <package> <run>'"))));
   },
+
+  async files() {
+    const files = fileState();
+    const roots = await api().call("file_roots", {});
+    const listed = (roots && roots.ok && roots.ok.roots) || [];
+    // A root that vanished from the configuration must not stay selected: the
+    // page asks for what the service named, not for what it remembered.
+    if (!listed.some((root) => root.name === files.root)) {
+      files.root = ((listed.find((root) => root.exists) || listed[0]) || {}).name || "";
+    }
+    const chosen = listed.find((root) => root.name === files.root) || null;
+    const host = chosen
+      ? await api().call("host_list_dir", { root: files.root, path: files.host })
+      : null;
+    const guest = await api().call("guest_list_dir", { vm_name: state.vm, guest_path: files.guest });
+    const hostDirectory = (host && host.ok && host.ok.directory) || null;
+    const guestDirectory = (guest && guest.ok && guest.ok.directory) || null;
+
+    const up = (side, value) => {
+      const parent = dropLast(value);
+      if (parent === value) return null;
+      return async () => {
+        files[side] = parent;
+        files.pending = null;
+        await render();
+      };
+    };
+    const pathLine = (text, back) =>
+      el("div", { class: "row", style: "margin:0 0 10px;align-items:center" },
+        el("span", { class: "path", style: "margin:0" }, text || "(root)"),
+        back ? el("button", { class: "act", onclick: back }, "Up") : null);
+
+    const hostPanel = panel("Host", "The four roots this server was configured with, and nothing outside them. A path that resolves elsewhere is refused.",
+      listed.length
+        ? el("div", { class: "row" },
+            field("Root", el("select", { id: "file-root" },
+              ...listed.map((root) => el("option", {
+                value: root.name, selected: root.name === files.root ? "selected" : null,
+              }, root.name + (root.exists ? "" : " (missing)"))))),
+            el("button", {
+              class: "act",
+              onclick: async () => {
+                files.root = fieldValue("file-root");
+                files.host = "";
+                files.pending = null;
+                await render();
+              },
+            }, "Open"))
+        : el("p", { class: "hint" }, "No host root is configured."),
+      chosen ? pathLine(hostFull(chosen.path, files.host), files.host ? up("host", files.host) : null) : null,
+      hostDirectory
+        ? fileTable(hostDirectory.entries, "host", files, chosen)
+        : el("p", { class: "hint" }, (host && host.error && host.error.message) || "This root could not be listed."),
+      el("div", { class: "row", style: "margin:12px 0 0" },
+        field("New folder here", input_("file-host-new", "")),
+        el("button", {
+          class: "act primary",
+          onclick: () => fileOp("host_make_dir", {
+            root: files.root, path: joinPath(files.host, fieldValue("file-host-new")),
+          }),
+        }, "Create")),
+      el("div", { class: "row", style: "margin:8px 0 0" },
+        field("Overwrite a file written here", el("input", { id: "file-to-host-overwrite", type: "checkbox" })),
+        field("Delete folders recursively", el("input", { id: "file-host-recursive", type: "checkbox" }))));
+
+    const guestPanel = panel("Guest", "The lab machine's own disk, reached over the configured transport. Deleting asks for a second click.",
+      el("div", { class: "row" },
+        field("Path", input_("file-guest-path", files.guest)),
+        el("button", {
+          class: "act",
+          onclick: async () => {
+            files.guest = fieldValue("file-guest-path");
+            files.pending = null;
+            await render();
+          },
+        }, "Go")),
+      pathLine(files.guest, up("guest", files.guest)),
+      guestDirectory
+        ? fileTable(guestDirectory.entries, "guest", files, chosen)
+        : el("p", { class: "hint" }, (guest && guest.error && guest.error.message) || "The guest did not answer."),
+      el("div", { class: "row", style: "margin:12px 0 0" },
+        field("New folder here", input_("file-guest-new", "")),
+        el("button", {
+          class: "act primary",
+          onclick: () => fileOp("guest_make_dir", {
+            vm_name: state.vm, guest_path: joinPath(files.guest, fieldValue("file-guest-new")),
+          }),
+        }, "Create")),
+      el("div", { class: "row", style: "margin:8px 0 0" },
+        field("Overwrite a file written here", el("input", { id: "file-to-guest-overwrite", type: "checkbox" })),
+        field("Delete folders recursively", el("input", { id: "file-guest-recursive", type: "checkbox" }))));
+
+    const transfer = panel("Transfers", "The bytes cross through the service, so the feed carries their progress and the digest is the one the far side computed.",
+      el("progress", { class: "transfer", id: "transfer-bar", max: "100", value: "0" }),
+      el("div", { class: "transfer-line" },
+        el("span", { id: "transfer-label" }, "no transfer yet"),
+        el("span", { class: "digest", id: "transfer-detail" }, "")),
+      files.last
+        ? el("p", { class: "hint", style: "margin:8px 0 0" },
+            "Last: " + files.last.method + " → " + files.last.path + " · " + files.last.size +
+            " bytes · sha256 " + files.last.sha256)
+        : null);
+
+    return el("div", {},
+      el("div", { class: "grid files" }, hostPanel, guestPanel),
+      el("div", { style: "margin-top:14px" }, transfer));
+  },
 };
 
 /* ---------- the pieces that are not a form ---------- */
@@ -1025,6 +1152,162 @@ async function confirmCheckpoint(pending) {
   await render();
 }
 
+/* ---------- the file manager ---------- */
+// The panels' own memory: where each one is looking, the row waiting for its
+// second click, the entry being renamed, and the digest of the last transfer.
+// A render rebuilds the page, so this cannot live in a local variable.
+function fileState() {
+  if (!state.files) {
+    state.files = { root: "", host: "", guest: "C:\\DriverLab", renaming: null, pending: null, last: null };
+  }
+  return state.files;
+}
+
+const dropLast = (path) => {
+  const text = String(path || "");
+  const cut = text.lastIndexOf("\\");
+  if (cut < 0) return "";
+  const head = text.slice(0, cut);
+  return /^[A-Za-z]:$/.test(head) ? head + "\\" : head;
+};
+
+// A path as the service names one: backslashes, no doubled separator. The host
+// listing is relative to its root, so this is also how a listed entry becomes
+// the `local_path` a transfer takes.
+const joinPath = (base, name) => {
+  const head = String(base || "").replace(/\\+$/, "");
+  const tail = String(name || "").replace(/^\\+/, "");
+  if (!tail) return head;
+  return head ? head + "\\" + tail : tail;
+};
+
+const hostFull = (rootPath, relative) => joinPath(rootPath, relative);
+
+function fileTable(entries, side, files, chosen) {
+  if (!entries.length) return el("p", { class: "hint" }, "This directory is empty.");
+  return el("table", { class: "events" },
+    el("thead", {}, el("tr", {}, ...["Name", "Kind", "Size", ""].map((head) => el("th", {}, head)))),
+    el("tbody", {}, ...entries.map((entry) => fileRow(entry, side, files, chosen))));
+}
+
+function fileRow(entry, side, files, chosen) {
+  const isDirectory = entry.type === "directory";
+  const full = side === "host" ? hostFull(chosen ? chosen.path : "", entry.path) : entry.path;
+  const key = side + ":" + full;
+  const pending = Boolean(files.pending && files.pending.key === key);
+  const open = async () => {
+    if (side === "host") files.host = entry.path; else files.guest = entry.path;
+    files.pending = null;
+    files.renaming = null;
+    await render();
+  };
+
+  const nameCell = files.renaming === key
+    ? el("div", { class: "row", style: "margin:0" },
+        el("input", { id: "file-rename", value: entry.name }),
+        el("button", { class: "act primary", onclick: () => renameEntry(side, entry, files) }, "Rename"),
+        el("button", { class: "act", onclick: async () => { files.renaming = null; await render(); } }, "Cancel"))
+    : isDirectory
+      ? el("button", { class: "link", onclick: open }, entry.name)
+      : entry.name;
+
+  const actions = [];
+  if (isDirectory) {
+    actions.push(el("button", { class: "act", onclick: open }, "Open"));
+  } else if (entry.type === "file") {
+    actions.push(el("button", {
+      class: "act primary", onclick: () => copyEntry(side, entry, files, chosen),
+    }, side === "host" ? "To guest →" : "To host →"));
+  }
+  actions.push(el("button", {
+    class: "act",
+    onclick: async () => { files.renaming = key; files.pending = null; await render(); },
+  }, "Rename"));
+  actions.push(pending
+    ? el("button", { class: "act danger", onclick: () => deleteEntry(side, entry, files) }, "Confirm delete")
+    : el("button", {
+        class: "act",
+        onclick: async () => { files.pending = { key }; files.renaming = null; await render(); },
+      }, "Delete"));
+
+  return el("tr", { class: pending ? "pending" : "" },
+    el("td", {}, nameCell),
+    el("td", {}, entry.type),
+    el("td", {}, isDirectory || entry.size === null || entry.size === undefined ? "—" : entry.size),
+    el("td", {}, el("div", { class: "row", style: "margin:0;flex-wrap:wrap" }, ...actions)));
+}
+
+async function fileOp(method, payload) {
+  await call(method, payload);
+  await render();
+}
+
+async function renameEntry(side, entry, files) {
+  const name = fieldValue("file-rename");
+  const response = side === "host"
+    ? await call("host_rename", { root: files.root, path: entry.path, new_name: name })
+    : await call("guest_rename", { vm_name: state.vm, guest_path: entry.path, new_name: name });
+  if (response && response.ok) files.renaming = null;
+  await render();
+}
+
+async function deleteEntry(side, entry, files) {
+  const recursive = checked(side === "host" ? "file-host-recursive" : "file-guest-recursive");
+  const response = side === "host"
+    ? await call("host_delete", {
+        root: files.root, path: entry.path, confirm_path: entry.path, recursive,
+      })
+    : await call("guest_delete", {
+        vm_name: state.vm, guest_path: entry.path, confirm_path: entry.path, recursive,
+      });
+  if (response && response.ok) files.pending = null;
+  await render();
+}
+
+async function copyEntry(side, entry, files, chosen) {
+  const rootPath = chosen ? chosen.path : "";
+  if (side === "host") {
+    const target = joinPath(files.guest, entry.name);
+    const overwrite = checked("file-to-guest-overwrite");
+    noteTransfer("guest_put_file", await call("guest_put_file", {
+      vm_name: state.vm, local_path: hostFull(rootPath, entry.path),
+      guest_path: target, overwrite, ...(overwrite ? { confirm_path: target } : {}),
+    }));
+  } else {
+    const target = hostFull(rootPath, joinPath(files.host, entry.name));
+    const overwrite = checked("file-to-host-overwrite");
+    noteTransfer("guest_get_file", await call("guest_get_file", {
+      vm_name: state.vm, guest_path: entry.path, local_path: target,
+      overwrite, ...(overwrite ? { confirm_path: target } : {}),
+    }));
+  }
+  await render();
+}
+
+function noteTransfer(method, response) {
+  const file = response && response.ok && response.ok.file;
+  if (!file) return;
+  fileState().last = { method, path: file.path, size: file.size, sha256: file.sha256 };
+}
+
+function drawTransfer() {
+  const bar = document.getElementById("transfer-bar");
+  if (!bar) return;
+  // The feed already carries the transfer; the bar reads it rather than
+  // measuring anything of its own.
+  const event = [...state.events].reverse().find((item) =>
+    (item.operation === "guest_put_file" || item.operation === "guest_get_file") && item.phase === "progress");
+  bar.value = event ? Number(event.progress) || 0 : 0;
+  const label = document.getElementById("transfer-label");
+  if (label) {
+    label.textContent = event
+      ? event.operation.replace("guest_", "").replace("_", " ") + " · " + event.progress + "% · " + (event.message || "")
+      : "no transfer yet";
+  }
+  const detail = document.getElementById("transfer-detail");
+  if (detail) detail.textContent = state.files && state.files.last ? "sha256 " + state.files.last.sha256 : "";
+}
+
 /* ---------- chrome ---------- */
 function renderConn() {
   const node = document.getElementById("conn");
@@ -1108,6 +1391,7 @@ async function render() {
     page.append(panel("This page could not read the host", String(error)));
   }
   if (state.page === "activity") drawActivity();
+  if (state.page === "files") drawTransfer();
 }
 
 function go(key) {
@@ -1178,6 +1462,7 @@ async function watchEvents() {
             if (state.events.length > 800) state.events = state.events.slice(-800);
             state.cursor = Math.max(state.cursor, response.ok.latest_sequence || 0);
             if (state.page === "activity") drawActivity();
+            if (state.page === "files") drawTransfer();
           } else if ((response.ok.latest_sequence || 0) > state.cursor) {
             state.cursor = response.ok.latest_sequence;
           }

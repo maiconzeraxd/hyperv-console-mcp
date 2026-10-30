@@ -35,6 +35,20 @@ python scripts/bench_transport.py --vm LAB-Test --json-out bench.json
 
 It writes and removes `C:\DriverLab\Bench\` inside the guest, so only point it at a VM you can throw away. **No live numbers have been recorded yet**: the script has not been run against a VM in this delivery, and this document deliberately does not guess at what it would print.
 
+## The window's console cadence
+
+The console page is not a video stream: every frame is a full `console_screenshot` over the same pipe the AI uses, so the cadence is a budget, not a preference. `SCREEN_INTERVAL_MS` is 800 ms — roughly 1.25 frames a second, enough to follow a boot or a bugcheck countdown — and each capture is capped at 1600 px wide.
+
+The loop is deliberately lazy in three ways:
+
+- **One frame in flight.** The next timer is armed only after the previous promise settles, so a slow capture delays the next frame instead of queueing a backlog the page then has to drop.
+- **A hidden or paused window issues no capture at all.** The timer keeps ticking so the page resumes instantly, but nothing crosses the pipe while the operator is on another tab or has pressed Pause, and the VM is unaffected either way.
+- **A refusal stops the loop.** An Off VM, a paused VM or a level without screenshots is not a transient failure; the page says what the service said and stops asking, rather than retrying twice a second and filling the feed with the same error.
+
+The thumbnail path is the only consumer of this cadence; `console_screenshot(source="vmconnect")` is requested once, by the button that opens it, and never on a timer.
+
+No live frame-time numbers are recorded here yet. The figure that would matter is the round trip of one capture against a running guest on this host — a measurement `scripts/bench_transport.py` does not take, because it measures guest commands and file transfers rather than the VMConnect capture path.
+
 ## Recommended measurement matrix
 
 1. Persistent local worker: VM status and checkpoint listing.
