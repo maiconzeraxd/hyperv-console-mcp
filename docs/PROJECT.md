@@ -2525,6 +2525,30 @@ roadmap's §2 is explicit: no arguments means the interface, and the service com
   WebView2 window unattended was left out of this run; the window itself has been exercised in
   earlier waves through `--serve` in a real browser, which is the same page and the same service.
 
+### 2026-10-30 — v0.4 fixes 1: tkinter is optional, so it is not imported to be optional
+
+The Linux CI job runs the suite without `python3-tk`, and it could not even collect two tests:
+`dashboard.py` imported tkinter at module level, and `cli._window`'s fallback imports
+`dashboard.main`. Since v0.4 the classic window is an optional fallback, and importing an optional
+dependency eagerly is simply wrong.
+
+- **The module was split.** `dashboard.py` keeps what does not draw — `initial_vm_name`, the notes,
+  `main` — and imports no tkinter at all. `dashboard_tk.py` holds the four classes and the two
+  functions that open the window, and is imported only when somebody asks for it.
+- **A host without Tk gets a sentence, not a traceback.** `dashboard.NoTkinter` is raised by
+  `_classic_window` and printed by `main` (a missing Tk also means no message box, so the console is
+  the only place left), naming both fixes: `python3-tk` or the `[ui]` extra. Exit code 2.
+- **Two tests moved with the code**: `test_dashboard.py` imports `Dashboard` from `dashboard_tk`, and
+  `test_service_remote.py` sweeps both files for `self.service.<method>(` calls, since the sweep is
+  about names and not about which file they are in.
+- Tests: `tests/test_cli.py` two (importing `dashboard` succeeds with tkinter blocked, and the
+  fallback says what to install instead of raising `ModuleNotFoundError`). Both fail against the old
+  module layout.
+- **Proved with Tk blocked**: the whole suite runs as a host without Tk would —
+  `1179 passed, 2 skipped` (the dashboard tests skip themselves, as they already did), against
+  `1191 passed` with Tk present.
+- Gate: 1191 passed / 1 skipped, ruff clean.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three

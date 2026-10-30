@@ -9,7 +9,8 @@ import pytest
 
 tkinter = pytest.importorskip("tkinter", reason="the dashboard is a tkinter application")
 
-from hyperv_console_mcp.dashboard import Dashboard, existing_pipe_name, initial_vm_name  # noqa: E402
+from hyperv_console_mcp.dashboard import existing_pipe_name, initial_vm_name  # noqa: E402
+from hyperv_console_mcp.dashboard_tk import Dashboard  # noqa: E402
 
 
 class UiBackend:
