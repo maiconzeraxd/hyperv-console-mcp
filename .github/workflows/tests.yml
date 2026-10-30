@@ -2,7 +2,7 @@ name: tests
 
 on:
   push:
-    branches: [main, v0.2-autonomous-lab]
+    branches: [main, v0.2-autonomous-lab, v0.3]
   pull_request:
 
 permissions:
@@ -59,7 +59,10 @@ jobs:
       - name: Build package
         run: python -m build
 
-  import-check:
+  # The suite is expected to run clean on Linux: the Windows-only tests carry a
+  # skipif, and every ctypes/WinDLL use is inside a function, so importing a
+  # module here proves the laziness as well as the logic.
+  linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -68,6 +71,10 @@ jobs:
           python-version: '3.11'
           cache: pip
       - name: Install package
-        run: python -m pip install .
+        run: python -m pip install -e '.[dev]'
+      - name: Lint
+        run: python -m ruff check src tests scripts
+      - name: Run unit tests
+        run: python -m pytest
       - name: Import Windows-specific modules safely
         run: python -I -c "import hyperv_console_mcp.capture, hyperv_console_mcp.ipc, hyperv_console_mcp.serial"
