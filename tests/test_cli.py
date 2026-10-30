@@ -228,3 +228,45 @@ def test_the_help_lists_the_three_doors(
     assert "--serve" in printed
     assert "127.0.0.1" in printed
     assert ran == []
+
+def test_the_window_is_the_page_when_webview2_is_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Since v0.4 the interface is the page; the dashboard is the fallback."""
+    opened: list[Any] = []
+    monkeypatch.setattr("hyperv_console_mcp.webui.window.available", lambda: True)
+    monkeypatch.setattr(
+        "hyperv_console_mcp.webui.window.run",
+        lambda vm_name=None, **kwargs: opened.append(vm_name) or True,
+    )
+    monkeypatch.setattr(
+        "hyperv_console_mcp.dashboard.main", lambda arguments: opened.append(("dashboard", arguments))
+    )
+
+    assert cli._window(["--vm", "NORTH-Test"]) == 0
+
+    assert opened == ["NORTH-Test"]
+
+
+def test_without_webview2_the_dashboard_still_opens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A host with no WebView2 runtime still gets a window, not an error."""
+    opened: list[Any] = []
+    monkeypatch.setattr("hyperv_console_mcp.webui.window.available", lambda: False)
+    monkeypatch.setattr(
+        "hyperv_console_mcp.dashboard.main", lambda arguments: opened.append(list(arguments))
+    )
+
+    assert cli._window(["--vm", "NORTH-Test"]) == 0
+
+    assert opened == [["--vm", "NORTH-Test"]]
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [(["--vm", "A"], "A"), (["--vm=B"], "B"), (["--ui"], None), ([], None)],
+)
+def test_the_vm_flag_is_read_from_either_spelling(arguments: list[str], expected: str | None) -> None:
+    assert cli._vm_flag(arguments) == expected
+

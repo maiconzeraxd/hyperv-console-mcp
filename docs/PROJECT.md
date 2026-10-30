@@ -2506,6 +2506,25 @@ already has. That needed a screen, and it needed a fact the page did not have.
   `set_credential` is proved by tests with a fake vault. Writing a throwaway credential into the
   operator's real Credential Manager is not something a probe should do.
 
+### 2026-10-30 — v0.4 wave 8: one command, and the window it was always meant to open
+
+`hyperv-console-mcp` with no arguments opened the **tkinter dashboard**, which v0.4 is retiring. The
+roadmap's §2 is explicit: no arguments means the interface, and the service comes up with it.
+
+- **`cli._window` opens the page in a WebView2 window** when the host can (`pywebview` installed
+  and the WebView2 runtime present), and falls back to the tkinter dashboard when it cannot —
+  a host without the optional `[ui]` extra still gets a window instead of an error. `--vm NAME`
+  (either spelling) picks the VM the window opens on.
+- **The service comes up with it, once.** The window is a client of the shared host through
+  `open_service`, which calls `ensure_running()`: the first launch starts the host, the second
+  joins it, and no run rewrites the operator's configuration.
+- Tests: `tests/test_cli.py` four (the page wins when WebView2 is there and is given the VM, the
+  dashboard still opens without it, and both `--vm` spellings plus the absent case).
+- **Not validated live:** this interpreter has no `pywebview`, so `available()` is `False` here and
+  the bare command takes the fallback path — which is the path the tests prove. Opening a real
+  WebView2 window unattended was left out of this run; the window itself has been exercised in
+  earlier waves through `--serve` in a real browser, which is the same page and the same service.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three

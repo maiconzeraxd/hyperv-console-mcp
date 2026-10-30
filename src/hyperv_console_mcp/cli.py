@@ -108,10 +108,37 @@ def _serve() -> int:
 
 
 def _window(arguments: list[str]) -> int:
+    """The interface: the page in a WebView2 window, or the dashboard without it.
+
+    Since v0.4 the page is the interface, and this is what ``hyperv-console-mcp``
+    with no arguments runs. Opening it also brings the shared service up: the
+    window connects through ``open_service``, which starts the host when nothing
+    is listening — one command, nothing to configure, and a second launch joins
+    the service instead of starting another.
+
+    The tkinter dashboard stays as the fallback for a host without the WebView2
+    runtime, because the alternative is a command that opens nothing at all.
+    """
+    from .webui import window as interface
+
+    if interface.available() and interface.run(_vm_flag(arguments)):
+        return 0
     from .dashboard import main as dashboard_main
 
     dashboard_main(arguments)
     return 0
+
+
+def _vm_flag(arguments: Sequence[str]) -> str | None:
+    """``--vm NAME`` or ``--vm=NAME``, which is all the window takes."""
+    rest = list(arguments)
+    while rest:
+        item = rest.pop(0)
+        if item == "--vm" and rest:
+            return rest.pop(0)
+        if item.startswith("--vm="):
+            return item.split("=", 1)[1]
+    return None
 
 
 def _browser(arguments: list[str]) -> int:
