@@ -472,6 +472,113 @@ function Copy-Item {
         )
 
 
+# Copy-VMFile is the fast upload path: it moves the bytes over the VMBus instead
+# of the remoting session. These mocks put it in front of the session copy, which
+# is the fallback, so a test can see which one carried the file.
+COPY_VMFILE_ENABLED = """
+function Get-VMIntegrationService {
+    param($VMName, $Name, $ErrorAction)
+    [pscustomobject]@{ Name = $Name; Enabled = $true }
+}
+function Copy-VMFile {
+    param($VMName, $SourcePath, $DestinationPath, [switch]$CreateFullPath, $FileSource,
+          $ErrorAction, [switch]$Force)
+    $parent = [IO.Path]::GetDirectoryName($DestinationPath)
+    if ($parent -and -not [IO.Directory]::Exists($parent)) {
+        [void][IO.Directory]::CreateDirectory($parent)
+    }
+    Microsoft.PowerShell.Management\\Copy-Item -LiteralPath $SourcePath -Destination $DestinationPath -Force
+}
+"""
+
+
+def test_guest_put_file_prefers_copy_vmfile_when_the_guest_service_is_enabled(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "host" / "driver.sys"
+    source.parent.mkdir()
+    source.write_bytes(b"MZ" + bytes(range(32)))
+    target = tmp_path / "guest" / "driver.sys"
+    no_session_copy = SESSION_COPY + COPY_VMFILE_ENABLED + """
+function Copy-Item {
+    param($LiteralPath, $Destination, $ToSession, $FromSession, [switch]$Force)
+    throw 'The session copy should not run while Copy-VMFile is available.'
+}
+"""
+    result = invoke_with_mocks(
+        tmp_path, no_session_copy, "guest_put_file",
+        {
+            **GUEST_PAYLOAD, "local_path": str(source),
+            "guest_path": str(target), "overwrite": False,
+        },
+    )
+    assert result["via"] == "copy-vmfile"
+    assert target.read_bytes() == source.read_bytes()
+    assert result["file"]["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+def test_guest_put_file_falls_back_to_the_session_when_copy_vmfile_fails(
+    tmp_path: Path,
+) -> None:
+    """The Guest Service Interface can be enabled and still not answer, so a
+    refused Copy-VMFile must degrade to the session copy instead of failing the
+    upload - and the guest digest still decides whether it worked."""
+    source = tmp_path / "host" / "driver.sys"
+    source.parent.mkdir()
+    source.write_bytes(b"MZ" + bytes(range(16)))
+    target = tmp_path / "guest" / "driver.sys"
+    refused = SESSION_COPY + """
+function Get-VMIntegrationService {
+    param($VMName, $Name, $ErrorAction)
+    [pscustomobject]@{ Name = $Name; Enabled = $true }
+}
+function Copy-VMFile {
+    param($VMName, $SourcePath, $DestinationPath, [switch]$CreateFullPath, $FileSource,
+          $ErrorAction, [switch]$Force)
+    throw 'The guest did not answer the copy request.'
+}
+"""
+    result = invoke_with_mocks(
+        tmp_path, refused, "guest_put_file",
+        {
+            **GUEST_PAYLOAD, "local_path": str(source),
+            "guest_path": str(target), "overwrite": False,
+        },
+    )
+    assert result["via"] == "psdirect"
+    assert target.read_bytes() == source.read_bytes()
+    assert result["file"]["sha256"] == hashlib.sha256(source.read_bytes()).hexdigest()
+
+
+def test_guest_put_file_uses_the_session_when_the_guest_service_is_disabled(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "host" / "driver.sys"
+    source.parent.mkdir()
+    source.write_bytes(b"MZ")
+    target = tmp_path / "guest" / "driver.sys"
+    disabled = SESSION_COPY + """
+function Get-VMIntegrationService {
+    param($VMName, $Name, $ErrorAction)
+    [pscustomobject]@{ Name = $Name; Enabled = $false }
+}
+function Copy-VMFile {
+    param($VMName, $SourcePath, $DestinationPath, [switch]$CreateFullPath, $FileSource,
+          $ErrorAction, [switch]$Force)
+    throw 'Copy-VMFile should not be attempted for a disabled Guest Service Interface.'
+}
+"""
+    result = invoke_with_mocks(
+        tmp_path, disabled, "guest_put_file",
+        {
+            **GUEST_PAYLOAD, "local_path": str(source),
+            "guest_path": str(target), "overwrite": False,
+        },
+    )
+    assert result["via"] == "psdirect"
+    assert target.read_bytes() == source.read_bytes()
+
+
 def test_guest_get_file_leaves_no_partial_download_behind(tmp_path: Path) -> None:
     guest_file = tmp_path / "guest" / "dump.bin"
     guest_file.parent.mkdir()

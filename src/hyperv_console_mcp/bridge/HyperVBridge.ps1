@@ -358,6 +358,21 @@ function Get-HostFileSha256 {
     return ([BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant()
 }
 
+# Copy-VMFile is the fast upload path - it moves the bytes over the VMBus rather
+# than the remoting session - but it exists only while the guest's Guest Service
+# Interface integration service is enabled. An unqueryable service counts as
+# absent: the caller then uses the session copy it already has open.
+function Test-CopyVMFileAvailable {
+    param([Parameter(Mandatory)]$Vm)
+    try {
+        $service = Get-VMIntegrationService -VMName $Vm.Name -Name 'Guest Service Interface' -ErrorAction Stop
+    } catch {
+        Write-Verbose "The Guest Service Interface is not queryable on $($Vm.Name): $($_.Exception.Message)"
+        return $false
+    }
+    return [bool]($service -and $service.Enabled)
+}
+
 # Runs inside the guest; absence is returned as data because remoting drops types.
 $script:GuestFileState = {
     param($Path)
@@ -879,7 +894,23 @@ function Invoke-BridgeOperation {
             if ($destinationExists -and -not $overwrite) {
                 throw [IO.IOException]::new("The guest file already exists: $remotePath")
             }
-            Copy-Item -LiteralPath $localPath -Destination $remotePath -ToSession $session -Force
+            # Copy-VMFile moves the bytes over the VMBus instead of the remoting
+            # session, which is the faster path for a large file. It needs the
+            # guest's Guest Service Interface and can still fail at the guest's
+            # end, so the session copy stays the fallback rather than the error.
+            $via = 'psdirect'
+            if (Test-CopyVMFileAvailable -Vm $vm) {
+                try {
+                    Copy-VMFile -VMName $vm.Name -SourcePath $localPath -DestinationPath $remotePath `
+                        -CreateFullPath -Force -FileSource Host -ErrorAction Stop
+                    $via = 'copy-vmfile'
+                } catch {
+                    Write-Verbose "Copy-VMFile could not carry $localPath; using the guest session: $($_.Exception.Message)"
+                }
+            }
+            if ($via -ne 'copy-vmfile') {
+                Copy-Item -LiteralPath $localPath -Destination $remotePath -ToSession $session -Force
+            }
             $guestFile = Invoke-Command -Session $session -ArgumentList @($remotePath) `
                 -ScriptBlock $script:GuestFileState
             if ($guestFile.status -eq 'not_found') {
@@ -889,7 +920,7 @@ function Invoke-BridgeOperation {
             if ([string]$guestFile.sha256 -ne $hostDigest) {
                 throw "The guest reported a different SHA-256 than the host sent for $remotePath."
             }
-            $result = @{ vm = $vm.Name; file = $guestFile }
+            $result = @{ vm = $vm.Name; file = $guestFile; via = $via }
         }
         'guest_get_file' {
             $vm = Get-ExactVm -Name $request.vm

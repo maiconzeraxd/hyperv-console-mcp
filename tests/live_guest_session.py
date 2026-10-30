@@ -4,8 +4,9 @@ Four claims, each of which a per-request ``Invoke-Command`` could not satisfy:
 
   1. a second call lands in the same runspace — a global variable set by the
      first one is still readable;
-  2. ``Copy-Item -ToSession``/``-FromSession`` carry a file both ways with the
-     host's digest intact;
+  2. a file goes up and comes back down with the host's digest intact —
+     ``Copy-VMFile`` or ``Copy-Item -ToSession`` on the way up, whichever the
+     guest offers, and ``Copy-Item -FromSession`` on the way back;
   3. a guest reboot drops the cached session and the next call opens a new one;
   4. a long guest command does not block a host call, because guest work has
      its own worker.

@@ -2087,6 +2087,38 @@ painéis dispara a cópia".
   commands asserted in pytest; **neither `vmconnect.exe` nor `mmc.exe virtmgmt.msc` has actually
   been started by this window on a real host.**
 
+### 2026-10-30 — v0.3 dashboard: the upload takes the VMBus when the guest offers it
+
+Onda 3 asks for "upload por `Copy-VMFile` quando disponível, senão sessão PS Direct/SFTP", and the
+tree only had the `senão`: every upload was `Copy-Item -ToSession`.
+
+- **`guest_put_file` prefers `Copy-VMFile`.** The bridge probes
+  `Get-VMIntegrationService -Name 'Guest Service Interface'`; when it is enabled the bytes cross the
+  VMBus with `Copy-VMFile -CreateFullPath -Force -FileSource Host` instead of the remoting session.
+  A service that cannot be queried counts as absent, so a host or guest that never had the interface
+  keeps the old path rather than failing a probe.
+- **The fallback is the fallback, not the error.** An enabled interface can still refuse the copy —
+  the guest service may be stopped — so a `Copy-VMFile` that throws is written to the verbose stream
+  and the session copy runs instead. The guest's own `GuestFileState` digest still decides whether
+  the upload worked, so neither path is trusted on its own.
+- **The reply says which one ran.** The bridge's result carries `via` (`copy-vmfile` or `psdirect`).
+  The Python side does not need it — `FileResult` is built from path, size and digest — but it is
+  what the three new tests assert, so the branch is pinned rather than inferred.
+- Downloads are untouched: `Copy-VMFile` is host-to-guest only, so `guest_get_file` stays on
+  `Copy-Item -FromSession`.
+- Tests: three in `tests/test_bridge_regressions.py` — enabled (and the session copy mocked to throw,
+  proving it did not run), enabled but refusing (falls back and still verifies), and disabled (the
+  session path, with `Copy-VMFile` mocked to throw if it is ever attempted). The first run of them
+  failed because the mock declared `$CreateFullPath` as a value parameter, so `-CreateFullPath` bound
+  with no argument and every upload silently took the fallback; that is exactly the failure mode the
+  fallback is there for, and it is why the tests assert `via` rather than only the digest.
+- Docs: `docs/PERFORMANCE.md` and `README.md` now describe both paths instead of only the session
+  copy; `docs/DASHBOARD.md` says the page does not care which carried the upload.
+- Gate: 1108 passed / 1 skipped, ruff clean, PSScriptAnalyzer clean over `src`, MCP stdio smoke green.
+- **Not validated live:** no upload has been attempted against `HYPERV_MCP_LIVE_TEST_VM` on this
+  path, so whether a real guest accepts `Copy-VMFile` — and whether it is actually faster — is
+  unmeasured. `scripts/bench_transport.py` is where that number would come from.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three
