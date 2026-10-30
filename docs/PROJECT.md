@@ -1455,6 +1455,20 @@ rendered from a live VM — the capture path needs an elevated session.
   and Cycle with the manifest hash the run must match; outside it, it states the manual boundary and
   the phrase the guest runner asks for.
 
+### 2026-10-29 — the v0.2 Definition of Done, audited
+
+- **`tests/test_transport_conformance.py`** runs one assertion set over `psdirect` and `ssh`:
+  the result keys, the transport named in every result, truncation at the configured limit, a
+  failing command reported as a failed result, a put/get round trip whose digests match, and a
+  structured operation refused before the guest is touched. Each transport had its own fakes
+  and its own assertions; nothing checked that they agree, which is the property the lab runs on.
+- It was proved able to fail: removing the SSH truncation fails the `ssh` case and leaves
+  `psdirect` green.
+- **The roadmap's Definition of Done is now a table** at the end of this file, with each box
+  pointing at the artefact that checks it. Three boxes stay open — KDNET live, `kd_dump_open`
+  against a real dump, and bugcheck-versus-hang with no debugger — because each needs a guest
+  reboot or a payload, and running a payload is the operator's separate decision.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,
@@ -1601,3 +1615,38 @@ one thing this phase could not close is the live validation the earlier phases s
 run on `NORTH-Test` confirming `outcome: bugcheck` rather than `hang` with no debugger attached, and
 the phase 6 Verifier, driver-service and crash-triage paths against a real guest. Both need elevation
 and a payload, and running a payload remains a separate operator decision.
+
+## v0.2 Definition of Done, audited
+
+The v0.2 phases were closed before the v0.3 round. This is that roadmap's Definition of Done
+checked against the tree as it stands, so each box rests on an artefact rather than on the
+roadmap's own optimism. Re-audited 2026-10-29 on `v0.3`.
+
+| Item | State | Where it is checked |
+|---|---|---|
+| Every Fase 1 fix has a regression test | met | `tests/test_bridge_regressions.py`, `tests/test_lab*.py`, `tests/test_events.py`, `tests/test_ipc*.py` |
+| pytest, ruff, PSScriptAnalyzer and the MCP smoke green on Windows | met, re-run | 857 passed / 1 skipped, ruff clean, 13 PowerShell files parse, 0 analyzer findings, smoke 29 / 42 / 55 |
+| `psdirect` and `ssh` produce equivalent results on one transport test set | met, added by this audit | `tests/test_transport_conformance.py` — one assertion set over both; breaking the SSH truncation fails only the `ssh` case |
+| Autologon, then a thumbnail screenshot of the desktop with no human input | met, live | the automation-toggles entry above: an interactive session plus a captured desktop with no login prompt |
+| `lab_cycle` end to end without clicks, with checkpoint, evidence and revert | met, live | `tests/live_cycle.py`: `outcome: "ok"`, `revert.restored: true` |
+| `kd_attach` → `kd_break` → `kd_stack` → `kd_go` live | met for serial, open for KDNET | `tests/live_kd.py --transport serial`; `--transport kdnet` needs a guest reboot and has not been run |
+| `kd_dump_open` + `kd_analyze` on a real dump | open | `tests/fake_kd.py` proves the parser, the merge and the symbol verdict; no real dump has been read |
+| No secret in a result, event, audit record or log | met | `tests/test_secrets.py`, including the deliberately leaking build and one planted file per scanner |
+| `docs/PROJECT.md` says what was and was not validated live | met | the live entries above, each carrying its own "not validated live" line |
+
+**What this audit changed.** The third row had no artefact: each transport was proved against
+its own fakes, so nothing asserted that the same call produces the same result whichever
+transport serves it — the property the lab actually depends on. `tests/test_transport_conformance.py`
+now runs one set of assertions (result keys, the transport name in every result, truncation at
+the configured limit, a failing command reported as a failed result, a put/get round trip with
+matching digests, and a structured operation refused before the guest is touched) over both
+transports, through `HyperVService` rather than through the transport classes, because the tool
+result is what the operator sees. It was proved able to fail: removing the SSH truncation fails
+`test_exec_truncates_at_the_configured_limit_on_both_transports[ssh]` and leaves the `psdirect`
+case green.
+
+**Still open, and why.** Three boxes need something this repository does not supply: KDNET
+live needs a guest reboot and a reboot is a separate operator action; `kd_dump_open` needs a
+real dump, which needs a bugcheck, which needs a payload; and the bugcheck-versus-hang
+classification with no debugger attached needs both. Running a payload remains a separate
+operator decision, and no tool here loads a driver.
