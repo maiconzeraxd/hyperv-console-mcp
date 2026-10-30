@@ -271,3 +271,48 @@ def test_the_guest_terminal_is_a_terminal_and_not_a_styled_box() -> None:
     # held while a call is in flight rather than queued behind it.
     assert "if (term.busy) return;" in text
 
+def test_the_permission_matrix_offers_exactly_the_capabilities_the_service_knows() -> None:
+    """A checkbox for a capability the policy never names is a control that lies.
+
+    The page keeps its own list so it can draw the grid without a round trip;
+    the list is compared against ``access.CAPABILITIES`` here so adding one on
+    either side fails until the other catches up.
+    """
+    from hyperv_console_mcp.access import CAPABILITIES
+
+    match = re.search(r"const MATRIX = \[([^\]]*)\];", _page())
+    assert match, "the matrix is built from one array"
+    offered = {value.strip().strip('"') for value in match.group(1).split(",") if value.strip()}
+    assert offered == set(CAPABILITIES), (
+        "the matrix and the policy disagree: "
+        f"only in the page {sorted(offered - set(CAPABILITIES))}, "
+        f"only in the policy {sorted(set(CAPABILITIES) - offered)}"
+    )
+
+
+def test_applying_a_level_sends_the_capabilities_the_operator_kept() -> None:
+    """The grid is worthless if Apply posts only the level."""
+    page = _page()
+    assert "const kept = level ? keptCaps(level) : null;" in page
+    assert "await api().set_level(level, kept)" in page
+    # And an unchanged grid is not a narrowing: it says nothing.
+    assert "return kept.length === allowed.length ? null : kept;" in page
+
+
+def test_the_matrix_starts_from_the_saved_level_after_every_render() -> None:
+    """The grid is drawn into a node the render just replaced."""
+    page = _page()
+    assert 'if (state.page === "overview") {' in page
+    assert "renderCaps(select.value);" in page
+
+def test_an_empty_matrix_is_refused_instead_of_allowing_nothing() -> None:
+    """A page that can silently leave a VM allowed nothing is a trap.
+
+    The file would then say ``capabilities: []``, which reads as "listed, and
+    permitted nothing" — and the operator's next question is why the AI cannot
+    reach the VM it can see.
+    """
+    page = _page()
+    assert "if (level && kept && !kept.length) {" in page
+    assert "Remove the level instead of allowing nothing." in page
+

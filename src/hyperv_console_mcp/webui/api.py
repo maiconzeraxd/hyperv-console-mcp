@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .. import credentials
-from ..access import CAPABILITIES, LEVELS, AccessStore, access_file
+from ..access import CAPABILITIES, LEVEL_CAPABILITIES, LEVELS, AccessStore, access_file
 from ..elevation import is_elevated
 from ..errors import HyperVError, ValidationError
 from ..service.remote import dispatch
@@ -100,6 +100,17 @@ class Api:
             # The fleet badges every VM with its own level, and a level is a
             # property of the VM, not of the window's current choice.
             "levels_by_vm": dict(self.settings.levels),
+            # The matrix: what each VM may actually do, which is its level or the
+            # subset the operator kept.
+            "capabilities_by_vm": {
+                name: sorted(self.settings.capabilities_for(name))
+                for name in self.settings.levels
+            },
+            # What each level offers, so the matrix can grey out what a level
+            # cannot grant instead of offering a checkbox that would be refused.
+            "capabilities_by_level": {
+                level: sorted(names) for level, names in LEVEL_CAPABILITIES.items()
+            },
             "profile": self.settings.profile,
             "elevated": is_elevated(),
             "shared_service": self.settings.shared_service,
@@ -172,20 +183,31 @@ class Api:
 
     # -- the operator's access file ---------------------------------------
 
-    def set_level(self, level: str) -> dict[str, Any]:
-        """Write one level for this VM, then have the service read the file again.
+    def set_level(
+        self, level: str, capabilities: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Write one level for this VM, and optionally narrow what it allows.
 
         This is the same file ``hyperv-access`` writes. It is not a service
         method and no MCP tool reaches it: a level is the operator's decision
         about what the AI may do, so only the operator's own window writes it.
+        ``capabilities`` is the matrix's answer — the ones the operator kept —
+        and it can only take capabilities away from the level.
         """
         if not self.vm_name:
             raise ValidationError("Choose a VM before setting a level.")
         store = self._store()
-        store.set(self.vm_name, level)
-        policy = self.service.reload_policy()
+        store.set(self.vm_name, level, capabilities)
+        # The window tells the truth about the file it just wrote even when the
+        # service cannot be told: a panel that disagrees with the policy file is
+        # worse than a loud error about the service.
         self._reread()
-        return {"level": store.levels().get(self.vm_name.casefold()), "policy": policy}
+        policy = self.service.reload_policy()
+        return {
+            "level": store.levels().get(self.vm_name.casefold()),
+            "capabilities": sorted(self.settings.capabilities_for(self.vm_name)),
+            "policy": policy,
+        }
 
     def remove_level(self) -> dict[str, Any]:
         """Take this VM out of the file, which makes it unreachable again."""
@@ -193,8 +215,8 @@ class Api:
             raise ValidationError("Choose a VM before removing a level.")
         store = self._store()
         store.remove(self.vm_name)
-        policy = self.service.reload_policy()
         self._reread()
+        policy = self.service.reload_policy()
         return {"level": None, "policy": policy}
 
     def set_baseline(self, checkpoint: str) -> dict[str, Any]:
@@ -208,8 +230,8 @@ class Api:
             raise ValidationError("Choose a VM before naming a baseline checkpoint.")
         store = self._store()
         store.set_baseline(self.vm_name, checkpoint)
-        policy = self.service.reload_policy()
         self._reread()
+        policy = self.service.reload_policy()
         return {
             "baseline": store.baselines().get(self.vm_name.casefold()),
             "policy": policy,
@@ -228,8 +250,16 @@ class Api:
         file holds are replaced; the environment the window started with stays.
         """
         store = self._store()
+        entries = store.entries()
         self.settings = replace(
-            self.settings, levels=store.levels(), baselines=store.baselines()
+            self.settings,
+            levels=store.levels(),
+            baselines=store.baselines(),
+            capabilities={
+                key: tuple(record["capabilities"] or ())
+                for key, record in entries.items()
+                if record["capabilities"] is not None
+            },
         )
 
     # -- the first run -----------------------------------------------------

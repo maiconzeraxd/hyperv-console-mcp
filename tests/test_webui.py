@@ -172,6 +172,45 @@ def test_a_level_written_here_shows_up_in_this_window(tmp_path: Path) -> None:
     assert api.hello()["levels_by_vm"] == {"lab-vm": "control"}
     assert api.hello()["capabilities"]["power"] is True
 
+def test_the_window_can_narrow_a_level_and_the_service_hears_it(tmp_path: Path) -> None:
+    """The matrix is a promise: unchecking takes the capability away for real.
+
+    It is written to the same file ``hyperv-access`` writes, and the running
+    service is told to read it again, so the AI's next call is refused by the
+    policy rather than by the page.
+    """
+    api = _api(tmp_path, level="lab")
+
+    result = api.set_level("lab", ["console", "guest"])
+
+    stored = json.loads((tmp_path / "access.json").read_text(encoding="utf-8"))
+    assert stored["vms"]["lab-vm"]["capabilities"] == ["console", "guest"]
+    assert result["capabilities"] == ["console", "guest"]
+    assert api.service.calls[-1][0] == "reload_policy"
+    assert api.hello()["capabilities"]["guest"] is True
+    assert api.hello()["capabilities"]["power"] is False
+
+
+def test_the_window_cannot_hand_out_a_capability_the_level_lacks(tmp_path: Path) -> None:
+    """Only the operator can widen, and only by changing the level itself."""
+    api = _api(tmp_path, level="lab")
+
+    with pytest.raises(Exception):
+        api.set_level("read-only", ["guest"])
+
+
+def test_hello_carries_the_whole_matrix(tmp_path: Path) -> None:
+    """What each level offers, and what each VM actually kept."""
+    from hyperv_console_mcp.access import LEVEL_CAPABILITIES
+
+    hello = _api(tmp_path).hello()
+
+    assert hello["capabilities_by_level"] == {
+        level: sorted(names) for level, names in LEVEL_CAPABILITIES.items()
+    }
+    assert hello["capabilities_by_vm"] == {"lab-vm": sorted(LEVEL_CAPABILITIES["lab"])}
+
+
 def test_a_level_the_file_does_not_know_is_refused(tmp_path: Path) -> None:
     api = _api(tmp_path)
     with pytest.raises(Exception):
@@ -400,4 +439,31 @@ def test_the_dock_asks_the_service_for_the_lines_after_the_last_one(tmp_path: Pa
     assert api.service.calls[-1] == ("logs_subscribe", {
         "after": 41, "vm": None, "source": "kd", "level": None, "timeout_seconds": 7,
     })
+
+def test_the_window_reads_the_file_it_wrote_even_if_the_service_cannot_be_told(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A panel that disagrees with the policy file is worse than a loud error.
+
+    The service refused the pipe (a stale build on this host) and ``set_level``
+    wrote the file, then raised before refreshing the window: the operator had
+    narrowed the VM and the page went on saying nothing was allowed.
+    """
+    api = _api(tmp_path, level="lab")
+
+    def refuse() -> dict[str, Any]:
+        raise RuntimeError("The service host is not a program this install runs.")
+
+    monkeypatch.setattr(api.service, "reload_policy", refuse)
+
+    with pytest.raises(RuntimeError):
+        api.set_level("lab", ["console"])
+
+    # The write landed, and this window says so — the service is a separate
+    # problem, reported as one.
+    assert json.loads((tmp_path / "access.json").read_text(encoding="utf-8"))["vms"][
+        "lab-vm"
+    ]["capabilities"] == ["console"]
+    assert api.hello()["capabilities"]["console"] is True
+    assert api.hello()["capabilities"]["guest"] is False
 

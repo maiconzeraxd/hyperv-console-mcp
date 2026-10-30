@@ -2417,6 +2417,53 @@ third-party asset reaches a page that is one HTML string. Both halves are here.
   the roadmap describes. The KD and serial terminals need their own streams (`kd_output_subscribe`
   exists; serial needs a reader door), and the sidebar/permission-matrix layout is still to come.
 
+### 2026-10-30 — v0.4 wave 6: the permission matrix, and what it costs to take a capability away
+
+The roadmap asks for a grid of "what I allow" per VM, written to the same `access.json`. A grid
+that only re-states the level is decoration, so the file gained a second field and the level
+became a ceiling.
+
+- **`access.json` gains `capabilities`.** `AccessStore.set(vm, level, capabilities=None)` writes the
+  level's whole set when the list is omitted, and a sorted subset when it is given. A list can only
+  **narrow** a level: naming a capability the level never had raises `ValidationError` instead of
+  quietly widening it, and a hand-edited file that tries is refused at load with a message that
+  says so. Setting a level again clears the narrowing, because a subset chosen for the old level
+  has no business outliving it.
+- **The policy intersects, it does not trust.** `Settings.capabilities_for` returns
+  `frozenset(kept) & LEVEL_CAPABILITIES[level]`, so even a `Settings` built by hand cannot hand out
+  a capability its level lacks. `allows` and `refusal` both follow, and `refusal` now has two
+  sentences: one for a level that never had the capability, and one for a capability the operator
+  unchecked — telling someone to raise a level that already had it sends them to the wrong file.
+- **`hyperv-access set VM LEVEL --capabilities a,b`** is the same write without a window, and
+  `list` reports what the VM may actually do rather than what its level implies.
+- **The window's Overview gains the grid**: one chip per capability, checked from the saved state,
+  greyed and disabled when the level cannot grant it, re-drawn when the level select changes, and
+  posted with the level on **Apply**. An unchanged grid sends nothing (the whole set is not a
+  narrowing); an empty one is refused with a pointer to **Remove level**, because a VM that is
+  listed and allowed nothing is a state with a plainer name.
+- **Two bugs the live probe found, both fixed with a regression test.** `set_level` refreshed the
+  window *after* telling the service, so when the service refused the pipe the file was written and
+  the panel went on showing the old policy — the window now re-reads the file it just wrote and
+  reports the service problem separately. And `refusal` used to blame the level for a capability
+  the matrix had taken away.
+- Tests: `tests/test_access.py` eight (narrowing, refusal to widen, a level change clearing it,
+  the policy honouring it, a hand-edited widening refused, a hand-built mapping intersected,
+  the narrowed refusal wording, the CLI flag),
+  `tests/test_webui.py` four (the window narrows and the service hears it, it cannot widen, hello
+  carries the whole matrix, the window reads the file even when the service cannot be told),
+  `tests/test_webui_page.py` four (the chips match `access.CAPABILITIES`, Apply posts the kept list,
+  the grid starts from the saved level after every render, an empty matrix is refused).
+- **Verified live**, served page in headless Chrome, `NORTH-Test` at `lab`: seven chips checked;
+  unchecking **guest** and pressing Apply wrote `capabilities` with the other six; the page
+  re-rendered with guest unchecked; `guest_exec` then answered
+  `VM 'NORTH-Test' has access level 'lab', but guest was unchecked in its capability list` while
+  the other capabilities stayed. Screenshots: `matrix-panel.png`.
+- Gate: 1176 passed / 1 skipped, ruff clean, `node --check` on the assembled script clean.
+- **Not validated live:** the narrowing was exercised against a private service (the shared one on
+  this host is an older build and refuses the pipe), so the `reload_policy` handshake under the
+  narrowed policy is proved by tests, not by a live call from an MCP client. The login screen and
+  the fleet sidebar are still to come.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three

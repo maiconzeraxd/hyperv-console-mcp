@@ -149,6 +149,16 @@
   /* A real terminal widget: xterm paints its own canvas, so this is only the
      frame. Its colours come from the palette at runtime, which keeps the light
      theme working without a second definition. */
+  /* The permission matrix: one chip per capability, greyed when the level
+     cannot grant it, so a checkbox never offers something the service refuses. */
+  #cap-grid { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 0; }
+  #cap-grid .cap {
+    display: flex; align-items: center; gap: 5px;
+    padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px;
+    background: var(--surface); font-size: .78rem; color: var(--text);
+  }
+  #cap-grid .cap.off { color: var(--muted); border-style: dashed; }
+  #cap-grid .cap input { accent-color: var(--accent); }
   .terminal {
     height: 300px;
     background: var(--bg);
@@ -850,7 +860,7 @@ const builders = {
       api().call("guest_transport_status", { ...vmArg(), probe: true }),
     ]);
     const record = (vm && vm.ok && vm.ok.vm) || {};
-    const levelSelect = el("select", { id: "level" },
+    const levelSelect = el("select", { id: "level", onchange: (event) => renderCaps(event.target.value) },
       ...(state.hello.levels || []).map((name) => el("option", { value: name, selected: name === state.hello.level ? "selected" : null }, name)));
     return el("div", { class: "grid" },
       panel("State", "Read from the host, not from the guest.",
@@ -875,7 +885,10 @@ const builders = {
           ? state.vm + " is " + state.hello.level + "."
           : state.vm + " has no level, so no tool can reach it."),
         el("div", { class: "row" }, field("Level", levelSelect)),
-        el("div", { class: "row", style: "margin:0" },
+        el("p", { class: "hint", style: "margin:6px 0 0" },
+          "What this VM may do. The level sets the ceiling; unchecking here takes one away."),
+        el("div", { id: "cap-grid", role: "group", "aria-label": "Capabilities this VM allows" }),
+        el("div", { class: "row", style: "margin:10px 0 0" },
           el("button", { class: "act primary", onclick: () => writeLevel(fieldValue("level")) }, "Apply level"),
           el("button", { class: "act", onclick: () => writeLevel("") }, "Remove level"))),
       panel("Checkpoints", "Restoring one discards everything after it.",
@@ -1585,9 +1598,56 @@ const builders = {
 };
 
 /* ---------- the pieces that are not a form ---------- */
+/* The matrix: the level is the ceiling, and these are the ones kept from it.
+   Unchecking removes a capability; the page never offers one the level does not
+   have, because the service would refuse it and a refused checkbox is a lie. */
+const MATRIX = ["power", "checkpoints", "guest", "console", "screenshots", "debugger", "media"];
+
+function renderCaps(level) {
+  const grid = document.getElementById("cap-grid");
+  if (!grid) return;
+  const byLevel = (state.hello && state.hello.capabilities_by_level) || {};
+  const allowed = byLevel[level] || [];
+  // hello reports the current VM's capabilities as a map of answers; a level
+  // that is not the saved one starts from its own full set.
+  const answers = (state.hello && state.hello.capabilities) || {};
+  const kept = level === state.hello.level ? allowed.filter((name) => answers[name]) : allowed;
+  grid.replaceChildren(...MATRIX.map((name) => {
+    const offered = allowed.includes(name);
+    return el("label", { class: "cap" + (offered ? "" : " off"), title: offered ? "" : level + " does not include " + name },
+      el("input", {
+        type: "checkbox", id: "cap-" + name,
+        checked: offered && kept.includes(name) ? "checked" : null,
+        disabled: offered ? null : "disabled",
+      }),
+      name);
+  }));
+}
+
+function keptCaps(level) {
+  const byLevel = (state.hello && state.hello.capabilities_by_level) || {};
+  const allowed = byLevel[level] || [];
+  const kept = MATRIX.filter((name) => {
+    const box = document.getElementById("cap-" + name);
+    return box && box.checked;
+  });
+  // The whole set is not a narrowing: say nothing rather than write a list that
+  // means the same as the level.
+  return kept.length === allowed.length ? null : kept;
+}
+
 async function writeLevel(level) {
+  const kept = level ? keptCaps(level) : null;
+  // An empty matrix is not a narrowing, it is a VM that may do nothing — and
+  // that has a plainer way to say it, which also takes the badge away.
+  if (level && kept && !kept.length) {
+    show("set_level", { error: { message: "Nothing is checked. Remove the level instead of allowing nothing." } });
+    return;
+  }
   try {
-    const response = level ? await api().set_level(level) : await api().remove_level();
+    const response = level
+      ? await api().set_level(level, kept)
+      : await api().remove_level();
     show(level ? "set_level" : "remove_level", response);
   } catch (error) {
     show("set_level", { error: { message: String(error) } });
@@ -2615,6 +2675,12 @@ async function render() {
   if (state.page === "activity") drawActivity();
   if (state.page === "files") drawTransfer();
   if (state.page === "lab") drawCycle();
+  // The matrix draws into an element this render just created, and it starts
+  // from the level the select names so the two never disagree.
+  if (state.page === "overview") {
+    const select = document.getElementById("level");
+    if (select) renderCaps(select.value);
+  }
   if (state.page === "matrix") drawMatrix();
   // The serial loop draws into an element this render just replaced, so it is
   // restarted here and left to die on its next tick when the page moves on.
