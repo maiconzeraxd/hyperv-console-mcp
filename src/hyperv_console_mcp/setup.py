@@ -138,9 +138,20 @@ def assess(host: Host) -> dict[str, Any]:
     return plan
 
 
+def _windows() -> bool:
+    """Whether this host is Windows.
+
+    A function rather than an inline `os.name` check so a test can stand in for
+    the other platform by patching this name. Patching the shared `os` module
+    instead makes `pathlib` hand out `WindowsPath` on a POSIX host, which takes
+    pytest's own failure formatting down with it.
+    """
+    return os.name == "nt"
+
+
 def read_host(probe: Probe | None = None) -> Host:
     """Ask this machine the two questions the routine needs answered."""
-    if os.name != "nt":
+    if not _windows():
         return Host()
     edition, product = _edition()
     return Host(edition=edition, product=product, hyperv=_hyperv_state(probe or _run))

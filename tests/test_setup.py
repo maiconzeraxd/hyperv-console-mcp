@@ -10,6 +10,7 @@ here touches the registry, the shell or Hyper-V — the routine asks through
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -111,8 +112,21 @@ def test_a_machine_that_is_not_windows_is_told_so() -> None:
     assert "Windows only" in plan["message"]
 
 
+def test_faking_windows_leaves_the_real_platform_module_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A test that faked the platform by patching ``os.name`` made ``pathlib``
+    hand out ``WindowsPath`` on a POSIX host — and pytest's failure formatting
+    calls ``Path(os.getcwd())``, so the first real failure became an
+    INTERNALERROR instead of a report."""
+    real = os.name
+    monkeypatch.setattr(setup, "_windows", lambda: True)
+    assert os.name == real
+    assert type(Path("x")).__name__ == ("WindowsPath" if real == "nt" else "PosixPath")
+
+
 def test_the_probe_turns_the_install_state_into_a_word(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(setup.os, "name", "nt")
+    monkeypatch.setattr(setup, "_windows", lambda: True)
     monkeypatch.setattr(setup, "_edition", lambda: ("Professional", "Windows 11 Pro"))
 
     for state, word in (("1", "enabled"), ("2", "disabled"), ("3", "absent"), ("", "unknown")):
@@ -122,7 +136,7 @@ def test_the_probe_turns_the_install_state_into_a_word(monkeypatch: pytest.Monke
 
 
 def test_a_non_windows_host_is_not_asked_anything(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(setup.os, "name", "posix")
+    monkeypatch.setattr(setup, "_windows", lambda: False)
 
     def probe(_script: str) -> str:
         raise AssertionError("a non-Windows host must not be probed")
@@ -212,7 +226,7 @@ def test_a_host_with_vms_says_which_shortcut_to_open() -> None:
 def test_the_routine_stops_on_home_before_touching_anything(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(setup.os, "name", "nt")
+    monkeypatch.setattr(setup, "_windows", lambda: True)
     monkeypatch.setattr(setup, "_edition", lambda: ("Core", "Windows 11 Home"))
     written: list[str] = []
     monkeypatch.setattr(install, "install", lambda client, **_kwargs: written.append(client))
@@ -231,7 +245,7 @@ def test_the_routine_stops_for_the_restart_rather_than_taking_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Enabling Hyper-V needs a reboot; an installer that reboots by itself is a surprise."""
-    monkeypatch.setattr(setup.os, "name", "nt")
+    monkeypatch.setattr(setup, "_windows", lambda: True)
     monkeypatch.setattr(setup, "_edition", lambda: ("Professional", "Windows 11 Pro"))
 
     result = setup.first_run(
@@ -247,7 +261,7 @@ def test_the_routine_stops_for_the_restart_rather_than_taking_it(
 def test_a_second_run_repairs_and_does_not_duplicate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(setup.os, "name", "nt")
+    monkeypatch.setattr(setup, "_windows", lambda: True)
     monkeypatch.setattr(setup, "_edition", lambda: ("Professional", "Windows 11 Pro"))
     environ = {"USERPROFILE": str(tmp_path), "APPDATA": str(tmp_path / "appdata")}
     (tmp_path / ".cursor").mkdir()
@@ -264,7 +278,7 @@ def test_a_second_run_repairs_and_does_not_duplicate(
 def test_the_routine_reports_a_service_that_did_not_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(setup.os, "name", "nt")
+    monkeypatch.setattr(setup, "_windows", lambda: True)
     monkeypatch.setattr(setup, "_edition", lambda: ("Professional", "Windows 11 Pro"))
 
     result = setup.first_run(
@@ -395,7 +409,7 @@ def test_uninstall_asks_about_the_folders_before_deleting_them(tmp_path: Path) -
 def test_the_check_reports_without_changing_anything(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(setup.os, "name", "nt")
+    monkeypatch.setattr(setup, "_windows", lambda: True)
     monkeypatch.setattr(setup, "_edition", lambda: ("Core", "Windows 11 Home"))
     monkeypatch.setattr(setup, "_run", lambda _script: "1")
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
