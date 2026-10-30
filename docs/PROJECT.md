@@ -2119,6 +2119,32 @@ tree only had the `senão`: every upload was `Copy-Item -ToSession`.
   path, so whether a real guest accepts `Copy-VMFile` — and whether it is actually faster — is
   unmeasured. `scripts/bench_transport.py` is where that number would come from.
 
+### 2026-10-30 — v0.3.0
+
+The first tag on the `v0.3` branch. `__version__` moves from `0.1.0` to `0.3.0`, which is what the
+branch, `docs/ROADMAP-v0.3.md` and the wave reports had been calling this work; the package had
+never been renumbered as the waves landed, so `hyperv-console-mcp --version`, the wheel, the Inno
+installer and the winget manifests all still said `0.1.0`.
+
+- `src/hyperv_console_mcp/__init__.py` is the single source: `pyproject.toml` reads the version from
+  it, the release workflow passes it to `ISCC.exe`, and `tests/test_packaging.py` asserts the three
+  winget manifests carry it. Bumping one file without the other two is what that test exists to
+  catch, and it caught nothing here because all three moved together.
+- The winget `InstallerUrl` now points at `v0.3.0`'s asset. `InstallerSha256` stays the all-zero
+  placeholder: it is the hash of an installer that does not exist until the workflow has built it,
+  and `packaging/winget/README.md` says to fill it before the PR to `microsoft/winget-pkgs`. **No
+  winget PR is opened by this release.**
+- README's "1036 unit/transport tests" is 1108, the number this tree actually runs.
+- Local build verified: `python -m build` produced `hyperv_console_mcp-0.3.0-py3-none-any.whl` and
+  `.tar.gz`, both carrying `webui/assets/index.html`, the bridge `.ps1` files and the transport
+  scripts; `--version` answers `0.3.0`.
+- Gate before the tag: 1108 passed / 1 skipped, ruff clean, PSScriptAnalyzer clean over `src`.
+- **What the tag does not mean.** `.github/workflows/release.yml` has still never run, so the frozen
+  programs, the Inno installer and the draft release are built on GitHub for the first time by this
+  tag; nothing is signed (no certificate in secrets), so SmartScreen will warn. Live validation
+  against `HYPERV_MCP_LIVE_TEST_VM` remains outstanding for the dashboard page in WebView2, the
+  `Copy-VMFile` upload, and the viewer buttons.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three
