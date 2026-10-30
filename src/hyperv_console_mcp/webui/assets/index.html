@@ -141,6 +141,26 @@
      that has simply not taken a screenshot yet. */
   .shot { width: 100%; border-radius: 8px; border: 1px solid var(--border); background: #000; display: none; }
   .shot.live { display: block; }
+  /* The console is an <img> you can click and type into. It is a picture, so
+     the coordinate space is the guest display, not the element's pixels. */
+  .screen-wrap { position: relative; }
+  .screen {
+    width: 100%; display: block; border-radius: 8px; border: 1px solid var(--border);
+    background: #000; cursor: crosshair; outline: none;
+  }
+  .screen:focus { border-color: var(--accent); }
+  .screen-note {
+    position: absolute; right: 8px; bottom: 8px; font-size: .72rem; color: var(--text);
+    background: rgba(0, 0, 0, .6); padding: 2px 8px; border-radius: 999px; pointer-events: none;
+  }
+  .screen-empty { padding: 40px 12px; text-align: center; color: var(--muted); font-size: .85rem; border: 1px dashed var(--border); border-radius: 8px; }
+  .checkpoint-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: .82rem; }
+  .checkpoint-row .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .checkpoint-row .when, .checkpoint-row .id { color: var(--muted); font-size: .72rem; }
+  .checkpoint-row.baseline { background: rgba(70, 160, 120, .10); }
+  .checkpoint-row .base { font-size: .72rem; color: var(--accent); border: 1px solid #2f6b57; border-radius: 999px; padding: 0 7px; white-space: nowrap; }
+  .checkpoint-row .branch { color: var(--muted); font-family: ui-monospace, Consolas, monospace; }
+  .confirm { font-size: .78rem; color: var(--warning); }
   table.events { width: 100%; border-collapse: collapse; font-size: .82rem; }
   table.events th, table.events td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
   table.events th { color: var(--muted); font-weight: 600; }
@@ -253,6 +273,7 @@ const PAGES = [
   ["Overview", "overview", "The VM's state, its checkpoints and what the AI may do with it."],
   ["Activity", "activity", "Cross-process operation history, including what the MCP server did."],
   ["Console", "console", "Keyboard, mouse and a screenshot of the guest display."],
+  ["Checkpoints", "checkpoints", "The VM's tree of states, with the operator's baseline protected."],
   ["Recovery", "recovery", "Power, checkpoints and the forced actions that ask for a confirmation."],
   ["Media", "media", "The DVD drive, an ISO and boot order."],
   ["Debugger", "debugger", "COM1 serial, the kd session and the symbols it resolves."],
@@ -268,6 +289,9 @@ const state = {
   // The live feed. `cursor` is the last sequence shown, so a reconnected window
   // asks for what it missed instead of starting over.
   events: [], cursor: 0, connected: null,
+  // The checkpoint a click has asked to restore or delete, waiting for the
+  // second click that means it. A modal would take the page away instead.
+  confirm: null,
 };
 
 /* ---------- small helpers ---------- */
@@ -470,30 +494,127 @@ const builders = {
   },
 
   async console() {
-    const info = await api().call("console_info", vmArg());
+    const [info, vm] = await Promise.all([
+      api().call("console_info", vmArg()), api().call("get_vm", vmArg()),
+    ]);
+    const record = (vm && vm.ok && vm.ok.vm) || {};
+    const running = record.state === "Running";
+    const heads = (info && info.ok && info.ok.video_heads) || [];
+    const head = heads.find((candidate) => candidate && candidate.horizontal) || {};
+
+    const screen = el("img", {
+      id: "screen",
+      class: "screen",
+      alt: "guest display",
+      tabindex: "0",
+      // Clicking the picture is a click in the guest, at the guest's own
+      // coordinates: the image is the video head scaled, not a new space.
+      onclick: (event) => clickGuest(event, "left"),
+      oncontextmenu: (event) => { event.preventDefault(); clickGuest(event, "right"); },
+      onkeydown: (event) => keyGuest(event),
+    });
+
+    if (!running) {
+      return el("div", { class: "grid" },
+        panel("Screen", "The guest display is only captured while the VM is running.",
+          el("div", { class: "screen-empty" },
+            "This VM is " + (record.state || "not running") + ". Start it from the fleet, then come back.")));
+    }
+
+    // The live loop starts once the element is in the document.
+    setTimeout(() => startScreen(state.vm), 0);
+
     return el("div", { class: "grid" },
-      panel("Keyboard", "Real input to the guest: it can change state immediately.",
-        el("div", { class: "row" }, el("textarea", { id: "console-text", placeholder: "Text to type" })),
+      panel("Screen",
+        "A picture, not video: every frame is a separate capture. Click to click in the guest; click the image once and type to send keys.",
+        el("div", { class: "screen-wrap" }, screen,
+          el("span", { class: "screen-note", id: "screen-note" }, "connecting…")),
+        el("div", { class: "row", style: "margin:10px 0 0" },
+          el("button", { class: "act", id: "screen-toggle", onclick: () => toggleScreen() }, "Pause"),
+          el("button", { class: "act", onclick: () => captureOnce() }, "Capture once"),
+          el("button", { class: "act", onclick: () => call("console_wait_for_change", { ...vmArg(), timeout_ms: 15000 }) }, "Wait for change")),
+        el("p", { class: "hint", style: "margin:10px 0 0" },
+          "Display " + (head.horizontal || "—") + "×" + (head.vertical || "—") +
+          " guest pixels. For full fidelity, open VMConnect.")),
+      panel("Keyboard", "Focus the picture, then type. Characters are sent in short bursts; Enter, Tab, Escape and the arrows go at once.",
+        el("div", { class: "row" }, el("textarea", { id: "console-text", placeholder: "Paste text to type into the guest (useful in OOBE)" })),
         el("div", { class: "row" },
           el("button", { class: "act primary", onclick: () => call("console_type_text", { ...vmArg(), text: fieldValue("console-text") }) }, "Type text"),
           el("button", { class: "act", onclick: () => call("console_ctrl_alt_delete", vmArg()) }, "Ctrl+Alt+Del"),
-          el("button", { class: "act", onclick: () => call("console_press_keys", { ...vmArg(), keys: ["enter"] }) }, "Enter"),
-          el("button", { class: "act", onclick: () => call("console_press_keys", { ...vmArg(), keys: ["esc"] }) }, "Esc"),
-          el("button", { class: "act", onclick: () => call("console_press_keys", { ...vmArg(), keys: ["tab"] }) }, "Tab")),
-        el("p", { class: "hint", style: "margin:10px 0 0" }, "Console info: " + JSON.stringify(info.ok || info.error || {}))),
-      panel("Mouse", "Coordinates are guest-display pixels.",
+          ...["enter", "escape", "tab", "up", "down", "left", "right"].map((key) =>
+            el("button", { class: "act", onclick: () => call("console_press_keys", { ...vmArg(), keys: [key] }) }, key))),
+        el("p", { class: "hint", style: "margin:10px 0 0" },
+          "Console info: " + JSON.stringify((info && (info.ok || info.error)) || {}))),
+      panel("Mouse", "Coordinates are guest-display pixels; clicking the picture fills them in.",
         el("div", { class: "row" },
-          field("X", input_("mouse-x", "512", "number")),
-          field("Y", input_("mouse-y", "384", "number")),
+          field("X", input_("mouse-x", "0", "number")),
+          field("Y", input_("mouse-y", "0", "number")),
           field("Button", el("select", { id: "mouse-button" },
             ...["left", "right", "middle"].map((b) => el("option", { value: b }, b))))),
         el("div", { class: "row" },
-          el("button", { class: "act", onclick: () => call("console_click", { ...vmArg(), x: Number(fieldValue("mouse-x")), y: Number(fieldValue("mouse-y")), button: fieldValue("mouse-button") }) }, "Click"))),
-      panel("Screen", "From the Hyper-V thumbnail, so no VMConnect window is needed.",
-        el("img", { class: "shot", id: "shot", alt: "guest display" }),
-        el("div", { class: "row", style: "margin:10px 0 0" },
-          el("button", { class: "act primary", onclick: grabScreenshot }, "Capture"),
-          el("button", { class: "act", onclick: () => call("console_wait_for_change", { ...vmArg(), timeout_ms: 15000 }) }, "Wait for change"))));
+          el("button", { class: "act", onclick: () => call("console_click", { ...vmArg(), x: Number(fieldValue("mouse-x")), y: Number(fieldValue("mouse-y")), button: fieldValue("mouse-button") }) }, "Click"),
+          el("button", { class: "act", onclick: () => call("console_mouse_move", { ...vmArg(), x: Number(fieldValue("mouse-x")), y: Number(fieldValue("mouse-y")) }) }, "Move"))));
+  },
+
+  async checkpoints() {
+    const listing = await api().call("list_checkpoints", vmArg());
+    const result = (listing && listing.ok) || {};
+    const rows = checkpointTree(result.checkpoints || []);
+    const baseline = result.baseline || null;
+    const pending = state.confirm;
+
+    const controls = (checkpoint) => {
+      const id = String(checkpoint.id || "");
+      const name = String(checkpoint.name || "");
+      if (pending && pending.id === id) {
+        return el("span", { class: "confirm" },
+          (pending.kind === "restore" ? "Restore to this state?" : "Delete this checkpoint?"),
+          el("button", { class: "act danger", onclick: () => confirmCheckpoint(pending) }, "Yes"),
+          el("button", { class: "act", onclick: () => { state.confirm = null; render(); } }, "Cancel"));
+      }
+      return el("span", {},
+        // A restore is the safe direction: it puts the guest back on the state
+        // the checkpoint already holds. A delete is the one that loses data.
+        el("button", { class: "act", onclick: () => { state.confirm = { kind: "restore", id, name }; render(); } }, "Restore"),
+        checkpoint.baseline
+          ? null
+          : el("button", { class: "act danger", onclick: () => { state.confirm = { kind: "delete", id, name }; render(); } }, "Delete"),
+        checkpoint.baseline
+          ? null
+          : el("button", { class: "act", onclick: () => setBaseline(name) }, "Make baseline"),
+        checkpoint.baseline
+          ? el("button", { class: "act", onclick: () => setBaseline("") }, "Clear baseline")
+          : null);
+    };
+
+    const tree = rows.length
+      ? el("div", {}, ...rows.map(({ checkpoint, depth }) => el("div", {
+          class: "checkpoint-row" + (checkpoint.baseline ? " baseline" : ""),
+        },
+        el("span", { class: "branch" }, depth ? "└" + "─".repeat(Math.max(0, depth - 1)) + " " : ""),
+        el("span", { class: "grow", title: String(checkpoint.id || "") },
+          String(checkpoint.name || "(unnamed)"),
+          el("span", { class: "when" }, " · " + String(checkpoint.creation_time || "").slice(0, 19).replace("T", " "))),
+        checkpoint.baseline ? el("span", { class: "base" }, "baseline") : null,
+        controls(checkpoint))))
+      : el("p", { class: "hint", style: "margin:0" }, "This VM has no checkpoints.");
+
+    return el("div", { class: "grid" },
+      panel("Checkpoints",
+        baseline
+          ? `The baseline is “${baseline}”: it can be restored to, never deleted, by this window or by the AI.`
+          : "No baseline is set for this VM. Mark the state the guest should always return to, and nothing may delete it.",
+        tree,
+        el("div", { class: "row", style: "margin:12px 0 0" },
+          action("Refresh", "list_checkpoints", vmArg))),
+      panel("Create a checkpoint", "Take one before anything that could break the guest.",
+        el("div", { class: "row" }, field("Name", input_("cp-name", "before-lab"))),
+        el("div", { class: "row" },
+          action("Create", "create_checkpoint", () => ({ vm_name: state.vm, name: fieldValue("cp-name") }), "primary", render)),
+        el("p", { class: "hint", style: "margin:10px 0 0" },
+          baseline
+            ? `“${baseline}” is taken by the baseline; a new checkpoint needs another name.`
+            : "A name is required; Hyper-V does not keep them unique, so pick something you will recognise.")));
   },
 
   async recovery() {
@@ -505,16 +626,9 @@ const builders = {
         el("div", { class: "row" },
           ["turn_off", "reset"].map((name) =>
             action(name, "power", () => ({ vm_name: state.vm, action: name, confirm_vm: state.vm }), "danger")))),
-      panel("Create a checkpoint", "Take one before anything that could break the guest.",
-        el("div", { class: "row" }, field("Name", input_("cp-name", "before-lab"))),
-        el("div", { class: "row" },
-          action("Create", "create_checkpoint", () => ({ vm_name: state.vm, name: fieldValue("cp-name") }), "primary"))),
-      panel("Restore or delete", "Both need the VM name and the exact checkpoint id.",
-        el("div", { class: "row" }, field("Checkpoint id", input_("cp-id", "", "text"))),
-        el("div", { class: "row" },
-          action("Restore", "restore_checkpoint", () => ({ vm_name: state.vm, snapshot_id: fieldValue("cp-id"), confirm_vm: state.vm, confirm_snapshot_id: fieldValue("cp-id") }), "danger"),
-          action("Delete", "delete_checkpoint", () => ({ vm_name: state.vm, snapshot_id: fieldValue("cp-id"), confirm_vm: state.vm, confirm_snapshot_id: fieldValue("cp-id") }), "danger"),
-          action("List", "list_checkpoints", vmArg))));
+      panel("Checkpoints", "Restore, delete and the protected baseline live on their own page.",
+        el("div", { class: "row", style: "margin:0" },
+          el("button", { class: "act primary", onclick: () => go("checkpoints") }, "Open checkpoints"))));
   },
 
   async media() {
@@ -693,16 +807,222 @@ async function writeLevel(level) {
   await render();
 }
 
-async function grabScreenshot() {
-  const response = await api().screenshot({ region: "window", max_width: 1600 });
-  const image = document.getElementById("shot");
-  if (response && response.ok && image) {
-    image.src = response.ok.src;
-    image.classList.add("live");
+/* ---------- the guest screen ---------- */
+// A few frames a second is enough to follow a boot, and every frame is a full
+// capture over the pipe: a video rate would saturate the service for no gain.
+const SCREEN_INTERVAL_MS = 800;
+let screenTimer = null;
+let screenPaused = false;
+let screenVm = "";
+
+function stopScreen() {
+  if (screenTimer) { clearTimeout(screenTimer); screenTimer = null; }
+  screenVm = "";
+  screenPaused = false;
+}
+
+function startScreen(vmName) {
+  stopScreen();
+  screenVm = String(vmName || "");
+  scheduleScreen();
+}
+
+function scheduleScreen() {
+  if (screenTimer) clearTimeout(screenTimer);
+  screenTimer = setTimeout(screenFrame, SCREEN_INTERVAL_MS);
+}
+
+function screenNote(text) {
+  const note = document.getElementById("screen-note");
+  if (note) note.textContent = text;
+}
+
+function syncScreenButton() {
+  const button = document.getElementById("screen-toggle");
+  if (button) button.textContent = screenPaused ? "Resume" : "Pause";
+}
+
+async function screenFrame() {
+  screenTimer = null;
+  const vm = screenVm;
+  const image = document.getElementById("screen");
+  // The page was rebuilt, the workspace closed, or the window moved on: the
+  // element is what says the loop is still wanted.
+  if (!image || !vm || state.page !== "console") return;
+  // A hidden window is not being looked at; the VM keeps running regardless.
+  if (document.hidden || screenPaused) { if (screenVm === vm) scheduleScreen(); return; }
+  try {
+    const response = await api().screenshot({ max_width: 1600 });
+    // The capture takes a while; the workspace may have moved on meanwhile.
+    if (screenVm !== vm) return;
+    if (!response || !response.ok) {
+      // Off, paused, or the level has no screenshots: stop asking rather than
+      // repeating a refusal several times a second.
+      screenNote((response && response.error && response.error.message) || "capture failed");
+      screenPaused = true;
+      syncScreenButton();
+      return;
+    }
+    applyShot(response.ok);
+  } catch (error) {
+    if (screenVm !== vm) return;
+    screenNote(String(error));
+    screenPaused = true;
+    syncScreenButton();
+    return;
+  }
+  scheduleScreen();
+}
+
+function applyShot(shot) {
+  const image = document.getElementById("screen");
+  if (!image) return;
+  const metadata = shot.metadata || {};
+  image.src = shot.src;
+  // The video head is the coordinate space the mouse tools use, so the mapping
+  // from the element to the guest needs the head size, not the PNG's.
+  image.dataset.sourceWidth = metadata.source_width || "";
+  image.dataset.sourceHeight = metadata.source_height || "";
+  screenNote((metadata.width || "?") + "×" + (metadata.height || "?") + " · live");
+}
+
+async function captureOnce() {
+  const response = await api().screenshot({ max_width: 1600 });
+  if (response && response.ok) {
+    applyShot(response.ok);
     show("console_screenshot", { ok: { metadata: response.ok.metadata } });
   } else {
     show("console_screenshot", response);
   }
+}
+
+function toggleScreen() {
+  if (!screenVm) {
+    startScreen(state.vm);
+  } else {
+    screenPaused = !screenPaused;
+    if (!screenPaused && !screenTimer) scheduleScreen();
+  }
+  syncScreenButton();
+}
+
+function guestPoint(image, event) {
+  const rect = image.getBoundingClientRect();
+  if (!rect.width || !rect.height) return { x: 0, y: 0 };
+  const width = Number(image.dataset.sourceWidth) || image.naturalWidth || rect.width;
+  const height = Number(image.dataset.sourceHeight) || image.naturalHeight || rect.height;
+  const clamp = (value) => Math.max(0, Math.min(32767, value));
+  return {
+    x: clamp(Math.round(((event.clientX - rect.left) / rect.width) * width)),
+    y: clamp(Math.round(((event.clientY - rect.top) / rect.height) * height)),
+  };
+}
+
+async function clickGuest(event, button) {
+  const image = event.currentTarget;
+  const point = guestPoint(image, event);
+  image.focus();
+  const x = document.getElementById("mouse-x");
+  const y = document.getElementById("mouse-y");
+  if (x) x.value = point.x;
+  if (y) y.value = point.y;
+  await call("console_click", { ...vmArg(), x: point.x, y: point.y, button });
+}
+
+/* ---------- keyboard ---------- */
+// Names the service accepts for `console_press_keys`; anything else printable
+// goes through `console_type_text`.
+const KEY_BY_NAME = {
+  Enter: "enter", Escape: "escape", Tab: "tab", Backspace: "backspace", Delete: "delete",
+  Insert: "insert", Home: "home", End: "end", PageUp: "pageup", PageDown: "pagedown",
+  ArrowUp: "up", ArrowDown: "down", ArrowLeft: "left", ArrowRight: "right",
+};
+for (let number = 1; number <= 12; number += 1) KEY_BY_NAME["F" + number] = "f" + number;
+
+let typed = "";
+let typedTimer = null;
+
+function queueText(text) {
+  typed += text;
+  if (typedTimer) clearTimeout(typedTimer);
+  // One call per pause, not per character: each call is a pipe round trip.
+  typedTimer = setTimeout(() => { typedTimer = null; flushText(); }, 250);
+}
+
+async function flushText() {
+  if (typedTimer) { clearTimeout(typedTimer); typedTimer = null; }
+  const text = typed;
+  typed = "";
+  if (!text) return;
+  await call("console_type_text", { ...vmArg(), text });
+}
+
+async function keyGuest(event) {
+  // A modifier combination is not text; the buttons above cover the ones the
+  // service supports (Ctrl+Alt+Del), and the rest have no tool to reach them.
+  if (event.ctrlKey || event.altKey || event.metaKey) return;
+  const name = KEY_BY_NAME[event.key];
+  if (name) {
+    event.preventDefault();
+    await flushText();
+    await call("console_press_keys", { ...vmArg(), keys: [name] });
+    return;
+  }
+  // The guest keyboard takes ASCII; anything else is dropped rather than
+  // refused by the service.
+  if (event.key.length === 1 && event.key >= " " && event.key <= "~") {
+    event.preventDefault();
+    queueText(event.key);
+  }
+}
+
+/* ---------- checkpoints ---------- */
+function checkpointTree(checkpoints) {
+  // Hyper-V reports a flat list with parent ids; the page draws the branches.
+  const byId = new Map(checkpoints.map((checkpoint) => [String(checkpoint.id || ""), checkpoint]));
+  const children = new Map();
+  const roots = [];
+  for (const checkpoint of checkpoints) {
+    const parent = String(checkpoint.parent_snapshot_id || "");
+    if (parent && byId.has(parent) && parent !== String(checkpoint.id || "")) {
+      if (!children.has(parent)) children.set(parent, []);
+      children.get(parent).push(checkpoint);
+    } else {
+      roots.push(checkpoint);
+    }
+  }
+  const ordered = [];
+  const seen = new Set();
+  const walk = (checkpoint, depth) => {
+    const id = String(checkpoint.id || "");
+    if (seen.has(id)) return;
+    seen.add(id);
+    ordered.push({ checkpoint, depth });
+    for (const child of children.get(id) || []) walk(child, depth + 1);
+  };
+  for (const root of roots) walk(root, 0);
+  return ordered;
+}
+
+async function setBaseline(name) {
+  try {
+    show("set_baseline", { ok: await api().set_baseline(String(name || "")) });
+  } catch (error) {
+    show("set_baseline", { error: { message: String(error) } });
+  }
+  // The service re-read the file; the window's copy of the policy is stale now.
+  await refreshHello();
+  await render();
+}
+
+async function confirmCheckpoint(pending) {
+  state.confirm = null;
+  const payload = {
+    vm_name: state.vm, snapshot_id: pending.id,
+    confirm_vm: state.vm, confirm_snapshot_id: pending.id,
+  };
+  await call(pending.kind === "restore" ? "restore_checkpoint" : "delete_checkpoint", payload);
+  await render();
 }
 
 /* ---------- chrome ---------- */
@@ -769,6 +1089,9 @@ function drawActivity() {
 }
 
 async function render() {
+  // The page is about to be replaced, so the console's loop must let go of the
+  // element it was drawing into; the console builder starts a new one.
+  stopScreen();
   renderNav();
   const entry = PAGES.find(([, key]) => key === state.page) || PAGES[0];
   const page = document.getElementById("page");
@@ -789,6 +1112,7 @@ async function render() {
 
 function go(key) {
   state.page = key;
+  state.confirm = null;
   render();
 }
 
@@ -796,6 +1120,8 @@ function go(key) {
 async function openVm(name) {
   const chosen = String(name || "").trim();
   if (!chosen) return;
+  // A confirmation belongs to the VM it was asked about, not to the next one.
+  state.confirm = null;
   if (!state.tabs.some((tab) => tab.toLowerCase() === chosen.toLowerCase())) state.tabs.push(chosen);
   try {
     state.hello = await api().choose(chosen);

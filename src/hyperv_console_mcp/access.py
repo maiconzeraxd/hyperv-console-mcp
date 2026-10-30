@@ -84,14 +84,26 @@ def _key(vm_name: str) -> str:
     return name.casefold()
 
 
+def normalise_baseline(value: Any) -> str | None:
+    """A checkpoint name the operator protects, or ``None`` for no protection."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if len(text) > 128 or any(ord(character) < 32 for character in text):
+        raise ValidationError("A baseline must be a checkpoint name of 1-128 characters.")
+    return text
+
+
 @dataclass(frozen=True, slots=True)
 class AccessStore:
     """The operator's policy file: one level per VM, keyed case-insensitively."""
 
     path: Path
 
-    def load(self) -> dict[str, tuple[str, str]]:
-        """``casefolded name -> (name as written, level)``; empty when absent.
+    def entries(self) -> dict[str, dict[str, str | None]]:
+        """Every record: ``{"name", "level", "baseline"}`` per casefolded name.
 
         A file that exists but cannot be read or parsed is an error rather than
         an empty policy: silently starting with no VMs would look like a broken
@@ -107,33 +119,79 @@ class AccessStore:
             ) from exc
         if not isinstance(raw, dict) or not isinstance(raw.get("vms", {}), dict):
             raise ValidationError(f"The access file {self.path} must hold an object with a 'vms' map.")
-        entries: dict[str, tuple[str, str]] = {}
+        entries: dict[str, dict[str, str | None]] = {}
         for key, entry in (raw.get("vms") or {}).items():
-            name, level = (entry.get("name"), entry.get("level")) if isinstance(entry, dict) else (key, entry)
-            name = str(name or key)
-            entries[_key(name)] = (name.strip(), normalise_level(level))
+            if isinstance(entry, dict):
+                name, level, baseline = entry.get("name"), entry.get("level"), entry.get("baseline")
+            else:
+                # The first version wrote a bare level; those files still load.
+                name, level, baseline = key, entry, None
+            name = str(name or key).strip()
+            entries[_key(name)] = {
+                "name": name,
+                "level": normalise_level(level),
+                "baseline": normalise_baseline(baseline),
+            }
         return entries
+
+    def load(self) -> dict[str, tuple[str, str]]:
+        """``casefolded name -> (name as written, level)``; empty when absent."""
+        return {
+            key: (str(record["name"]), str(record["level"]))
+            for key, record in self.entries().items()
+        }
 
     def levels(self) -> dict[str, str]:
         """``casefolded name -> level``, which is all the policy needs."""
         return {key: level for key, (_name, level) in self.load().items()}
 
-    def set(self, vm_name: str, level: str) -> dict[str, tuple[str, str]]:
-        entries = self.load()
-        entries[_key(vm_name)] = (str(vm_name).strip(), normalise_level(level))
+    def baselines(self) -> dict[str, str]:
+        """``casefolded name -> protected checkpoint name``, where one is set."""
+        return {
+            key: str(record["baseline"])
+            for key, record in self.entries().items()
+            if record["baseline"]
+        }
+
+    def set(self, vm_name: str, level: str) -> dict[str, dict[str, str | None]]:
+        entries = self.entries()
+        key = _key(vm_name)
+        # A level change is about the level: the operator's baseline stays.
+        baseline = entries.get(key, {}).get("baseline")
+        entries[key] = {
+            "name": str(vm_name).strip(),
+            "level": normalise_level(level),
+            "baseline": baseline,
+        }
         return self._save(entries)
 
-    def remove(self, vm_name: str) -> dict[str, tuple[str, str]]:
-        entries = self.load()
+    def set_baseline(self, vm_name: str, checkpoint: str | None) -> dict[str, dict[str, str | None]]:
+        """Mark one checkpoint as the state the guest is expected to return to."""
+        entries = self.entries()
+        key = _key(vm_name)
+        record = entries.get(key)
+        if record is None:
+            raise ValidationError(
+                "Choose a level for this VM before naming its baseline checkpoint."
+            )
+        record["baseline"] = normalise_baseline(checkpoint)
+        return self._save(entries)
+
+    def remove(self, vm_name: str) -> dict[str, dict[str, str | None]]:
+        entries = self.entries()
         entries.pop(_key(vm_name), None)
         return self._save(entries)
 
-    def _save(self, entries: dict[str, tuple[str, str]]) -> dict[str, tuple[str, str]]:
+    def _save(self, entries: dict[str, dict[str, str | None]]) -> dict[str, dict[str, str | None]]:
         payload = {
             "version": FILE_VERSION,
             "vms": {
-                key: {"name": name, "level": level}
-                for key, (name, level) in sorted(entries.items())
+                key: {
+                    field: record[field]
+                    for field in ("name", "level", "baseline")
+                    if record.get(field) is not None
+                }
+                for key, record in sorted(entries.items())
             },
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)

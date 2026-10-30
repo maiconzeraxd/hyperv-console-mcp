@@ -151,6 +151,10 @@ class Settings:
     # with a level takes its capabilities from that level; the flags below are
     # the fallback for a VM with none, which is how a bare environment behaves.
     levels: Mapping[str, str] = field(default_factory=dict)
+    # casefolded VM name -> the checkpoint the operator protects. The baseline is
+    # the state the guest is expected to return to, so the service refuses to
+    # delete it or to let a new checkpoint take its name — for every actor.
+    baselines: Mapping[str, str] = field(default_factory=dict)
     access_path: Path | None = None
     profile: str = "safe"
     toolsets: frozenset[str] = DEFAULT_TOOLSETS["safe"]
@@ -192,7 +196,7 @@ class Settings:
     def from_env(cls, values: Mapping[str, str] | None = None) -> "Settings":
         env = os.environ if values is None else values
         path = access_file(env)
-        entries = AccessStore(path).load()
+        entries = AccessStore(path).entries()
         names = frozenset(
             name.strip() for name in env.get("HYPERV_MCP_ALLOWED_VMS", "").split(",") if name.strip()
         )
@@ -203,7 +207,7 @@ class Settings:
         # it: a test or a one-off run names the VMs it means, and the file still
         # supplies each VM's level.
         if not names:
-            names = frozenset(name for name, _level in entries.values())
+            names = frozenset(str(record["name"]) for record in entries.values())
         audit_path = env.get("HYPERV_MCP_AUDIT_LOG", "").strip()
         overrides = {
             key[len(PER_VM_TRANSPORT_PREFIX):].casefold().replace("_", "-"): _transport(env, key)
@@ -221,7 +225,12 @@ class Settings:
             return profile == "lab"
         return cls(
             allowed_vms=names,
-            levels={key: level for key, (_name, level) in entries.items()},
+            levels={key: str(record["level"]) for key, record in entries.items()},
+            baselines={
+                key: str(record["baseline"])
+                for key, record in entries.items()
+                if record["baseline"]
+            },
             access_path=path,
             profile=profile,
             toolsets=_toolsets(env, profile),
@@ -291,6 +300,10 @@ class Settings:
     def level_for(self, vm_name: str) -> str | None:
         """The access level the operator gave this VM, if any."""
         return self.levels.get(vm_name.strip().casefold())
+
+    def baseline_for(self, vm_name: str) -> str | None:
+        """The checkpoint this VM must not lose, if the operator named one."""
+        return self.baselines.get(vm_name.strip().casefold())
 
     def capabilities_for(self, vm_name: str) -> frozenset[str]:
         """What this VM may do: its level's set, or the global flags.

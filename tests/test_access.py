@@ -127,6 +127,52 @@ def test_levels_round_trip_through_the_file(tmp_path: Path) -> None:
     assert not (tmp_path / "access.json.tmp").exists()
 
 
+def test_a_baseline_is_stored_beside_the_level_and_survives_a_level_change(tmp_path: Path) -> None:
+    """The baseline is the operator's, so changing what the AI may do keeps it."""
+    store = AccessStore(tmp_path / "access.json")
+    store.set("Lab-VM", "lab")
+    store.set_baseline("lab-vm", "golden")
+    assert store.baselines() == {"lab-vm": "golden"}
+
+    store.set("Lab-VM", "control")
+    assert store.baselines() == {"lab-vm": "golden"}
+    stored = json.loads((tmp_path / "access.json").read_text(encoding="utf-8"))
+    assert stored["vms"]["lab-vm"]["baseline"] == "golden"
+    assert stored["vms"]["lab-vm"]["level"] == "control"
+
+
+def test_a_baseline_needs_a_level_to_belong_to(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError):
+        AccessStore(tmp_path / "access.json").set_baseline("Lab-VM", "golden")
+
+
+def test_clearing_the_baseline_leaves_the_level(tmp_path: Path) -> None:
+    store = AccessStore(tmp_path / "access.json")
+    store.set("Lab-VM", "lab")
+    store.set_baseline("Lab-VM", "golden")
+    store.set_baseline("Lab-VM", "")
+    assert store.baselines() == {}
+    assert store.levels() == {"lab-vm": "lab"}
+
+
+def test_a_file_that_still_holds_a_bare_level_loads(tmp_path: Path) -> None:
+    """The first version wrote one string per VM; those files keep working."""
+    path = tmp_path / "access.json"
+    path.write_text(json.dumps({"version": 1, "vms": {"lab-vm": "lab"}}), encoding="utf-8")
+    store = AccessStore(path)
+    assert store.levels() == {"lab-vm": "lab"}
+    assert store.baselines() == {}
+
+
+def test_a_baseline_reaches_the_settings(tmp_path: Path) -> None:
+    path = tmp_path / "access.json"
+    store = AccessStore(path)
+    store.set("NORTH-Test", "control")
+    store.set_baseline("NORTH-Test", "golden")
+    settings = Settings.from_env({"HYPERV_MCP_ACCESS_FILE": str(path)})
+    assert settings.baseline_for("north-test") == "golden"
+
+
 def test_the_file_supplies_the_allowlist_when_the_environment_names_none(tmp_path: Path) -> None:
     path = tmp_path / "access.json"
     AccessStore(path).set("Lab-VM", "lab")

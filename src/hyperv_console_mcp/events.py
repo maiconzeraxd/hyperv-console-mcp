@@ -24,6 +24,10 @@ _MAX_MESSAGE = 512
 _actor: ContextVar[str] = ContextVar("hyperv_event_actor", default="mcp")
 _operation_depth: ContextVar[int] = ContextVar("hyperv_event_operation_depth", default=0)
 _approval_granted: ContextVar[bool] = ContextVar("hyperv_approval_granted", default=False)
+# The names the operator's own window uses. A human clicking "restore" is not
+# the AI asking for permission: the window would otherwise have to approve the
+# click it just received. The confirm_* fields and the level still apply.
+OPERATOR_ACTORS = frozenset({"dashboard", "ui"})
 _write_lock = threading.Lock()
 _pruned: set[str] = set()
 
@@ -263,7 +267,7 @@ def _approval_required() -> bool:
     enabled = os.environ.get(
         "HYPERV_MCP_REQUIRE_DASHBOARD_APPROVAL", "false"
     ).strip().casefold() in {"1", "true", "yes", "on"}
-    return enabled and _actor.get() != "dashboard"
+    return enabled and _actor.get() not in OPERATOR_ACTORS
 
 
 def require_dashboard_approval(

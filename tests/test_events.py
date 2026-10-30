@@ -63,6 +63,22 @@ def service(monkeypatch, tmp_path) -> tuple[HyperVService, FakeBackend]:
     )), backend
 
 
+def test_the_operator_s_own_window_does_not_ask_itself_for_permission(approvals, service) -> None:
+    """A click in the window is the operator deciding; a card would ask twice."""
+    from hyperv_console_mcp.events import EVENTS
+
+    target, _backend = service
+    for actor in ("ui", "dashboard"):
+        with EVENTS.actor(actor):
+            target.console_type_text("NORTH-Test", "hello")
+    assert approvals.calls == []
+
+    # The AI is still asked, which is the whole point of the gate.
+    with EVENTS.actor("mcp"):
+        target.console_type_text("NORTH-Test", "hello")
+    assert [call[0] for call in approvals.calls] == ["console_input"]
+
+
 def test_event_lifecycle_contains_metadata_not_exception_details(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("HYPERV_MCP_EVENT_DIRECTORY", str(tmp_path))
     bus = EventBus()

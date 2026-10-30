@@ -71,6 +71,9 @@ class Api:
             "vm": self.vm_name,
             "level": level,
             "levels": list(LEVELS),
+            # The checkpoint the operator protects, if any: the page marks it and
+            # offers no delete for it, because the service refuses that anyway.
+            "baseline": self.settings.baseline_for(self.vm_name) if self.vm_name else None,
             # The fleet badges every VM with its own level, and a level is a
             # property of the VM, not of the window's current choice.
             "levels_by_vm": dict(self.settings.levels),
@@ -140,6 +143,22 @@ class Api:
         store = self._store()
         store.remove(self.vm_name)
         return {"level": None, "policy": self.service.reload_policy()}
+
+    def set_baseline(self, checkpoint: str) -> dict[str, Any]:
+        """Name the checkpoint this VM must not lose, in the operator's file.
+
+        Same rule as the level: only the operator's own window writes it. The
+        service re-reads the file, so the protection is live for the AI too —
+        `delete_checkpoint` refuses the baseline whoever asks.
+        """
+        if not self.vm_name:
+            raise ValidationError("Choose a VM before naming a baseline checkpoint.")
+        store = self._store()
+        store.set_baseline(self.vm_name, checkpoint)
+        return {
+            "baseline": store.baselines().get(self.vm_name.casefold()),
+            "policy": self.service.reload_policy(),
+        }
 
     def _store(self) -> AccessStore:
         return AccessStore(self.settings.access_path or access_file(self.environ))

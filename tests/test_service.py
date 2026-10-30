@@ -1038,3 +1038,71 @@ def test_lab_guest_configure_restart_needs_the_power_capability(
     service = HyperVService(backend, replace(enabled.settings, allow_power=False), enabled.audit)
     with pytest.raises(PolicyError, match="HYPERV_MCP_ALLOW_POWER"):
         service.lab_guest_configure("NORTH-Test", "NORTH-Test", testsigning=True, restart=True)
+
+
+GOLDEN = "11111111-1111-1111-1111-111111111111"
+BEFORE = "22222222-2222-2222-2222-222222222222"
+
+
+def _baseline_service(backend: FakeBackend, baseline: str | None = "golden") -> HyperVService:
+    return HyperVService(
+        backend,
+        Settings(
+            allowed_vms=frozenset({"NORTH-Test"}),
+            levels={"north-test": "control"},
+            baselines={"north-test": baseline} if baseline else {},
+        ),
+    )
+
+
+def _two_checkpoints(backend: FakeBackend) -> None:
+    backend.responses["checkpoint_list"] = {
+        "vm": "NORTH-Test",
+        "count": 2,
+        "checkpoints": [
+            {"id": GOLDEN, "name": "golden", "parent_snapshot_id": None},
+            {"id": BEFORE, "name": "before-lab", "parent_snapshot_id": GOLDEN},
+        ],
+    }
+
+
+def test_the_baseline_is_marked_in_the_checkpoint_list(backend: FakeBackend) -> None:
+    """The page marks the row and hides Delete from it; this is where it learns."""
+    _two_checkpoints(backend)
+    result = _baseline_service(backend).list_checkpoints("NORTH-Test")
+    assert result["baseline"] == "golden"
+    assert [checkpoint["baseline"] for checkpoint in result["checkpoints"]] == [True, False]
+
+
+def test_a_vm_with_no_baseline_marks_nothing(backend: FakeBackend) -> None:
+    _two_checkpoints(backend)
+    result = _baseline_service(backend, None).list_checkpoints("NORTH-Test")
+    assert result["baseline"] is None
+    assert not any(checkpoint["baseline"] for checkpoint in result["checkpoints"])
+
+
+def test_the_baseline_checkpoint_cannot_be_deleted(backend: FakeBackend) -> None:
+    """Whoever asks: the protection is the operator's, not the window's."""
+    _two_checkpoints(backend)
+    with pytest.raises(PolicyError, match="protected baseline"):
+        _baseline_service(backend).delete_checkpoint("NORTH-Test", GOLDEN, "NORTH-Test", GOLDEN)
+    assert not any(operation == "checkpoint_delete" for operation, _ in backend.calls)
+
+
+def test_the_baseline_can_still_be_restored_to(backend: FakeBackend) -> None:
+    _two_checkpoints(backend)
+    _baseline_service(backend).restore_checkpoint("NORTH-Test", GOLDEN, "NORTH-Test", GOLDEN)
+    assert backend.calls[-1] == ("checkpoint_restore", {"vm": "NORTH-Test", "snapshot_id": GOLDEN})
+
+
+def test_another_checkpoint_is_deleted_as_before(backend: FakeBackend) -> None:
+    _two_checkpoints(backend)
+    _baseline_service(backend).delete_checkpoint("NORTH-Test", BEFORE, "NORTH-Test", BEFORE)
+    assert backend.calls[-1] == ("checkpoint_delete", {"vm": "NORTH-Test", "snapshot_id": BEFORE})
+
+
+def test_a_new_checkpoint_cannot_take_the_baseline_name(backend: FakeBackend) -> None:
+    """Names are how the baseline is identified, and Hyper-V does not keep them unique."""
+    with pytest.raises(PolicyError, match="protected baseline"):
+        _baseline_service(backend).create_checkpoint("NORTH-Test", "GOLDEN")
+    assert not any(operation == "checkpoint_create" for operation, _ in backend.calls)

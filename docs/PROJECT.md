@@ -1499,6 +1499,43 @@ rendered from a live VM — the capture path needs an elevated session.
   the `docs/DASHBOARD.md` rewrite, and the console cadence measurements for
   `docs/PERFORMANCE.md`.
 
+### 2026-10-29 — dashboard wave 2: a console you can click, and a baseline the page cannot move
+
+- **The baseline became service state, not a page rule.** It is written to the operator's
+  access file beside the level (`AccessStore.set_baseline`, `Settings.baseline_for`) and
+  enforced in `VmService`: `delete_checkpoint` refuses the baseline for every actor, and
+  `create_checkpoint` refuses to reuse its name, so a checkpoint called "golden" cannot be
+  quietly replaced. The window only reads it — the rule lives where the AI also meets it.
+- **`list_checkpoints` marks the baseline** on the checkpoint it names and repeats the name
+  at the top level, so the tree is drawn from the service's answer rather than from a guess
+  in JavaScript.
+- **The console is an image you can click.** `console_click`/`console_mouse_move` receive
+  guest pixels, so the page maps the `<img>`'s CSS box back through `source_width`/
+  `source_height` from the screenshot metadata; `capture_scale` and `coordinates_match_mouse`
+  decide whether the mapping is honest, and the page says so instead of guessing. Typing is
+  batched into one `console_batch` and keys go through a name table; a "Ctrl+Alt+Del" button
+  and a paste box cover OOBE, where the guest has no clipboard to share.
+- **Capture stops for a reason.** The loop pauses when the window is hidden or the operator
+  pressed pause, and it *stops asking* — rather than retrying twice a second — when the
+  service refuses, which is what an Off VM or a `control`-less level looks like. A refused
+  frame is a message on the page, not a spin.
+- **Checkpoints: create, restore, delete, with the baseline locked.** Restore and delete
+  confirm in place (two clicks on the same row, no modal), and the page draws branches from
+  `parent_id` rather than assuming a flat list.
+- **`OPERATOR_ACTORS` stops the window asking itself for permission.** `ui` and `dashboard`
+  are the operator deciding; a card for a click the operator just made would be a second
+  question about the same decision. The AI (`mcp`) is still gated exactly as before.
+- Tests: the baseline survives a level change and is stored in the file; it needs a level to
+  belong to; a file holding a bare level still loads; `baseline_for` reaches `Settings`; the
+  service marks it in the list, refuses to delete it, still allows restoring it, and refuses a
+  new checkpoint taking its name; the operator's actors never request approval while `mcp`
+  does; the page's console and checkpoint actions cross the envelope. `tests/test_webui_contract.py`
+  is new: it parses the page for `call("…")`, `action("…", "…")` and `api().…` and fails if a
+  name it finds is missing from `HyperVService` or `Api`, if any name is private, or if the page
+  names a VM of this household.
+- Still open: waves 3–5 (file manager, lab/debugger, matrix), the `docs/DASHBOARD.md` rewrite,
+  and the console cadence measurements for `docs/PERFORMANCE.md`.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,

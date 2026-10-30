@@ -7,7 +7,7 @@ import time
 import uuid
 from typing import Any
 
-from ..errors import HyperVError, ValidationError
+from ..errors import HyperVError, PolicyError, ValidationError
 from ._base import ServiceBase, _integer, _text
 
 
@@ -114,13 +114,31 @@ class VmService(ServiceBase):
 
     def list_checkpoints(self, vm_name: str) -> dict[str, Any]:
         name = self._vm(vm_name)
-        return self._run(
+        result = self._run(
             "checkpoint_list", "checkpoint_list", {"vm": name}, vm_name=name
         )
+        # The baseline is the operator's, not Hyper-V's, so it is marked here
+        # rather than in a second list a caller would have to join by hand.
+        baseline = self.settings.baseline_for(name)
+        checkpoints = result.get("checkpoints")
+        if isinstance(checkpoints, list):
+            for checkpoint in checkpoints:
+                if isinstance(checkpoint, dict):
+                    checkpoint["baseline"] = bool(baseline) and checkpoint.get("name") == baseline
+        result["baseline"] = baseline
+        return result
 
     def create_checkpoint(self, vm_name: str, name: str) -> dict[str, Any]:
         vm = self._write(vm_name, "checkpoints")
         checkpoint_name = _text(name, "name", 128)
+        baseline = self.settings.baseline_for(vm)
+        if baseline is not None and checkpoint_name.casefold() == baseline.casefold():
+            # Hyper-V does not keep checkpoint names unique, and the baseline is
+            # identified by name: a second one would make the marker ambiguous.
+            raise PolicyError(
+                f"{baseline!r} is this VM's protected baseline; choose another checkpoint name.",
+                fix={"operator": f'move the baseline off "{baseline}" before reusing the name'},
+            )
         with self._approve("checkpoint", vm, {"action": "create", "checkpoint_name": checkpoint_name}):
             return self._run(
                 "checkpoint_create", "checkpoint_create",
@@ -156,6 +174,19 @@ class VmService(ServiceBase):
         snapshot = self._snapshot_id(snapshot_id)
         self._confirm(confirm_vm, vm, "confirm_vm")
         self._confirm(confirm_snapshot_id, snapshot, "confirm_snapshot_id")
+        baseline = self.settings.baseline_for(vm)
+        if baseline is not None:
+            # The id is what the caller has; the protection is stored by name,
+            # so the listing is read once to learn which checkpoint this is.
+            for checkpoint in self.list_checkpoints(vm).get("checkpoints") or []:
+                if isinstance(checkpoint, dict) and checkpoint.get("id") == snapshot:
+                    if checkpoint.get("name") == baseline:
+                        raise PolicyError(
+                            f"{baseline!r} is this VM's protected baseline; restoring it is "
+                            "allowed, deleting it is not.",
+                            fix={"operator": "name another checkpoint as the baseline first"},
+                        )
+                    break
         with self._approve("checkpoint", vm, {"action": "delete", "snapshot_id": snapshot}):
             return self._run(
                 "checkpoint_delete", "checkpoint_delete",
