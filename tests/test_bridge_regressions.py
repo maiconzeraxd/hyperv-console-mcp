@@ -579,6 +579,25 @@ function Copy-VMFile {
     assert target.read_bytes() == source.read_bytes()
 
 
+def test_a_failure_reports_the_inner_cause_the_outer_message_hides(tmp_path: Path) -> None:
+    """A module that will not load arrives as "could not be loaded", which says
+    nothing about why; the inner exception is what names the missing assembly."""
+    buried = """
+function Get-VM {
+    param($Name)
+    throw [System.Exception]::new(
+        "The 'ConvertTo-SecureString' command was found in the module 'Microsoft.PowerShell.Security', but the module could not be loaded.",
+        [System.IO.FileNotFoundException]::new('Could not load file or assembly Microsoft.PowerShell.Security.dll')
+    )
+}
+"""
+    with pytest.raises(BackendError) as raised:
+        invoke_with_mocks(tmp_path, buried, "vm_get", {"vm": "NORTH-Test"})
+    message = str(raised.value)
+    assert "could not be loaded" in message
+    assert "Could not load file or assembly Microsoft.PowerShell.Security.dll" in message
+
+
 def test_guest_get_file_leaves_no_partial_download_behind(tmp_path: Path) -> None:
     guest_file = tmp_path / "guest" / "dump.bin"
     guest_file.parent.mkdir()

@@ -1877,6 +1877,17 @@ function Invoke-BridgeRequest {
     } catch {
         $errorRecord = $_
         $message = $errorRecord.Exception.Message
+        # The outer message is sometimes a summary of something the inner
+        # exception states plainly - a module that would not load, an assembly
+        # that was not found - so the chain is appended when it says more.
+        $inner = $errorRecord.Exception.InnerException
+        for ($depth = 0; $null -ne $inner -and $depth -lt 3; $depth++) {
+            $innerMessage = [string]$inner.Message
+            if ($innerMessage -and $message -notlike "*$innerMessage*") {
+                $message = "$message ($innerMessage)"
+            }
+            $inner = $inner.InnerException
+        }
         $category = [string]$errorRecord.CategoryInfo.Category
         $code = 'bridge_error'
         if (Test-AccessDeniedError -ErrorRecord $errorRecord) {

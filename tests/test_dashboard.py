@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-pytest.importorskip("tkinter", reason="the dashboard is a tkinter application")
+tkinter = pytest.importorskip("tkinter", reason="the dashboard is a tkinter application")
 
 from hyperv_console_mcp.dashboard import Dashboard, existing_pipe_name, initial_vm_name  # noqa: E402
 
@@ -79,6 +79,13 @@ def window(tmp_path, monkeypatch):
     )
     try:
         app = Dashboard("NORTH-Test")
+    except tkinter.TclError as exc:
+        # A host that cannot open a Tk window at all - no display, or a Python
+        # whose tcl/tk data files are incomplete, which is how the hosted
+        # Windows runners ship tkinter (ttk's cursors.tcl is missing) - fails
+        # here before any dashboard code runs. That is the environment, not the
+        # window under test.
+        pytest.skip(f"This host cannot open a Tk window: {exc}")
     except Exception as exc:
         if "display" in str(exc).casefold():
             pytest.skip("No interactive display is available.")
@@ -87,6 +94,21 @@ def window(tmp_path, monkeypatch):
         yield app
     finally:
         app.close()
+
+
+def test_a_host_that_cannot_open_a_window_is_skipped_not_failed(tmp_path, monkeypatch) -> None:
+    """The hosted Windows runners ship tkinter without ttk's cursors.tcl, so Tk
+    raises before any dashboard code runs. That is the environment; a skip says
+    so, and a failure would have said the window was broken."""
+    import sys
+
+    def refuse(*args, **kwargs):
+        raise tkinter.TclError("Can't find a usable tk.tcl in the following directories")
+
+    monkeypatch.setattr(sys.modules[__name__], "Dashboard", refuse)
+    # The fixture is a generator, so the skip only happens once it is driven.
+    with pytest.raises(pytest.skip.Exception, match="cannot open a Tk window"):
+        next(window.__wrapped__(tmp_path, monkeypatch))
 
 
 def _request(request_id: str = "req-1") -> dict:
@@ -177,6 +199,13 @@ def test_dashboard_pages_render_with_fake_backend(tmp_path, monkeypatch) -> None
     )
     try:
         app = Dashboard("NORTH-Test")
+    except tkinter.TclError as exc:
+        # A host that cannot open a Tk window at all - no display, or a Python
+        # whose tcl/tk data files are incomplete, which is how the hosted
+        # Windows runners ship tkinter (ttk's cursors.tcl is missing) - fails
+        # here before any dashboard code runs. That is the environment, not the
+        # window under test.
+        pytest.skip(f"This host cannot open a Tk window: {exc}")
     except Exception as exc:
         if "display" in str(exc).casefold():
             pytest.skip("No interactive display is available.")
