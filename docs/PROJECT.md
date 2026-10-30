@@ -2172,6 +2172,37 @@ assumed the host's platform.
 - Gate: 1116 passed / 1 skipped on Windows, ruff clean, MCP stdio smoke green. The Linux job is the
   evidence that the fix worked, and it is not claimed until it runs.
 
+### 2026-10-30 — v0.3.0 is published, and the pipeline that publishes it has now run
+
+The tag was moved from `acd5803` to `2190d24` — the four commits of CI fixes came after it — and
+the push built everything the earlier entry could only promise. Nothing was lost by moving it: the
+only previous release run (`41005477544`) died at its test step, so no release and no asset existed
+to overwrite.
+
+- **The pipeline was proven before the tag was spent.** `release.yml` carries `workflow_dispatch`
+  for exactly this, so it ran by hand on `2190d24` first: tests, PyInstaller, `python -m build`,
+  Inno Setup, artifact upload — all green, with the draft step correctly skipped. Only then did the
+  tag move. This is the first time `ISCC.exe` has compiled `installer.iss` anywhere, so the
+  installer had never existed before this run.
+- **The tag run** (`41010753965`) then produced `Hyper-V Console v0.3.0` as a **draft**, with
+  `HyperVConsoleMCP-Setup-0.3.0.exe` (66.5 MB) and `hyperv_console_mcp-0.3.0-py3-none-any.whl`
+  attached. The sdist is built and uploaded as a workflow artifact but is not a release asset; the
+  release's two files are what the workflow's `gh release create` names.
+- **`InstallerSha256` is now filled**: `4f95b17d…f17ef5`, the hash of the asset at the release URL.
+  An Inno installer embeds a timestamp, so the hand-run build hashed differently (`569b7b36…`) and
+  would have been the wrong value — the reason the placeholder waited for the tag. A new test,
+  `test_the_winget_hash_is_a_hash_or_the_placeholder`, accepts the all-zero marker or a real
+  SHA-256 and nothing in between: winget accepts a malformed manifest, then refuses every download
+  with a checksum mismatch, which is worse than saying "not filled in yet".
+- **The release is a draft on purpose** and stays one until it is reviewed: nothing is signed, and
+  `winget validate` and a PR to `microsoft/winget-pkgs` are still open. **No winget PR is opened
+  here.**
+- `main` was fast-forwarded to `2190d24` as well, because it is the repository's default branch and
+  had been nine hours behind `v0.3` — the repository page, the commit graph and "last updated" all
+  read `main`, so the work looked stalled while it was landing.
+- Gate: 1117 passed / 1 skipped, ruff clean, MCP stdio smoke green; the Linux job of the tests
+  workflow is green on the same commit for the first time.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three

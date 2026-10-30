@@ -17,8 +17,9 @@ AppsAndFeaturesEntries:
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/maiconzeraxd/hyperv-console-mcp/releases/download/v0.3.0/HyperVConsoleMCP-Setup-0.3.0.exe
-    # Replace with the hash of the published installer before opening the PR to
-    # microsoft/winget-pkgs: `winget hash <file>` prints it.
-    InstallerSha256: '0000000000000000000000000000000000000000000000000000000000000000'
+    # The hash of the asset the v0.3.0 tag published, not of a local build: an
+    # Inno installer embeds a timestamp, so every build of the same tree hashes
+    # differently and only this one is downloadable from the URL above.
+    InstallerSha256: '4f95b17d220ad2ae95fbb7c2adbe238aac42ceedfb0964577f6933bc92f17ef5'
 ManifestType: installer
 ManifestVersion: 1.6.0

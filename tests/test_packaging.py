@@ -133,3 +133,18 @@ def test_the_winget_manifests_describe_one_package() -> None:
         assert "PackageIdentifier: maiconzeraxd.HyperVConsoleMCP" in text
         assert "ManifestVersion: 1.6.0" in text
         assert f"PackageVersion: {__version__}" in text
+
+
+def test_the_winget_hash_is_a_hash_or_the_placeholder() -> None:
+    """The placeholder is legitimate only until the tag has built an installer.
+
+    A wrong hash is worse than the zeros: winget accepts the manifest, then
+    every `winget install` refuses the download with a checksum mismatch. So the
+    value has to be either the all-zero marker that says "not filled in yet" or
+    a real SHA-256 - never a truncated or mistyped one.
+    """
+    text = _text(WINGET / "maiconzeraxd.HyperVConsoleMCP.installer.yaml")
+    match = re.search(r"InstallerSha256:\s*'([0-9a-fA-F]+)'", text)
+    assert match is not None, "the installer manifest names no InstallerSha256"
+    value = match.group(1)
+    assert value == "0" * 64 or re.fullmatch(r"[0-9a-f]{64}", value), value
