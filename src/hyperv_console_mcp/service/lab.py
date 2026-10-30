@@ -9,6 +9,12 @@ from typing import Any, Callable
 from ..errors import PolicyError, ValidationError
 from ._base import ServiceBase, _integer, _text
 
+# The crash-dump modes `lab_guest_configure` accepts, and the only ones any
+# window may offer. The page used to list `small` and `full`, which this
+# validator refuses, so two of its five choices were controls that could not do
+# what they said; the set lives here so both sides read one answer.
+CRASH_DUMP_MODES = frozenset({"kernel", "complete", "none"})
+
 
 class LabService(ServiceBase):
     def _tracked(
@@ -348,9 +354,11 @@ class LabService(ServiceBase):
         ):
             if value is not None and not isinstance(value, bool):
                 raise ValidationError(f"{label} must be true, false, or omitted.")
-        if crash_dump is not None and crash_dump is not False and crash_dump not in {
-            "kernel", "complete", "none"
-        }:
+        if (
+            crash_dump is not None
+            and crash_dump is not False
+            and crash_dump not in CRASH_DUMP_MODES
+        ):
             raise ValidationError("crash_dump must be kernel, complete, none, false, or omitted.")
         for label, value in (("secure_boot_off", secure_boot_off), ("restart", restart)):
             if not isinstance(value, bool):

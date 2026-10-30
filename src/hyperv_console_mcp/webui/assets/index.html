@@ -1083,7 +1083,7 @@ const builders = {
         field("Guest BCD: test signing", el("input", { id: "prep-testsigning", type: "checkbox" })),
         field("Guest BCD: kernel debug", el("input", { id: "prep-kernel-debug", type: "checkbox" })),
         field("Crash dump", el("select", { id: "prep-crash-dump" },
-          ...["", "none", "small", "kernel", "full"].map((value) =>
+          ...["", "none", "kernel", "complete"].map((value) =>
             el("option", { value }, value || "(leave as it is)"))))),
       el("div", { class: "row", style: "margin:0" },
         action("Apply guest BCD", "lab_guest_configure", () => ({

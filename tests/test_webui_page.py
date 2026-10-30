@@ -151,3 +151,28 @@ def test_a_dragged_file_is_the_same_copy_the_button_makes() -> None:
     assert text.count('call("guest_get_file"') == 1
     # The panel a file would land in says so, in the palette's own colour.
     assert ".card.dropping { outline: 2px dashed var(--accent)" in text
+
+
+def test_the_guest_bcd_form_offers_only_the_dump_modes_the_service_accepts() -> None:
+    """A select the service refuses is a control that cannot do what it says.
+
+    The page listed ``small`` and ``full``; ``lab_guest_configure`` validates
+    against ``kernel``, ``complete`` and ``none``, so two of its five choices
+    answered with a validation error. The accepted set is read from the service
+    rather than repeated here, so adding a mode on one side fails until the
+    other catches up.
+    """
+    from hyperv_console_mcp.service.lab import CRASH_DUMP_MODES
+
+    match = re.search(r'\["", ([^\]]*)\]\.map', _page())
+    assert match, "the crash-dump select is built from one array"
+    offered = {
+        value.strip().strip('"')
+        for value in match.group(1).split(",")
+        if value.strip()
+    }
+    assert offered <= set(CRASH_DUMP_MODES), (
+        "the page offers "
+        f"{sorted(offered - set(CRASH_DUMP_MODES))}, which lab_guest_configure refuses"
+    )
+
