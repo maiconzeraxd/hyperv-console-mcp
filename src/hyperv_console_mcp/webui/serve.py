@@ -54,6 +54,24 @@ def _error(code: str, message: str) -> dict[str, Any]:
     return {"error": {"code": code, "message": message}}
 
 
+# What the page is allowed to do, and nothing more: it is one file with every
+# asset inline, it talks only to this listener, and its only image is the
+# screenshot the console draws from a data URL. A policy written here is a
+# second lock on the same door the token guards — if the token ever leaks into
+# a page that was tampered with, this still refuses to load anything from
+# anywhere else.
+CSP = (
+    "default-src 'none'; "
+    "script-src 'unsafe-inline'; "
+    "style-src 'unsafe-inline'; "
+    "img-src data:; "
+    "connect-src 'self'; "
+    "base-uri 'none'; "
+    "form-action 'none'; "
+    "frame-ancestors 'none'"
+)
+
+
 def _page_with_token(page: str, token: str) -> str:
     """The same page, carrying the token the listener was opened with."""
     return page.replace(EMPTY_META, f'name="hyperv-token" content="{token}"')
@@ -85,6 +103,9 @@ def _handler(token: str, api: Api, page: str) -> type[BaseHTTPRequestHandler]:
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
+            if isinstance(body, str):
+                # The page only: a JSON answer has nothing to load.
+                self.send_header("Content-Security-Policy", CSP)
             self.end_headers()
             try:
                 self.wfile.write(data)

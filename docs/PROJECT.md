@@ -2584,6 +2584,41 @@ the scripts were doing and what the window calls.
 is started once (`hyperv-console-mcp`, or the installed service), the interface drives it, and the AI
 drives the same methods over MCP. There is no separate bootstrap path left to keep in sync.
 
+### 2026-10-30 — v0.4 fixes 3: redaction is the second line, and the first one is not writing it
+
+`logs.redact` masks the shapes a secret is written in. That is a pattern matcher, and the docs said
+"a message that never carries a secret" without saying how the guarantee is actually kept.
+
+- **The audit found the boundary is upstream.** Only two places feed the stream: `events._log` and
+  the transfer progress reporter. A failing operation publishes `error_code` and a fixed sentence —
+  never `str(exc)` — and the log mirrors the code; `guest_exec` carries the command and its output
+  nowhere near the stream; progress lines carry byte counts and SHA-256 digests. So the regex only
+  has to catch what a person writes by hand.
+- **`SECURITY.md` now says which is which**: redaction is a backstop, the boundary is the source.
+  A bare secret in a sentence passes the regex untouched, and the test suite asserts that on purpose
+  so the claim cannot quietly grow.
+- Tests: `tests/test_logs.py` two (the limitation, demonstrated — `password=hunter2` masked,
+  `the operator typed hunter2` not; and a transport that fails with the secret in its own message
+  reaches the stream as a code, with the secret absent). The failure test is the one that would
+  fail if `_log` ever logged `str(exc)`: the message has no `key=`, so redaction would not save it.
+
+### 2026-10-30 — v0.4 fixes 4: three ends of the `--serve` listener, closed
+
+- **`Content-Security-Policy` on the page**: `default-src 'none'`, `'unsafe-inline'` for the script
+  and style the single file already contains, `img-src data:` for the console's screenshot,
+  `connect-src 'self'` for the page's own `fetch`, and no frames, forms or base URI. Sent with the
+  document only; a JSON answer has nothing to load.
+- **`SECURITY.md` says what the token is worth**: the listener dispatches with `actor="ui"`, an
+  operator actor, so holding the token means speaking as the operator with no approval card. The
+  policy, allowlist, level, `confirm_*` fields and audit still apply — and the token travels in a
+  URL, so it lands in browser history, which `Referrer-Policy: no-referrer` does not undo.
+- Tests: `tests/test_webui_serve.py` three (the page carries the policy and really is inline-only, a
+  JSON answer does not carry it, and the page is refused without a token *even with a loopback
+  `Host`* — the token is the guard, not the bind address).
+- **Verified live**: the served page answered with the header, and a CDP run loaded it, opened the
+  workspace and mounted the xterm terminal with **zero** console or security entries — the policy
+  costs the page nothing because everything it needs is inline.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three

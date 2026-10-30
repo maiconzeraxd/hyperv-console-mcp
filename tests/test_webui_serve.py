@@ -185,11 +185,20 @@ def test_the_page_carries_the_token_it_was_opened_with(listener) -> None:
 
 
 def test_the_page_is_not_served_without_the_token(listener) -> None:
-    handle, _ = listener
+    """The token is the guard; a loopback ``Host`` is not a substitute for it.
 
-    status, _ = _request(handle, method="GET", path="/")
+    ``Host`` and ``Origin`` stop a browser from *reaching* the listener on
+    behalf of another site, and both are trivially present on a request that
+    never came from one — curl sets them. So the refusal is asserted with the
+    most innocent headers a local client can send.
+    """
+    handle, service = listener
 
-    assert status == 401
+    for headers in ({}, {"Host": f"127.0.0.1:{handle.port}"}, {"Host": f"localhost:{handle.port}"}):
+        status, _ = _request(handle, method="GET", path="/", headers=headers)
+        assert status == 401, f"served the page without a token, headers={headers}"
+
+    assert service.calls == []
 
 
 def test_the_token_is_not_a_fixed_string() -> None:
@@ -230,3 +239,53 @@ def test_a_closed_tab_is_not_an_error(listener) -> None:
     except ConnectionAbortedError:
         # Returns quietly: nothing is written to stderr.
         handle._server.handle_error(None, ("127.0.0.1", 0))
+
+def _page_request(handle, path: str, headers: dict[str, str] | None = None):
+    """A GET that keeps the response headers, which the body alone loses."""
+    connection = http.client.HTTPConnection("127.0.0.1", handle.port, timeout=5)
+    try:
+        connection.request("GET", path, headers=headers or {})
+        response = connection.getresponse()
+        return response.status, dict(response.getheaders()), response.read().decode("utf-8")
+    finally:
+        connection.close()
+
+
+def test_the_page_is_served_with_a_policy_that_allows_only_what_it_uses(listener) -> None:
+    """Everything inline, nothing remote: the CSP says so in the answer."""
+    handle, _ = listener
+
+    status, headers, text = _page_request(handle, f"/?token={handle.token}")
+
+    assert status == 200
+    policy = headers["Content-Security-Policy"]
+    assert policy.startswith("default-src 'none'")
+    for directive in (
+        "script-src 'unsafe-inline'",
+        "style-src 'unsafe-inline'",
+        "img-src data:",
+        "connect-src 'self'",
+        "frame-ancestors 'none'",
+    ):
+        assert directive in policy, f"{directive} missing from {policy}"
+    # The policy is only honest if the page really is inline-only.
+    assert "<script src=" not in text
+    assert 'rel="stylesheet"' not in text
+
+
+def test_a_json_answer_does_not_carry_the_page_policy(listener) -> None:
+    """A policy on a JSON body is noise; it belongs to the document."""
+    handle, _ = listener
+
+    connection = http.client.HTTPConnection("127.0.0.1", handle.port, timeout=5)
+    try:
+        connection.request(
+            "POST", "/api", body=json.dumps({"method": "list_vms", "arguments": []}),
+            headers=_token_headers(handle),
+        )
+        headers = dict(connection.getresponse().getheaders())
+    finally:
+        connection.close()
+
+    assert "Content-Security-Policy" not in headers
+

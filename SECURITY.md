@@ -100,6 +100,21 @@ bounds it:
   crosses, and an unknown one is answered instead of raising.
 - **Nothing is cached.** Every response carries `Cache-Control: no-store`, so a browser cannot
   keep a copy of the page that would later be reopened without a token.
+- **The page carries a `Content-Security-Policy`.** `default-src 'none'`, with `'unsafe-inline'`
+  for the script and style the single file already contains, `img-src data:` for the console's
+  screenshot, `connect-src 'self'` for the page's own `fetch`, and no frames, forms or base URI.
+  Everything the page needs is inline, so the policy costs nothing and refuses anything a tampered
+  page would try to load.
+
+**What the token is worth.** It is not a read-only ticket: a caller holding it speaks as the
+operator — the listener dispatches with `actor="ui"`, which is an operator actor, so the approval
+card is not raised for it. The policy, the allowlist, the level per VM, the `confirm_*` fields and
+the audit trail still apply, and every call is recorded; what does not happen is somebody being
+asked to click. So the token is exactly as sensitive as the window's own session, and it travels in
+a URL: it lands in the browser's history and in whatever the shell keeps. `Referrer-Policy:
+no-referrer` stops the page from sending it onward in a `Referer` header — it does not remove it
+from history. Closing the tab does not revoke it either; the token dies with the process that
+printed it, which is why `--serve` prints a fresh one every run.
 
 What it is not: authentication. Anyone who can read the token from the operator's terminal or
 browser history can use the listener, exactly as they could use the window. It is a local
@@ -217,6 +232,21 @@ A crash reading is a copy of guest memory. The dump a `bugcheck` cycle collects,
 that were loaded; they are evidence for the operator, not something to publish. `lab-cycle.json`
 carries hashes and outcomes, never a secret: the manifest hash and the evidence hash are the
 package's, not a credential's.
+
+## Log redaction is a backstop, not the boundary
+
+The unified log stream (`logs_subscribe`, the window's dock, the daily JSONL under
+`HYPERV_MCP_LOG_ROOT`) masks secret-shaped text before a line is stored: `password=…`,
+`token: …`, `senha: …`, `api_key: …`, and base64 blobs that are not hex digests. That masking is a
+**second line of defence**. It matches shapes, so a secret that arrives without one — a bare token in
+a sentence, a credential object rendered by `ToString()`, a command's raw output — passes through it
+untouched, and `tests/test_logs.py` asserts that limitation on purpose.
+
+The boundary is upstream: the stream is fed with operation names, lifecycle phases, error **codes**,
+byte counts and digests. A failing operation publishes `error_code` plus a fixed sentence, never the
+exception's message; `guest_exec` never carries the command or its output; a credential is never
+concatenated into a message. So the secret does not reach the stream in the first place, and the
+regex only has to catch what somebody writes by hand.
 
 ## Reporting a vulnerability
 
