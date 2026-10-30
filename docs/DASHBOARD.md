@@ -19,6 +19,12 @@ python -I scripts\run_dashboard.py
 
 `--vm <name>` picks the VM up front. Without it the window opens the fleet, and nothing in this program names a VM of its own. When `HYPERV_MCP_ALLOWED_VMS` is set it narrows what is listed, so an allowlist of one still opens without a prompt. After installation, `hyperv-dashboard` is equivalent, and so is `hyperv-console-mcp` with no arguments — the same command a client's config names, which opens the window when a person runs it and serves stdio when a client does. Use the same protected environment as the MCP host; a `.env` file is not loaded automatically.
 
+## The notification-area icon
+
+`hyperv-tray` (from `pip install hyperv-console-mcp[tray]`) is the same window one click away: **Open** starts it as a separate process, **Status** shows the host line, **Quit** closes the icon. The tooltip is the live answer — the number of VMs, how many are running, the profile, and `Hyper-V is off` or why the service is not answering — refreshed every twenty seconds and never naming a VM, because a tooltip sits on whatever desktop the tray is on. A host whose service will not start still gets an icon that says so: the icon is how an operator notices.
+
+It decides nothing. It opens the launcher's own command, reads `host_status` and `list_vms` — the calls the window makes on open — and holds no state beyond the window it started, so a second click does not leave two windows behind. It is optional: without `pystray` the command says what to install and exits.
+
 ## The window
 
 The **fleet** is the home page: every VM Hyper-V reported, its state, the level this host allows it, CPU and memory, and the power actions that level permits. Opening a VM creates a **workspace tab**; several may be open at once and only one is active. A workspace is the full set of per-VM pages:

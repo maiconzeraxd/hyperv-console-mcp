@@ -1782,7 +1782,41 @@ rendered from a live VM — the capture path needs an elevated session.
   frozen half of the guess (a windowed build with no stdin) is a claim until the PyInstaller bundle
   exists.
 - Still to come in this wave: the tray icon, the PyInstaller build and release CI, the beginner
-  README.
+  README. The tray icon is wave 4, below.
+
+### 2026-10-29 — v0.3 install wave 4: the icon in the notification area
+
+- **The tray is a client, not a second program.** `tray.py` opens the window with
+  `window_command()` — the launcher's own `--ui` — and reads `host_status` and `list_vms`, the two
+  calls the window makes on open. No rule of its own, and no state beyond the process it started.
+- **A host that will not answer still gets an icon.** When `tray_service()` refuses, the icon is
+  created anyway with a line that says why. The tray is how an operator notices that state; the
+  alternative was an exit code nobody sees.
+- **The tooltip names no VM.** `status_text` counts and names the profile — `3 VMs · 2 running · lab
+  profile` — and adds `Hyper-V is off` when the host says so. A tooltip sits on whatever desktop the
+  tray is on, so the line is fleet-shaped; a test asserts a VM name cannot appear in it.
+- **One click, one window.** `open_window` keeps the process it started and does nothing while it is
+  alive, so a second click does not leave two windows behind; a window opened from the Start Menu is
+  not counted, because that is not this tray's business. The child is detached, so closing the tray
+  does not close the window.
+- **Optional, and it says how not to be.** `pystray` is an extra (`hyperv-console-mcp[tray]`),
+  imported inside `main()`; without it the command names the extra and exits 2. Pillow, which
+  pystray needs for the image, was already a dependency, and the glyph is drawn rather than shipped,
+  so no package data was added.
+- Tests: `tests/test_tray.py` (15) — the line for three VMs, for one, with Hyper-V off, and with no
+  VM name in it; the two calls it reads and a service that refuses; the command and its frozen form;
+  the double click and the freed click once the window closes; the drawn image; the missing extra;
+  and the three items doing what they are named, with the private service closed on exit and an
+  icon that survives a host which will not answer. `pystray` is faked through `sys.modules`, so none
+  of it needs the package, a desktop or Hyper-V.
+- Gate: 1012 passed / 1 skipped, ruff clean, smoke 29 / 43 / 65 unchanged, 14 PowerShell files
+  parse, 0 analyzer findings on `scripts`.
+- Not validated live: `pystray` is not installed on this host, so the real icon, its menu and its
+  notifications have not been seen. What is proved is the wiring against the documented API —
+  `Icon(name, icon, title, menu=…)`, actions called with `(icon, item)`, `notify(message, title)`,
+  `update_menu()`, `stop()`, `run()` — and a fake would pass just as happily if that API were
+  different. The first run of `hyperv-tray` with the extra installed is the test that closes it.
+- Still to come in this wave: the PyInstaller build and release CI, the beginner README.
 
 ## Phase 4 report
 

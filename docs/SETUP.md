@@ -93,6 +93,8 @@ After an editable/package installation, `hyperv-console-mcp` can be the command 
 
 `hyperv-install --client claude` (also `codex` and `cursor`) writes that entry for you: it merges one `mcpServers.hyperv` entry into the client's own file, copies the file first, refuses one it cannot parse instead of rewriting it, and appends a single `[mcp_servers.hyperv]` section to Codex's TOML. `--uvx` writes `uvx hyperv-console-mcp` instead of the installing interpreter, `--profile lab` sets `HYPERV_MCP_PROFILE`, and `--shortcut` adds a **Hyper-V Console** Start Menu entry that opens the window. The command is not an MCP tool; nothing the AI can call reaches it.
 
+The notification-area icon is a separate optional extra — `pip install "hyperv-console-mcp[tray]"`, then `hyperv-tray` — and the routine does not start it. See [the dashboard guide](DASHBOARD.md#the-notification-area-icon).
+
 The process must have Hyper-V management permission. Run the MCP host elevated or grant the intended account Hyper-V Administrators access through your normal administrative process. The server never changes host group membership or UAC settings.
 
 ## Confined host paths

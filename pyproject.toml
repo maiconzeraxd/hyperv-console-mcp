@@ -29,11 +29,15 @@ ssh = ["paramiko>=3.4,<4"]
 # Optional WebView2 window. Imported lazily too: without it `hyperv-dashboard`
 # opens the tkinter window, which needs nothing extra.
 ui = ["pywebview>=5.4,<7"]
+# Optional notification-area icon. pystray draws it with the Pillow this package
+# already requires; without it `hyperv-tray` says so and exits.
+tray = ["pystray>=0.19,<1"]
 
 [project.scripts]
 hyperv-console-mcp = "hyperv_console_mcp.cli:main"
 hyperv-lab = "hyperv_console_mcp.lab.cli:main"
 hyperv-dashboard = "hyperv_console_mcp.dashboard:main"
+hyperv-tray = "hyperv_console_mcp.tray:main"
 hyperv-access = "hyperv_console_mcp.access_cli:main"
 hyperv-install = "hyperv_console_mcp.install:main"
 hyperv-setup = "hyperv_console_mcp.setup:main"
