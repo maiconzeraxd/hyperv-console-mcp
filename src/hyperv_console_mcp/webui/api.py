@@ -12,6 +12,12 @@ the operator's access file (the same file ``hyperv-access`` writes, which no MCP
 tool can reach), and answering approval requests, which arrive from the broker
 on its own thread and are answered by a click here.
 
+The first-run wizard is neither a new door nor a rule of its own: it reads the
+VM list through the service and the credential sources through the vault, and
+writes only the level (the access file above) and the password (the service's
+``guest_credential_set``). What it asks, and whether it should open at all, is
+decided in :mod:`hyperv_console_mcp.webui.wizard`, in Python, where it is tested.
+
 Nothing in this module knows about ``webview``: the bridge is testable without a
 window, and the window module imports it, not the other way round.
 """
@@ -20,17 +26,24 @@ from __future__ import annotations
 
 import queue
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 
+from .. import credentials
 from ..access import CAPABILITIES, LEVELS, AccessStore, access_file
 from ..elevation import is_elevated
-from ..errors import ValidationError
+from ..errors import HyperVError, ValidationError
 from ..service.remote import dispatch
+from . import wizard as wizard_rules
 
 # How long a tool waits for the operator before the request is denied. The
 # dashboard uses the same window; a card that outlives it is dropped.
 APPROVAL_TIMEOUT_SECONDS = 180.0
+
+def _wizard_failure(step: str, message: str, code: str) -> dict[str, Any]:
+    """A refusal in the envelope the page already knows, plus the step it belongs to."""
+    return {"error": {"code": code, "message": message, "step": step}}
 
 
 class Api:
@@ -134,7 +147,9 @@ class Api:
             raise ValidationError("Choose a VM before setting a level.")
         store = self._store()
         store.set(self.vm_name, level)
-        return {"level": store.levels().get(self.vm_name.casefold()), "policy": self.service.reload_policy()}
+        policy = self.service.reload_policy()
+        self._reread()
+        return {"level": store.levels().get(self.vm_name.casefold()), "policy": policy}
 
     def remove_level(self) -> dict[str, Any]:
         """Take this VM out of the file, which makes it unreachable again."""
@@ -142,7 +157,9 @@ class Api:
             raise ValidationError("Choose a VM before removing a level.")
         store = self._store()
         store.remove(self.vm_name)
-        return {"level": None, "policy": self.service.reload_policy()}
+        policy = self.service.reload_policy()
+        self._reread()
+        return {"level": None, "policy": policy}
 
     def set_baseline(self, checkpoint: str) -> dict[str, Any]:
         """Name the checkpoint this VM must not lose, in the operator's file.
@@ -155,13 +172,94 @@ class Api:
             raise ValidationError("Choose a VM before naming a baseline checkpoint.")
         store = self._store()
         store.set_baseline(self.vm_name, checkpoint)
+        policy = self.service.reload_policy()
+        self._reread()
         return {
             "baseline": store.baselines().get(self.vm_name.casefold()),
-            "policy": self.service.reload_policy(),
+            "policy": policy,
         }
 
     def _store(self) -> AccessStore:
         return AccessStore(self.settings.access_path or access_file(self.environ))
+
+    def _reread(self) -> None:
+        """Take the operator's file as it is now, so this window is not stale.
+
+        The service replaces its own ``Settings`` when it reloads, but the bridge
+        holds the instance it was built with: a level written here would keep
+        reading as "no level" — in this window, and in the first-run wizard that
+        asks the same question — until it was reopened. Only the two things the
+        file holds are replaced; the environment the window started with stays.
+        """
+        store = self._store()
+        self.settings = replace(
+            self.settings, levels=store.levels(), baselines=store.baselines()
+        )
+
+    # -- the first run -----------------------------------------------------
+
+    def wizard(self) -> dict[str, Any]:
+        """The first-run questions, answered from what the host already knows.
+
+        The VM list is the service's; the levels are the operator's file; the
+        credential sources are the vault's. The page decides nothing: it draws
+        what comes back, including whether it should open at all.
+        """
+        response = self.call("list_vms")
+        if "error" in response:
+            return response
+        vms = (response.get("ok") or {}).get("vms") or []
+        sources: dict[str, str] = {}
+        for vm in vms:
+            name = str(vm.get("name") or "").strip()
+            if name:
+                sources[name.casefold()] = credentials.source(self.settings, name)
+        return {"ok": wizard_rules.status(
+            vms=vms,
+            levels=self.settings.levels,
+            credentials=sources,
+            username=self.settings.guest_username or "",
+        )}
+
+    def wizard_finish(
+        self, vm_name: str = "", level: str = "", username: str = "", password: str = ""
+    ) -> dict[str, Any]:
+        """Write the three answers in the order that leaves a usable window.
+
+        The level goes into the operator's own file first: a VM with no level is
+        unreachable, so a stored password would be a secret with nothing to open.
+        The password is then handed to the service, which puts it in the
+        Credential Manager — it is never returned, echoed or kept here.
+
+        A failure names the step that failed, so the page can point at the field
+        instead of showing a traceback to somebody on their first run.
+        """
+        name = str(vm_name or "").strip()
+        if not name:
+            return _wizard_failure("vm", "Choose a virtual machine first.", "invalid_argument")
+        previous = self.vm_name
+        self.vm_name = name
+        try:
+            written = self.set_level(level)
+        except HyperVError as error:
+            self.vm_name = previous
+            return _wizard_failure("level", str(error), error.code)
+        stored = ""
+        if password:
+            account = str(username or "").strip() or (self.settings.guest_username or "")
+            response = self.call(
+                "guest_credential_set",
+                {"vm_name": name, "username": account, "password": password},
+            )
+            if "error" in response:
+                return {"error": {**response["error"], "step": "credential"}}
+            stored = str((response.get("ok") or {}).get("username") or account)
+        return {"ok": {
+            "vm": name,
+            "level": written.get("level"),
+            "username": stored or None,
+            "credential": "stored" if stored else "skipped",
+        }}
 
     # -- approvals ---------------------------------------------------------
 

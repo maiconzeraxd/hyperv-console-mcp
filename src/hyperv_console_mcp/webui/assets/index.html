@@ -235,6 +235,28 @@
   #chooser .card { width: min(560px, 100%); }
   #chooser ul { list-style: none; margin: 0 0 12px; padding: 0; max-height: 320px; overflow-y: auto; }
   #chooser li button { width: 100%; text-align: left; }
+  /* ---------- first run ---------- */
+  /* The wizard is a first-run greeting, not a dialog to be dismissed by habit:
+     it opens by itself only while no VM is reachable, and every step is a
+     question with an answer the operator can see taken. */
+  #wizard { position: fixed; inset: 0; background: rgba(4, 8, 16, .88); display: none; align-items: center; justify-content: center; padding: 24px; }
+  #wizard.open { display: flex; }
+  #wizard .card { width: min(640px, 100%); max-height: calc(100vh - 48px); overflow-y: auto; }
+  #wizard ol { list-style: none; margin: 0 0 14px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  #wizard ol li { display: flex; gap: 10px; align-items: baseline; font-size: .84rem; color: var(--muted); }
+  #wizard ol li .n { flex: 0 0 22px; height: 22px; border-radius: 50%; border: 1px solid var(--border); display: grid; place-items: center; font-size: .74rem; }
+  #wizard ol li.done { color: var(--text); }
+  #wizard ol li.done .n { background: #175c4b; border-color: #2f6b57; color: #d9fff1; }
+  #wizard ol li.current { color: var(--text); }
+  #wizard ol li.current .n { border-color: var(--accent); color: var(--accent); }
+  #wizard ol li .hint { display: block; color: var(--muted); font-size: .78rem; }
+  #wizard .choices { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+  #wizard .choices button { width: 100%; text-align: left; padding: 10px 12px; }
+  #wizard .choices button .sub { display: block; color: var(--muted); font-size: .78rem; font-weight: 400; }
+  #wizard .choices button.picked { outline: 2px solid var(--accent); }
+  #wizard .step-note { margin: 0 0 12px; font-size: .82rem; color: var(--warning); }
+  #wizard .step-note.ok { color: var(--accent); }
+  #wizard .step-note.bad { color: var(--error); }
   .banner { background: #3a2a10; border: 1px solid #6b4b12; color: #ffe6b0; border-radius: 8px; padding: 10px 12px; font-size: .84rem; margin-bottom: 14px; }
   /* ---------- narrow window ---------- */
   @media (max-width: 1100px) {
@@ -291,6 +313,16 @@
       <input id="chooser-typed" placeholder="Or type a VM name">
       <button class="act primary" id="chooser-open">Open</button>
     </div>
+  </div>
+</div>
+
+<div id="wizard">
+  <div class="card">
+    <h2>Set up this window</h2>
+    <p class="hint" id="wizard-lead"></p>
+    <ol id="wizard-steps"></ol>
+    <div id="wizard-body"></div>
+    <div class="row" id="wizard-foot" style="margin:12px 0 0"></div>
   </div>
 </div>
 
@@ -472,6 +504,7 @@ const builders = {
         ]),
         el("div", { class: "row", style: "margin:12px 0 0" },
           action("Refresh", "list_vms", () => ({}), null, render),
+          el("button", { class: "act", onclick: () => openWizard() }, "Set up another VM"),
           el("button", { class: "act", onclick: openChooser }, "Type a VM name"))));
   },
 
@@ -2135,6 +2168,210 @@ async function pick(name) {
   await openVm(chosen);
 }
 
+/* ---------- first run ---------- */
+// Three answers stand between a fresh install and a usable window: which VM,
+// what the AI may do with it, and the guest password once. This file draws the
+// form and nothing else — what counts as answered, and whether the wizard
+// should open at all, is decided in Python (webui/wizard.py) from the
+// operator's own files, so the page cannot disagree with the service.
+const wizardState = { plan: null, step: 0, vm: "", level: "", username: "", note: "", tone: "", finished: null };
+
+async function openWizard() {
+  const response = await api().wizard();
+  if (!response || response.error) {
+    show("wizard", response || { error: { message: "the service did not answer" } });
+    return;
+  }
+  showWizard(response.ok);
+}
+
+// The window opens on the wizard only while nothing is configured, which the
+// service answers from the operator's file — not from a flag this page would
+// have to remember, and not from "the window has never been open before".
+async function openWizardIfNeeded() {
+  const response = await api().wizard();
+  if (response && response.ok && response.ok.needed) showWizard(response.ok);
+}
+
+function showWizard(plan) {
+  const known = (plan.choices || []).find((choice) => choice.name === wizardState.vm);
+  wizardState.plan = plan;
+  wizardState.vm = known ? known.name : "";
+  wizardState.level = known && known.level ? known.level : "";
+  wizardState.username = wizardState.username || plan.username || "";
+  wizardState.note = plan.blocked || "";
+  wizardState.tone = plan.blocked ? "bad" : "";
+  wizardState.finished = null;
+  // Open on the first question that is still unanswered, not always on the
+  // first one: a re-run to add another VM starts where the work is.
+  wizardState.step = (plan.steps || []).findIndex((step) => !step.done);
+  if (wizardState.step < 0) wizardState.step = 0;
+  // "A VM has a level" is a fact about the host, not about this run: on a
+  // first run the choice has still not been made, so the list comes first.
+  if (!wizardState.vm && (plan.choices || []).length) wizardState.step = 0;
+  document.getElementById("wizard").classList.add("open");
+  drawWizard();
+}
+
+function closeWizard() {
+  document.getElementById("wizard").classList.remove("open");
+  wizardState.plan = null;
+  wizardState.step = 0;
+  wizardState.note = "";
+  wizardState.tone = "";
+  wizardState.finished = null;
+}
+
+function wizardPick(vmName) {
+  const choice = (wizardState.plan.choices || []).find((item) => item.name === vmName) || {};
+  wizardState.vm = vmName;
+  wizardState.level = choice.level || "";
+  wizardState.note = "";
+  wizardState.tone = "";
+  wizardState.step = 1;
+  drawWizard();
+}
+
+function wizardLevel(level) {
+  wizardState.level = level;
+  wizardState.note = "";
+  wizardState.tone = "";
+  drawWizard();
+}
+
+function wizardNote(text, tone) {
+  wizardState.note = text || "";
+  wizardState.tone = tone || "";
+  drawWizard();
+}
+
+function drawWizard() {
+  const plan = wizardState.plan || { steps: [], choices: [], levels: [] };
+  document.getElementById("wizard-lead").textContent = plan.message || "";
+  document.getElementById("wizard-steps").replaceChildren(...(plan.steps || []).map((step, index) => {
+    const classes = [];
+    if (step.done || wizardState.finished) classes.push("done");
+    if (index === wizardState.step && !wizardState.finished) classes.push("current");
+    return el("li", { class: classes.join(" ") },
+      el("span", { class: "n" }, step.done || wizardState.finished ? "✓" : String(index + 1)),
+      el("span", {}, step.title, el("span", { class: "hint" }, step.hint)));
+  }));
+
+  const body = document.getElementById("wizard-body");
+  const foot = document.getElementById("wizard-foot");
+  const note = wizardState.note ? el("p", { class: "step-note " + (wizardState.tone || "") }, wizardState.note) : null;
+
+  if (wizardState.finished) {
+    body.replaceChildren(...[
+      el("p", { class: "step-note ok" }, "Ready: " + wizardState.finished.vm + " is " + wizardState.finished.level + "."),
+      wizardState.note ? el("p", { class: "step-note " + (wizardState.tone || "") }, wizardState.note) : null,
+    ].filter(Boolean));
+    foot.replaceChildren(
+      el("button", { class: "act primary", onclick: closeWizard }, "Done"));
+    return;
+  }
+
+  if (wizardState.step === 0) {
+    const list = el("ul", { class: "choices" }, ...(plan.choices || []).map((choice) =>
+      el("li", {}, el("button", {
+        class: "act" + (choice.name === wizardState.vm ? " picked" : ""),
+        onclick: () => wizardPick(choice.name),
+      }, choice.name,
+        el("span", { class: "sub" },
+          (choice.state || "state unknown") + " · " +
+          (choice.level ? "level " + choice.level : "no level yet") + " · " +
+          (choice.credential === "missing" ? "no guest password stored" : "password from " + choice.credential))))));
+    body.replaceChildren(...[
+      note,
+      (plan.choices || []).length ? el("p", { class: "hint" }, "Hyper-V reported these. Pick the one to set up.") : null,
+      list,
+    ].filter(Boolean));
+    foot.replaceChildren(el("button", { class: "act", onclick: closeWizard }, "Later"));
+    return;
+  }
+
+  if (wizardState.step === 1) {
+    const list = el("ul", { class: "choices" }, ...(plan.levels || []).map((level) =>
+      el("li", {}, el("button", {
+        class: "act" + (level.name === wizardState.level ? " picked" : ""),
+        onclick: () => wizardLevel(level.name),
+      }, level.name, el("span", { class: "sub" }, level.meaning)))));
+    body.replaceChildren(...[
+      note,
+      el("p", { class: "hint" }, "The level is " + (wizardState.vm || "this VM") + "'s, and it is written to the operator's file. No tool can raise it."),
+      list,
+    ].filter(Boolean));
+    foot.replaceChildren(
+      el("button", { class: "act", onclick: () => { wizardState.step = 0; wizardState.note = ""; drawWizard(); } }, "Back"),
+      el("button", { class: "act", onclick: closeWizard }, "Later"),
+      el("button", {
+        class: "act primary",
+        onclick: () => {
+          if (!wizardState.level) { wizardNote("Pick a level: a VM with no level cannot be reached by anything.", "bad"); return; }
+          wizardState.step = 2;
+          wizardState.note = "";
+          drawWizard();
+        },
+      }, "Next"));
+    return;
+  }
+
+  body.replaceChildren(...[
+    note,
+    el("div", { class: "row" },
+      field("Guest user name", input_("wizard-user", wizardState.username)),
+      field("Guest password", el("input", { id: "wizard-password", type: "password", autocomplete: "new-password" }))),
+    el("p", { class: "hint", style: "margin:0" },
+      "Stored in the Windows Credential Manager under HyperVConsoleMCP/" + (wizardState.vm || "…") +
+      ". It is not written to a file, not shown on this page again, and not in the audit trail."),
+  ].filter(Boolean));
+  foot.replaceChildren(
+    el("button", { class: "act", onclick: () => { wizardState.step = 1; wizardState.note = ""; drawWizard(); } }, "Back"),
+    el("button", { class: "act", onclick: () => finishWizard(false) }, "Skip for now"),
+    el("button", { class: "act primary", onclick: () => finishWizard(true) }, "Store and test"));
+}
+
+async function finishWizard(withPassword) {
+  if (!wizardState.vm) { wizardState.step = 0; wizardNote("Choose a virtual machine first.", "bad"); return; }
+  if (!wizardState.level) { wizardState.step = 1; wizardNote("Pick a level for " + wizardState.vm + ".", "bad"); return; }
+  const password = withPassword ? fieldValue("wizard-password") : "";
+  const username = withPassword ? fieldValue("wizard-user") : "";
+  // The user name is kept across a redraw; the password deliberately is not,
+  // so a message about a failed attempt does not leave the secret on screen.
+  if (withPassword) wizardState.username = username;
+  if (withPassword && !password) { wizardNote("Type the password, or skip this step and add it later from Guest.", "bad"); return; }
+
+  const response = await api().wizard_finish(wizardState.vm, wizardState.level, username, password);
+  if (!response || response.error) {
+    const failure = (response && response.error) || { message: "the service did not answer" };
+    // Point at the field that failed rather than at a message with no home.
+    wizardState.step = failure.step === "vm" ? 0 : failure.step === "level" ? 1 : 2;
+    wizardNote(failure.message || "That did not work.", "bad");
+    return;
+  }
+
+  const done = response.ok;
+  wizardState.finished = done;
+  // The bridge already points at the VM it configured; the page follows before
+  // the wizard closes, so the two cannot disagree while it is still on screen.
+  await openVm(done.vm);
+  if (done.credential !== "stored") {
+    wizardNote("No password stored. Commands inside the guest will fail until one is: add it from Guest.", "");
+    return;
+  }
+  // Storing the password and proving it works are two different answers, and
+  // the second one is the one a first-time operator actually wants.
+  wizardNote("Saved. Testing PowerShell Direct…", "");
+  const status = await api().call("guest_credential_status", { vm_name: done.vm });
+  const psdirect = (status && status.ok && status.ok.psdirect) || null;
+  wizardState.note = psdirect && psdirect.ok
+    ? "The guest accepted the password over PowerShell Direct."
+    : "Stored, but the guest did not answer: " +
+      ((psdirect && psdirect.error) || (status && status.error && status.error.message) || "no answer");
+  wizardState.tone = psdirect && psdirect.ok ? "ok" : "bad";
+  drawWizard();
+}
+
 /* ---------- boot ---------- */
 async function boot() {
   document.getElementById("chooser-open").addEventListener("click", () => pick(fieldValue("chooser-typed")));
@@ -2147,6 +2384,7 @@ async function boot() {
   await render();
   pollApprovals();
   watchEvents();
+  await openWizardIfNeeded();
 }
 
 window.addEventListener("pywebviewready", boot);

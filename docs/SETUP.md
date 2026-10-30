@@ -15,6 +15,8 @@ The client config is written into each client that is present — Claude Desktop
 
 The install is idempotent: a second run reports `unchanged` for every file it already wrote, and repairs a partial install rather than repeating it. The last step asks the service and Hyper-V whether they answer, and names the failing step when they do not.
 
+What the install deliberately leaves to the window is the part that needs a human decision: which VM, what the AI may do with it, and the guest password. A host where no VM has a level opens the dashboard on a three-question wizard for exactly that, and stops offering it once one VM has a level. It writes the same `access.json` `hyperv-access` writes and stores the password through the service's `guest_credential_set`, so nothing about the policy changes — see [DASHBOARD.md](DASHBOARD.md#the-first-run).
+
 `scripts/install.ps1` is the same routine with the pre-check in front of it, for a host where the package is installed but nothing has been configured:
 
 ```powershell

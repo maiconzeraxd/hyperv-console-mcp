@@ -1697,7 +1697,7 @@ rendered from a live VM — the capture path needs an elevated session.
 - Validated live: `hyperv-setup --check` on this host answered `Windows 10 Pro has Hyper-V ready`,
   `action: proceed`, exit 0, reading the registry and `Win32_OptionalFeature` unelevated.
 - Not built yet, and not claimed: the signed `.msi`/`.exe`, the `winget` manifest, the PyInstaller
-  bundle, the first-run wizard and the beginner README. The Windows service under a dedicated
+  bundle and the beginner README. The first-run wizard is wave 2, below. The Windows service under a dedicated
   account is the largest of them and is not a one-line change: the pipe's DACL grants only the
   current user, `_verify_server_process` requires the server to be that user's interpreter,
   `Settings.from_env()` has no environment to read inside a service, and SCM needs a dispatcher this
@@ -1705,6 +1705,47 @@ rendered from a live VM — the capture path needs an elevated session.
   and verified as a peer, which is the safer default until that design is settled.
 - Not validated: the routine has not run on a clean Windows machine, so "installs on a fresh host"
   is still a claim about code, not about a machine.
+
+### 2026-10-29 — v0.3 install wave 2: the first run, in three questions
+
+- **The wizard closes the gap the install leaves open.** A configured install still leaves a window
+  that can list every VM and use none of them, because a VM is reachable only once it has a level.
+  The three questions are the VM, the level and the guest password once — `webui/wizard.py` decides
+  them, `Api.wizard`/`Api.wizard_finish` are the two calls the page makes, and the page draws the
+  form. No rule in JavaScript: the contract test still holds every name the page uses to a real
+  method.
+- **"Done" is derived, not recorded.** `status()` answers `needed` from the operator's access file —
+  whether any VM has a level — rather than from a flag the wizard would write when it finishes. A
+  flag keeps saying "done" on a machine where the level was later removed; the derived answer brings
+  the wizard back, which is the behaviour a first run needs and a stale file cannot give.
+- **No VM is not a first run.** With Hyper-V reporting nothing there is nothing to ask about, so the
+  wizard does not open; it says why in `blocked` and the fleet already explains where VMs come from.
+- **The password is one step, and skippable.** A VM can be driven from the host with nothing running
+  inside it, so a first run that stopped on a password the operator does not have would be a first
+  run that failed. Skipping says so, Guest adds it later, and **Store and test** finishes with
+  `guest_credential_status` — the same call the Guest page makes, so the wizard adds no backend.
+- **The stale-window bug this exposed, and fixed.** The service replaces its own `Settings` on
+  `reload_policy`, but the bridge held the instance it was built with: a level written from the
+  window kept reading as "no level" in that window until it was reopened, and the wizard — which asks
+  the same question — would have opened again on the next launch. `Api._reread()` takes the level and
+  baseline maps from the operator's file after each write, and only those two: the environment the
+  window was started with is not re-read.
+- Tests: `tests/test_webui_wizard.py` (18) — the three questions and their order, a level matching a
+  VM whatever the case, the no-VM case that must not open, the level list with a sentence each, the
+  service refusing the VM list, the level and password written where they belong, the finish without
+  a password, a bad level stopping at its own step, a refused credential naming its step, the wizard
+  not coming back once a level exists and coming back when it is removed, and the password never
+  appearing in an answer. Plus `test_a_level_written_here_shows_up_in_this_window` in
+  `tests/test_webui.py` for the staleness fix. All of it runs without a window or a service.
+- Gate: 973 passed / 1 skipped, ruff clean, the page's script parses under `node --check`, contract
+  test green (every `call("…")` a `HyperVService` method, every `api().…` an `Api` method), all 14
+  PowerShell files under `src`, `tests` and `scripts` parse and the analyzer finds nothing in
+  `scripts`, smoke unchanged — the wizard adds no MCP tool, because a tool that could configure
+  access would be the AI writing its own policy.
+- Not validated live: the wizard has not been walked through on a real host with a real guest, and
+  the "Store and test" answer against a live PowerShell Direct session is still a claim about code.
+  Still to come in this wave: the bare-command and tray launcher, the PyInstaller build and release
+  CI, the beginner README.
 
 ## Phase 4 report
 

@@ -136,6 +136,22 @@ def test_setting_a_level_writes_the_operator_s_file_and_reloads(tmp_path: Path) 
     assert json.loads((tmp_path / "access.json").read_text(encoding="utf-8"))["vms"] == {}
 
 
+def test_a_level_written_here_shows_up_in_this_window(tmp_path: Path) -> None:
+    """The service reloads its own settings; the bridge must not keep the old ones.
+
+    Without this the operator set a level and the window went on saying the VM
+    had none — and the first-run wizard, which asks the same question, would
+    have opened again on the next launch.
+    """
+    api = _api(tmp_path, level=None)
+    assert api.hello()["level"] is None
+
+    api.set_level("control")
+
+    assert api.hello()["level"] == "control"
+    assert api.hello()["levels_by_vm"] == {"lab-vm": "control"}
+    assert api.hello()["capabilities"]["power"] is True
+
 def test_a_level_the_file_does_not_know_is_refused(tmp_path: Path) -> None:
     api = _api(tmp_path)
     with pytest.raises(Exception):

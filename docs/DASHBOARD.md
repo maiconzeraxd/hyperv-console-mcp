@@ -36,11 +36,22 @@ The **fleet** is the home page: every VM Hyper-V reported, its state, the level 
 
 Closing the window does not stop a VM or guarantee that an already-running guest command was cancelled, and changing pages does not cancel a background operation.
 
+## The first run
+
+A window on a host where nothing has been configured can list every VM and use none of them, because a VM becomes reachable only when it has a level. The wizard closes that gap in three questions: pick the VM, pick the level, type the guest password once. It opens by itself while no VM is reachable, and never again once one is — unless the operator asks for it from the fleet (**Set up another VM**), which is how a second VM is added.
+
+It is not a fourth way into the policy. The level is written to the same access file the Overview page and `hyperv-access` write; the password goes to the service's `guest_credential_set`, which stores it in the Windows Credential Manager; the VM list comes from `list_vms`; **Store and test** finishes with `guest_credential_status`, the same call the Guest page makes. What the wizard asks, and whether it should open at all, is decided in `webui/wizard.py` — in Python, against the service, and tested without a window.
+
+Two decisions are worth naming:
+
+- **"Done" is derived, not recorded.** The wizard writes no flag saying it has run. It asks whether any VM has a level, which is a fact about the operator's file; a flag would go on saying "done" after the level was removed, and the wizard would never come back for the VM that still has none.
+- **The password step can be skipped.** A VM can be driven from the host — power, console, checkpoints — with nothing running inside it, so a first run that stops at a password the operator does not have would be a first run that failed. Skipping says so, and Guest can add it later.
+
 ## What the operator can do that the AI cannot
 
 The human is a trusted actor, and three things are only theirs:
 
-- **Set or remove a VM's level.** `hyperv-access set "<vm>" read-only|control|lab` and the Overview page write the same file; no MCP tool reaches it. The level is the operator's decision about what the AI may do.
+- **Set or remove a VM's level.** `hyperv-access set "<vm>" read-only|control|lab` and the Overview page write the same file; no MCP tool reaches it. The level is the operator's decision about what the AI may do. The first-run wizard writes it through the same call.
 - **Name the baseline checkpoint.** The protected checkpoint is recorded in the same access file. `delete_checkpoint` refuses it for every actor and `create_checkpoint` refuses to reuse its name, so the window and the AI are held to the same rule.
 - **Answer an approval.** See below.
 
