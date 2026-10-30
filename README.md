@@ -81,6 +81,27 @@ It merges one `mcpServers.hyperv` entry and leaves every other server and settin
 
 `HYPERV_MCP_PROFILE` picks the default toolset list (`safe` or `lab`); `HYPERV_MCP_TOOLSETS` overrides it with a comma-separated list such as `core,console,guest` or `all`. An unknown name is refused at startup rather than silently ignored.
 
+## Zero configuration
+
+Nothing about a particular VM is built into the program, and the environment above is the
+narrowing, not the setup:
+
+- **The VMs come from Hyper-V.** `vm_list` reads them; a running VM also reports its guest's
+  computer name and OS from the key-value pair exchange, so it can be identified before any guest
+  credential exists. The window opens the only VM Hyper-V reports and asks from a list when there
+  are more than one — no name is compiled in.
+- **Host capabilities are detected, not configured.** `host_status` reports whether the
+  hypervisor is present and whether `vmms`/`vmcompute` are running; `debug_status` says whether
+  `kd.exe` was found and where; the window falls back to tkinter when the WebView2 runtime is
+  absent, instead of refusing to open.
+- **The directories create themselves** under `%LOCALAPPDATA%\HyperVConsoleMCP\` — events,
+  transfers, ssh, kd, lab packages and evidence — the first time something needs them.
+- **One level per VM replaces the flags.** `hyperv-access set <vm> lab` is the whole
+  configuration for a VM, and it is re-read when it changes rather than frozen at startup.
+
+A missing capability comes back as a refusal that carries the call which would fix it, so a
+client can either ask you or, in the lab profile, do it.
+
 ## Tool groups
 
 Every tool belongs to one toolset. A profile decides which toolsets are registered, and a
