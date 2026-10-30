@@ -44,6 +44,31 @@ MAX_COMMAND_CHARS = 4_096
 _BUFFER_CHARS = 4 * 1024 * 1024
 _READ_CHUNK = 4_096
 _TRUNCATED_HEAD = 0.6
+# How often a tailing reader looks again while it waits for kd to write.
+_TAIL_POLL = 0.05
+
+
+def _read_from(path: Path, offset: int) -> tuple[str, int]:
+    """What the log gained since ``offset``, as text and as a new offset.
+
+    The trailing bytes of an incomplete character are held back rather than
+    replaced: a multi-byte character split across two reads would otherwise
+    arrive as a replacement mark and be lost for good.
+    """
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            if size <= offset:
+                return "", size
+            stream.seek(offset)
+            data = stream.read(size - offset)
+    except OSError:
+        return "", offset
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    text = decoder.decode(data, final=False)
+    pending, _ = decoder.getstate()
+    return text, offset + len(data) - len(pending)
 
 
 def is_go_command(command: str) -> bool:
@@ -136,6 +161,18 @@ class KdSession:
     @property
     def alive(self) -> bool:
         return self._process is not None and self._process.poll() is None
+
+    @property
+    def output_offset(self) -> int:
+        """How many bytes of this session's log exist right now.
+
+        A subscriber that starts here sees what happens next rather than the
+        whole session so far, which is what a dock opened mid-run wants.
+        """
+        try:
+            return self.log_path.stat().st_size
+        except OSError:
+            return 0
 
     def _set_state(self, state: str) -> None:
         with self._condition:
@@ -505,6 +542,29 @@ class KdSession:
             "output_chars": text_chars,
             "reader_error": self._reader_error,
             "symbol_path_set": bool(self.symbol_path),
+        }
+
+    def read_output(self, after: int = 0, timeout: float = 0.0) -> dict[str, Any]:
+        """Follow the session log from a byte offset, holding until it grows.
+
+        The log is what kd wrote, flushed as it arrived, so this follows output
+        nobody asked for — a module load, a break-in, a bugcheck — and not only
+        the text a command returned. The offset is the whole protocol: a reader
+        that keeps it gets every line once, in order, whoever typed.
+        """
+        offset = max(0, int(after))
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            text, offset = _read_from(self.log_path, offset)
+            if text or time.monotonic() >= deadline:
+                break
+            time.sleep(_TAIL_POLL)
+        return {
+            "text": text,
+            "offset": offset,
+            "state": self._state,
+            "alive": self.alive,
+            "log_path": str(self.log_path),
         }
 
     @staticmethod

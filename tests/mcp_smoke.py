@@ -35,16 +35,16 @@ CONFIGURATIONS = (
     (
         "lab profile",
         {"HYPERV_MCP_PROFILE": "lab"},
-        46,
-        {"core": 9, "guest": 7, "console": 4, "config": 3, "lab": 12, "kd": 9, "debug": 2},
+        47,
+        {"core": 9, "guest": 7, "console": 4, "config": 3, "lab": 12, "kd": 10, "debug": 2},
     ),
     (
         "all toolsets",
         {"HYPERV_MCP_TOOLSETS": "all"},
-        68,
+        69,
         {
             "core": 9, "guest": 7, "console": 4, "config": 3, "credentials": 2,
-            "media": 3, "ssh": 3, "serial": 5, "lab": 12, "kd": 9, "debug": 2,
+            "media": 3, "ssh": 3, "serial": 5, "lab": 12, "kd": 10, "debug": 2,
             "files": 9,
         },
     ),

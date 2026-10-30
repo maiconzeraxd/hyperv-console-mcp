@@ -2277,6 +2277,34 @@ correlation id.
   until the interface wave — and the stream has been exercised in-process and against fakes
   only. `kd_output_subscribe`, the roadmap's other streaming enabler, is not in this wave.
 
+### 2026-10-30 — v0.4 wave 2: the debugger's own log, followed from an offset
+
+`kd_command` answers the caller that typed. Everything else kd prints — a module load while the
+target runs, a break-in, a bugcheck — belongs to no command, and a window that polls the state
+sees that something happened without seeing what. The session already writes every byte to its log
+and flushes each chunk, so the missing piece was a reader.
+
+- `KdSession.read_output(after, timeout)` tails that log by byte offset and holds until it grows,
+  returning `text`, the new `offset`, the `state` and whether the debugger is alive. The offset is
+  the whole protocol: a reader that keeps it gets every line once, in order, whoever typed.
+- A multi-byte character split across two reads is held back rather than replaced, so a chunk
+  boundary cannot turn a symbol name into a replacement mark.
+- `output_offset` says where the log ends now, which is where a dock opened mid-session starts.
+- `kd_output_subscribe` (kd toolset, read-only) is the door: clamped to a 30 s wait, and in the
+  host's `LOCK_FREE` set because it touches no worker — a subscription must not serialize the
+  service. It is neither audited nor announced, so a poll every second cannot fill the activity
+  page with reads.
+- Tests: `tests/test_kd_session.py` twice, against the fake debugger — a module load that no
+  command returned arriving through the tail (the subscriber loops, as a dock does), and a resume
+  from an offset delivering no line twice; `tests/test_kd_service.py` three times — the offset and
+  the timeout reaching the session, the refusal without a session carrying `kd_not_connected`, and
+  the clamp.
+- Counts: kd 9→10, lab 46→47, all 68→69; `tests/test_server.py`, `tests/mcp_smoke.py` and the
+  README table moved with it.
+- Gate: 1135 passed / 1 skipped, ruff clean, smoke 31 / 47 / 69.
+- **Not validated live:** the tail has run against the fake kd process, not against a real
+  `kd.exe` session on `NORTH-Test`, and no window subscribes to it yet.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three

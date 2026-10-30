@@ -2,11 +2,11 @@
 
 A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/) server for **Hyper-V on Windows**. It combines VM management, checkpoints, PowerShell Direct diagnostics, synthetic keyboard/mouse input, console screenshots without VMConnect, installation media, serial consoles, and serial WinDbg preparation and a live kd.exe kernel-debugging session in one stdio server.
 
-**Alpha status:** 1130 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test and one assertion set that runs over both guest transports; the smoke checks each profile's tool surface, per toolset, over a real stdio client. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
+**Alpha status:** 1135 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test and one assertion set that runs over both guest transports; the smoke checks each profile's tool surface, per toolset, over a real stdio client. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
 
 ## Highlights
 
-- **68 MCP tools in twelve toolsets**, with read-only/destructive annotations and structured results; a profile registers only its own toolsets, so the default surface is 31 tools rather than every schema in every conversation.
+- **69 MCP tools in twelve toolsets**, with read-only/destructive annotations and structured results; a profile registers only its own toolsets, so the default surface is 31 tools rather than every schema in every conversation.
 - Inventory, pause/resume, bounded state waiting, power, checkpoints, and bounded guest file transfer.
 - A running VM reports its guest's computer name and OS from the Hyper-V key-value pair exchange,
   so a VM can be identified before any guest credential exists.
@@ -138,8 +138,8 @@ client can either ask you or, in the lab profile, do it.
 
 Every tool belongs to one toolset. A profile decides which toolsets are registered, and a
 tool that is not registered is never advertised, so its schema never enters the model's
-context. The `safe` profile registers 31 tools, `lab` registers 46, `HYPERV_MCP_TOOLSETS`
-replaces the set outright, and `all` enables everything (68 tools).
+context. The `safe` profile registers 31 tools, `lab` registers 47, `HYPERV_MCP_TOOLSETS`
+replaces the set outright, and `all` enables everything (69 tools).
 
 | Toolset | Tools | safe | lab |
 |---|---|:--:|:--:|
@@ -153,7 +153,7 @@ replaces the set outright, and `all` enables everything (68 tools).
 | `files` | `file_roots`, `host_list_dir`, `host_make_dir`, `host_rename`, `host_delete`, `guest_list_dir`, `guest_make_dir`, `guest_rename`, `guest_delete` | | |
 | `serial` | `serial_status`, `serial_connect`, `serial_read`, `serial_send`, `serial_disconnect` | | |
 | `lab` | `lab_init`, `lab_diagnostics`, `lab_stage`, `lab_verify`, `lab_collect`, `lab_guest_configure`, `lab_verifier`, `lab_driver_service`, `lab_run`, `lab_cycle`, `lab_matrix`, `lab_receipts` | | ✓ |
-| `kd` | `kd_attach`, `kd_status`, `kd_detach`, `kd_execution`, `kd_command`, `kd_wait_event`, `kd_breakpoint`, `kd_inspect`, `vm_inject_nmi` | | ✓ |
+| `kd` | `kd_attach`, `kd_status`, `kd_detach`, `kd_execution`, `kd_command`, `kd_wait_event`, `kd_output_subscribe`, `kd_breakpoint`, `kd_inspect`, `vm_inject_nmi` | | ✓ |
 | `debug` | `debug_status`, `debug_setup` | | ✓ |
 
 Families that only differ by an action share one tool with a typed discriminator, so the

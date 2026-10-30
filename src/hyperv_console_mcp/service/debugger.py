@@ -220,6 +220,28 @@ class DebuggerService(ServiceBase):
             )
         return {"vm": vm, **result}
 
+    def kd_output_subscribe(
+        self, vm_name: str, after: int = 0, timeout_seconds: float = 10.0
+    ) -> dict[str, Any]:
+        """Follow the debugger's own log, so output nobody asked for is seen.
+
+        ``kd_command`` answers the caller that typed; a module load, a break-in
+        or a bugcheck happens while the target runs and belongs to no command.
+        The log is the one place both arrive, so a window tails it from an
+        offset instead of polling the state and missing what fell between.
+        Reading is not a mutation, so it is neither audited nor announced.
+        """
+        vm = self._kd_gate(vm_name)
+        session = self.kd.require(vm)
+        if not isinstance(after, int) or isinstance(after, bool) or after < 0:
+            raise ValidationError("after must be a non-negative integer.")
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+            raise ValidationError("timeout_seconds must be a number.")
+        result = session.read_output(
+            after, timeout=min(max(float(timeout_seconds), 0.0), 30.0)
+        )
+        return {"vm": vm, **result}
+
     def kd_wait_event(
         self, vm_name: str, timeout_ms: int | None = None
     ) -> dict[str, Any]:

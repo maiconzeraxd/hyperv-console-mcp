@@ -1015,6 +1015,21 @@ def create_server(
         return await _invoke(service.kd_wait_event, vm_name, timeout_ms)
 
     @tool(
+        "kd_output_subscribe", annotations=READ_ONLY,
+        description="Follow the attached session's own log from a byte offset: the text kd wrote, "
+        "including output nobody asked for — a module load, a break-in, a bugcheck. Returns "
+        "text, the new offset to resume from, the state and whether the debugger is alive; the "
+        "call is held open until something arrives or timeout_seconds runs out, so a window "
+        "streams the debugger instead of polling it. Read-only: it never sends a command.",
+    )
+    async def kd_output_subscribe(
+        vm_name: str, after: int = 0, timeout_seconds: float = 10.0
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.kd_output_subscribe, vm_name, after, timeout_seconds
+        )
+
+    @tool(
         "kd_breakpoint", annotations=MUTATION,
         description="Manage breakpoints in the attached session. action='set' sets a software breakpoint "
         "(bp) or, with deferred=true, a deferred one (bu) with an optional command string; action='clear' "

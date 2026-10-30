@@ -46,7 +46,9 @@ SERVICE_LOCK = threading.Lock()
 # The methods that answer from the event bus alone. They are dispatched without
 # the lock above: `events_wait` blocks by design, and a live feed that stops
 # every other client for its duration is worse than no live feed.
-LOCK_FREE = frozenset({"event_snapshot", "events_wait", "logs_subscribe"})
+LOCK_FREE = frozenset(
+    {"event_snapshot", "events_wait", "logs_subscribe", "kd_output_subscribe"}
+)
 
 
 def dispatch_request(
