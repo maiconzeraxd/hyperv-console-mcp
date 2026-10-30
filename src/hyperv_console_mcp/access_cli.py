@@ -19,12 +19,17 @@ def _store() -> AccessStore:
     return AccessStore(access_file())
 
 
-def _report(entries: dict[str, tuple[str, str]]) -> dict[str, Any]:
+def _report(entries: dict[str, dict[str, str | None]]) -> dict[str, Any]:
+    records = sorted(entries.values(), key=lambda record: str(record["name"]).casefold())
     return {
         "access_file": str(_store().path),
         "vms": [
-            {"name": name, "level": level, "capabilities": sorted(LEVEL_CAPABILITIES[level])}
-            for name, level in sorted(entries.values())
+            {
+                "name": str(record["name"]),
+                "level": str(record["level"]),
+                "capabilities": sorted(LEVEL_CAPABILITIES[str(record["level"])]),
+            }
+            for record in records
         ],
     }
 
@@ -63,7 +68,9 @@ def main() -> None:
     store = _store()
     try:
         if arguments.action == "list":
-            result = _report(store.load())
+            # entries(), not load(): load()'s two-item tuples are a compatibility
+            # shape for callers that only want the level, not a report record.
+            result = _report(store.entries())
         elif arguments.action == "set":
             result = _report(store.set(arguments.vm, arguments.level))
             _notify_service(result)

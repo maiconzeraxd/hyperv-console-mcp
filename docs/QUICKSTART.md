@@ -38,7 +38,9 @@ Download `HyperVConsoleMCP-Setup-<version>.exe` from the
 double-click it.
 
 - It installs **for your user only**, into `%LOCALAPPDATA%\Programs\Hyper-V Console`.
-  No administrator password is asked for, and nothing is installed machine-wide.
+  No administrator password is asked during the install, and nothing is installed
+  machine-wide. The window itself always runs elevated, so Windows asks once
+  the first time you open it.
 - It does **not** need Python. The interpreter is inside the download.
 - At the end it runs the setup routine once: it finds your AI clients (Claude
   Desktop, Cursor, Codex), writes the entry each one needs, adds a **Hyper-V

@@ -11,7 +11,7 @@ The window is one HTML file with its CSS and JavaScript inline, loaded through p
 
 ## Start
 
-Run from an elevated PowerShell when Hyper-V management requires elevation:
+Run from an elevated PowerShell when Hyper-V management requires elevation. The installed launcher asks for elevation itself, so a shortcut or a double-click still starts the window with the rights it needs:
 
 ```powershell
 python -I scripts\run_dashboard.py
@@ -36,7 +36,7 @@ The **fleet** is the home page: every VM Hyper-V reported, its state, the level 
 - **Recovery** — power and checkpoint actions, including the forced ones that ask for a confirmation.
 - **Media** — an ISO, the DVD drive and boot order.
 - **Debugger** — COM1 serial, the kd session and the symbols it resolves.
-- **Guest** — the credential source, the automation toggles and one command.
+- **Guest** — the credential source, the automation toggles, the guest-only BCD toggles and one command.
 - **Lab** — diagnostics, package staging, verification, the cycle that runs a package, receipts with export, and the crash triage.
 - **Files** — the host's four roots beside the guest's own disk.
 
@@ -46,7 +46,7 @@ Closing the window does not stop a VM or guarantee that an already-running guest
 
 This is not a second Hyper-V Manager. Creating a VM and editing its hardware are rare, and the manager already does them well, so **Hyper-V Manager** on the fleet opens `mmc.exe virtmgmt.msc` and the window stops there. The console page carries the same idea: the display is a picture, so **Open VMConnect** starts `vmconnect.exe localhost "<vm>"` for full fidelity instead of telling the operator to type that command somewhere else.
 
-Both are the window's own methods rather than service calls, because the service is a background process and a window it started would belong to that process's desktop rather than the operator's. The decision is still Python's, not the page's: `open_vmconnect` asks the service for `list_vms` first and refuses a name the host did not report, which is the allowlist standing between a name and a process. The VM name goes in as one argument, so a VM called `Lab VM` is still one argument and no shell ever parses it. A host without the management tools gets an answer that says so rather than a traceback.
+Both are the window's own methods rather than service calls, because the service is a background process and a window it started would belong to that process's desktop rather than the operator's. The decision is still Python's, not the page's: `open_vmconnect` asks the service for `list_vms` first and refuses a name the host did not report, which is the allowlist standing between a name and a process. The VM name goes in as one argument, so a VM called `Lab VM` is still one argument and no shell ever parses it. A host without the management tools gets an answer that says so rather than a traceback. The WebView2 fleet row and the classic tkinter window's Overview page both carry the action, next to **Start**.
 
 ## Two palettes, one set of names
 

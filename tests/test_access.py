@@ -234,6 +234,57 @@ def test_the_cli_tells_a_running_service_and_never_needs_one(
     assert result == {"service": "not running"}
 
 
+def test_the_cli_reports_the_records_it_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """set/remove return full records, not load()'s two-item compatibility tuples."""
+    from uuid import uuid4
+
+    from hyperv_console_mcp import access_cli
+
+    monkeypatch.setenv("HYPERV_MCP_ACCESS_FILE", str(tmp_path / "access.json"))
+    monkeypatch.setenv(
+        "HYPERV_MCP_SERVICE_PIPE", rf"\\.\pipe\HyperVConsoleMCP-Service-absent-{uuid4().hex}"
+    )
+    monkeypatch.setattr("sys.argv", ["hyperv-access", "set", "NORTH-Test", "lab"])
+
+    access_cli.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["vms"] == [{
+        "name": "NORTH-Test",
+        "level": "lab",
+        "capabilities": sorted(LEVEL_CAPABILITIES["lab"]),
+    }]
+    assert result["service"] == "not running"
+
+
+def test_the_cli_lists_a_file_it_did_not_just_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """list reads the saved file, whose load() tuples are not report records."""
+    from uuid import uuid4
+
+    from hyperv_console_mcp import access_cli
+
+    path = tmp_path / "access.json"
+    AccessStore(path).set("NORTH-Test", "lab")
+    monkeypatch.setenv("HYPERV_MCP_ACCESS_FILE", str(path))
+    monkeypatch.setenv(
+        "HYPERV_MCP_SERVICE_PIPE", rf"\\.\pipe\HyperVConsoleMCP-Service-absent-{uuid4().hex}"
+    )
+    monkeypatch.setattr("sys.argv", ["hyperv-access", "list"])
+
+    access_cli.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["vms"] == [{
+        "name": "NORTH-Test",
+        "level": "lab",
+        "capabilities": sorted(LEVEL_CAPABILITIES["lab"]),
+    }]
+
+
 def test_a_broken_file_is_an_error_not_an_empty_policy(tmp_path: Path) -> None:
     path = tmp_path / "access.json"
     path.write_text("{not json", encoding="utf-8")

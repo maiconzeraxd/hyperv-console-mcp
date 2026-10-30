@@ -61,11 +61,20 @@ def test_the_spec_parses_as_python() -> None:
 def test_the_spec_freezes_the_programs_the_code_names() -> None:
     text = _text(SPEC)
     assert "from hyperv_console_mcp.frozen import ACCESS, HOST, LAUNCHER, SETUP" in text
-    calls = re.findall(r'program\("(\w+)", (\w+), console=(True|False)\)', text)
-    assert sorted(name for _, name, _ in calls) == ["ACCESS", "HOST", "LAUNCHER", "SETUP"]
+    calls = re.findall(
+        r'program\("(\w+)", (\w+), console=(True|False)(?:, uac_admin=(True|False))?\)', text
+    )
+    assert sorted(name for _, name, _, _ in calls) == ["ACCESS", "HOST", "LAUNCHER", "SETUP"]
     # The launcher is the only windowed program: a console would flash on every
     # double-click, and the three operator tools print their answers.
-    assert [name for _, name, console in calls if console == "False"] == ["LAUNCHER"]
+    assert [name for _, name, console, _ in calls if console == "False"] == ["LAUNCHER"]
+
+
+def test_the_spec_launches_the_window_as_administrator() -> None:
+    """The launcher must always run elevated, which the manifest asks for."""
+    text = _text(SPEC)
+    assert "uac_admin=True" in text
+    assert 'program("launcher", LAUNCHER, console=False, uac_admin=True)' in text
 
 
 def test_every_console_script_is_shipped_or_named_as_left_out() -> None:

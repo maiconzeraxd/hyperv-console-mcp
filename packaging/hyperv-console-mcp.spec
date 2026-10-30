@@ -77,7 +77,7 @@ def scripts_for(name: str):
     return [item for item in analysis.scripts if item[0] not in PROGRAMS or item[0] == name]
 
 
-def program(script: str, name: str, console: bool):
+def program(script: str, name: str, console: bool, uac_admin: bool = False):
     """One executable from its own script, sharing what ``COLLECT`` gathers."""
     return EXE(
         pyz,
@@ -87,6 +87,7 @@ def program(script: str, name: str, console: bool):
         name=Path(name).stem,
         console=console,
         icon=str(ICON),
+        uac_admin=uac_admin,
         upx=False,
     )
 
@@ -95,7 +96,7 @@ def program(script: str, name: str, console: bool):
 # client that hands it a pipe still gets the server because stdin is a pipe and
 # not a console. The three operator tools keep their console: they print.
 COLLECT(
-    program("launcher", LAUNCHER, console=False),
+    program("launcher", LAUNCHER, console=False, uac_admin=True),
     program("setup_cli", SETUP, console=True),
     program("service_cli", HOST, console=True),
     program("access_cli", ACCESS, console=True),

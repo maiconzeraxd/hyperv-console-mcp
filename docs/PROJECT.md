@@ -2203,6 +2203,37 @@ to overwrite.
 - Gate: 1117 passed / 1 skipped, ruff clean, MCP stdio smoke green; the Linux job of the tests
   workflow is green on the same commit for the first time.
 
+### 2026-10-30 — the window opens its own viewer, and the launcher asks for the rights it needs
+
+Two gaps the install wave left behind: the frozen launcher started unelevated, so the shortcut
+opened a window that could not read a VM; and the classic tkinter window — still the fallback on a
+host without the WebView2 runtime — had no way to open VMConnect or to prepare a guest's BCD.
+
+- **The launcher is built with a `requireAdministrator` manifest.** `packaging/hyperv-console-mcp.spec`
+  passes `uac_admin=True` to the one windowed program, so a double-click or the Start Menu shortcut
+  asks Windows once instead of opening a window that would answer `access_denied` on every read.
+  The three operator programs keep their own manifest: `hyperv-access` and `hyperv-setup` print,
+  and asking for elevation to read a JSON file would be noise. The installer still asks for none,
+  which is what the QUICKSTART promises.
+- **The tkinter Overview carries `Open VM`.** `vmconnect.exe localhost <vm>` for full fidelity —
+  the same decision the WebView2 page's button already made: the name is checked against
+  `list_vms` before anything is started, so the allowlist still stands between a name and a
+  process, and the name goes in as one argument rather than a command string.
+- **The tkinter Guest page carries the guest-only BCD toggles** — test signing, kernel debugging,
+  crash dump, HVCI/VBS and restart-after-apply — through the same `lab_guest_configure` the page
+  and the tools use, so the fallback window can prepare a VM without a WebView2 runtime.
+- **`hyperv-access list` was broken.** `_report` expects the three-field records `entries()`
+  returns, and `list` was handing it `load()`'s two-item compatibility tuples, so listing a file
+  this run had not just written raised on the missing key. Two tests: the record shape after
+  `set`, and `list` over a file another process wrote.
+- Tests: three (`tests/test_access.py` twice, `tests/test_packaging.py` once) plus the attribute
+  assertion in `tests/test_dashboard.py` that the Guest page builds its BCD variables.
+- Gate: 1120 passed / 1 skipped, ruff clean.
+- **Not validated live:** `vmconnect.exe` has still never been started by either window on a real
+  host, and the installer has not been recompiled with the new launcher manifest — the frozen
+  bundle in `dist/` carries it (`requireAdministrator` is in the built executable), but the Inno
+  installer is built only by the release workflow.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three

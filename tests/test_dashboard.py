@@ -222,6 +222,13 @@ def test_dashboard_pages_render_with_fake_backend(tmp_path, monkeypatch) -> None
         for page in ("Activity", "Driver lab", "Guest access", "Console", "Recovery", "Media", "Debugger", "Overview"):
             app.show(page)
             app.update()
+        # The Guest page owns the guest-only BCD toggles; they must exist even
+        # when nothing has been applied yet, so a fresh window can prepare a VM.
+        for attribute in (
+            "bcd_testsigning", "bcd_kernel_debug", "bcd_crash_dump",
+            "bcd_disable_hvci", "bcd_restart",
+        ):
+            assert hasattr(app, attribute)
         capture = os.environ.get("HYPERV_TEST_SCREENSHOT")
         if capture:
             from PIL import ImageGrab

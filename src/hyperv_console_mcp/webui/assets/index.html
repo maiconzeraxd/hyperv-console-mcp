@@ -623,7 +623,11 @@ const builders = {
                action("Save", "power", () => ({ vm_name: name, action: "save" }), null, render),
                action("Turn off", "power", () => ({ vm_name: name, action: "turn_off", confirm_vm: name }), "danger", render)]
             : [action("Start", "power", () => ({ vm_name: name, action: "start" }), null, render)],
-          el("button", { class: "act", onclick: () => openVm(name) }, "Open"))));
+          el("button", { class: "act", onclick: () => openVm(name) }, "Open"),
+          el("button", {
+            class: "act",
+            onclick: () => openViewer("open_vmconnect", () => api().open_vmconnect(name)),
+          }, "VMConnect"))));
     });
 
     const empty = vms.length
