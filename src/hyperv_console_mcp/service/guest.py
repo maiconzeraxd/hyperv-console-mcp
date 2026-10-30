@@ -6,20 +6,48 @@ import base64
 import binascii
 import hashlib
 import re
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
 from ..errors import BackendError, ValidationError
+from ..events import EVENTS, ProgressReporter
 from ..lab.publish import identifier, verify_staged
 from ._base import (
     MAX_GUEST_FILE_BYTES,
     ServiceBase,
     T,
     _command_summary,
-    _confined_path,
+    _confined_to_roots,
     _integer,
     _text,
 )
+
+
+class _TransferProgress:
+    """Bytes crossing the boundary, as one event per whole percent.
+
+    A 100 MB file is thousands of SFTP blocks; publishing each one would flood
+    the feed and the daily log, so the report is throttled to the percentage a
+    page can actually draw. The band stops at 90 so the verification and the
+    completed event have somewhere to land.
+    """
+
+    def __init__(self, operation: str, vm_name: str, total: int) -> None:
+        self.reporter = ProgressReporter(EVENTS, operation, vm_name, uuid.uuid4().hex)
+        self.total = max(int(total), 1)
+        self.last = -1
+
+    def __call__(self, done: int, total: int) -> None:
+        size = max(int(total or self.total), 1)
+        percent = 5 + int(85 * min(int(done), size) / size)
+        if percent == self.last:
+            return
+        self.last = percent
+        self.reporter.update(percent, f"{int(done)} of {size} bytes")
+
+    def finished(self, message: str) -> None:
+        self.reporter.update(99, message)
 
 
 class GuestService(ServiceBase):
@@ -303,6 +331,53 @@ class GuestService(ServiceBase):
             "guest_package_list", vm_name, {"package_id": identifier(package_id, "package_id")}
         )
 
+    def guest_list_dir(self, vm_name: str, guest_path: str) -> dict[str, Any]:
+        """What a guest directory holds, in the order the page should draw it.
+
+        Reading a listing is not a mutation, so it is not gated; it does need the
+        `guest` capability, like every other call that reaches inside the VM.
+        """
+        return self._guest_call(
+            "guest_list_dir", vm_name, {"path": _text(guest_path, "guest_path", 32_768)}
+        )
+
+    def guest_make_dir(self, vm_name: str, guest_path: str) -> dict[str, Any]:
+        path = _text(guest_path, "guest_path", 32_768)
+        return self._guest_call(
+            "guest_make_dir", vm_name, {"path": path},
+            summary={"path": path, "action": "create directory"},
+        )
+
+    def guest_rename(self, vm_name: str, guest_path: str, new_name: str) -> dict[str, Any]:
+        path = _text(guest_path, "guest_path", 32_768)
+        name = _text(new_name, "new_name", 255)
+        return self._guest_call(
+            "guest_rename", vm_name, {"path": path, "new_name": name},
+            summary={"path": path, "new_name": name},
+        )
+
+    def guest_delete(
+        self,
+        vm_name: str,
+        guest_path: str,
+        confirm_path: str,
+        *,
+        recursive: bool = False,
+    ) -> dict[str, Any]:
+        """Delete one guest file, or a directory the operator named twice.
+
+        The guest script refuses a non-empty directory unless ``recursive`` is
+        set, so the confirmation has to cover the whole tree, not just the name.
+        """
+        path = _text(guest_path, "guest_path", 32_768)
+        if not isinstance(recursive, bool):
+            raise ValidationError("recursive must be a boolean value.")
+        self._confirm(confirm_path, path, "confirm_path")
+        return self._guest_call(
+            "guest_delete", vm_name, {"path": path, "recursive": recursive},
+            summary={"path": path, "recursive": recursive},
+        )
+
     def guest_write_file(
         self,
         vm_name: str,
@@ -349,10 +424,10 @@ class GuestService(ServiceBase):
         overwrite: bool = False,
         confirm_path: str | None = None,
     ) -> dict[str, Any]:
-        """Copy a host file under HYPERV_MCP_TRANSFER_ROOT into the guest."""
+        """Copy a host file under a configured root into the guest."""
         if not isinstance(overwrite, bool):
             raise ValidationError("overwrite must be a boolean value.")
-        source = Path(_confined_path(local_path, "local_path", self.settings.transfer_root, ""))
+        source = Path(_confined_to_roots(local_path, "local_path", self.settings))
         if not source.is_file():
             raise ValidationError(f"local_path is not a file: {source}")
         remote = _text(guest_path, "guest_path", 32_768)
@@ -360,6 +435,7 @@ class GuestService(ServiceBase):
             self._confirm(confirm_path or "", remote, "confirm_path")
         data = source.read_bytes()
         name = self._guest_vm(vm_name)
+        progress = _TransferProgress("guest_put_file", name, len(data))
         with self._approve(
             "guest_put_file",
             name,
@@ -374,9 +450,12 @@ class GuestService(ServiceBase):
                 name,
                 lambda: self._on_guest(
                     name,
-                    lambda t: t.put_file(name, source, remote, overwrite=overwrite),
+                    lambda t: t.put_file(
+                        name, source, remote, overwrite=overwrite, on_progress=progress
+                    ),
                 ),
             )
+        progress.finished(f"verified {written.sha256} in the guest")
         return {"vm": name, "file": written.as_dict()}
 
     def guest_get_file(
@@ -388,11 +467,11 @@ class GuestService(ServiceBase):
         overwrite: bool = False,
         confirm_path: str | None = None,
     ) -> dict[str, Any]:
-        """Copy a guest file to a host path under HYPERV_MCP_TRANSFER_ROOT."""
+        """Copy a guest file to a host path under a configured root."""
         if not isinstance(overwrite, bool):
             raise ValidationError("overwrite must be a boolean value.")
         remote = _text(guest_path, "guest_path", 32_768)
-        target = Path(_confined_path(local_path, "local_path", self.settings.transfer_root, ""))
+        target = Path(_confined_to_roots(local_path, "local_path", self.settings))
         if target.exists() and not overwrite:
             raise ValidationError(
                 f"local_path already exists: {target}. Pass overwrite=true and confirm_path."
@@ -400,12 +479,17 @@ class GuestService(ServiceBase):
         if overwrite:
             self._confirm(confirm_path or "", str(target), "confirm_path")
         name = self._guest_vm(vm_name)
+        progress = _TransferProgress("guest_get_file", name, 0)
         with self._approve(
             "guest_get_file", name, {"guest_path": remote, "local_path": str(target)}
         ):
             fetched, _ = self._call(
                 "guest_get_file",
                 name,
-                lambda: self._on_guest(name, lambda t: t.get_file(name, remote, target)),
+                lambda: self._on_guest(
+                    name,
+                    lambda t: t.get_file(name, remote, target, on_progress=progress),
+                ),
             )
+        progress.finished(f"verified {fetched.sha256} on the host")
         return {"vm": name, "file": fetched.as_dict()}

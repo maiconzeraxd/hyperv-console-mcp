@@ -18,6 +18,7 @@ SERVICE = Path(__file__).resolve().parents[1] / "src" / "hyperv_console_mcp" / "
 DOMAINS = {
     "vm": "VmService",
     "guest": "GuestService",
+    "files": "FileService",
     "ssh": "SshService",
     "credentials": "CredentialService",
     "guest_config": "GuestConfigService",
@@ -35,10 +36,16 @@ def _module(name: str) -> ast.Module:
 
 
 def _methods(name: str) -> set[str]:
+    """The methods a domain contributes, and only those.
+
+    A module may carry a private helper class beside its domain (the transfer
+    progress reporter, say). Its `__init__` is not a service method and has no
+    home to share, so only the `*Service` classes are read.
+    """
     return {
         node.name
         for klass in ast.walk(_module(name))
-        if isinstance(klass, ast.ClassDef)
+        if isinstance(klass, ast.ClassDef) and klass.name.endswith("Service")
         for node in klass.body
         if isinstance(node, ast.FunctionDef)
     }

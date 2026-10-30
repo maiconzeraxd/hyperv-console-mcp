@@ -186,23 +186,42 @@ def test_every_guest_tool_result_names_its_transport(backend: FakeBackend, tmp_p
     assert service.guest_read_file("NORTH-Test", r"C:\DriverLab\x.txt")["transport"] == "psdirect"
 
 
-def test_guest_put_file_stays_inside_the_transfer_root(
+def test_guest_put_file_stays_inside_a_configured_root(
     backend: FakeBackend, tmp_path: Path
 ) -> None:
-    service = HyperVService(backend, settings(transfer_root=tmp_path / "transfers"))
+    """The four host roots are reachable; the rest of the host is not."""
+    service = HyperVService(
+        backend,
+        settings(
+            transfer_root=tmp_path / "transfers",
+            lab_root=tmp_path / "lab",
+            evidence_root=tmp_path / "evidence",
+            iso_root=tmp_path / "media",
+        ),
+    )
     (tmp_path / "transfers").mkdir()
+    (tmp_path / "lab").mkdir()
     inside = tmp_path / "transfers" / "driver.sys"
     inside.write_bytes(b"MZ")
+    # A staged package lives under the lab root, and the file manager copies
+    # from there; the widening is what makes that one transfer, not a detour.
+    staged = tmp_path / "lab" / "package.sys"
+    staged.write_bytes(b"MZ")
     outside = tmp_path / "outside.sys"
     outside.write_bytes(b"MZ")
 
-    with pytest.raises(PolicyError, match="must remain under the configured root"):
+    with pytest.raises(PolicyError, match="must remain under a configured root"):
         service.guest_put_file("NORTH-Test", str(outside), r"C:\DriverLab\driver.sys")
     assert backend.calls == []
 
     result = service.guest_put_file("NORTH-Test", str(inside), r"C:\DriverLab\driver.sys")
     assert result["file"]["size"] == 2
     assert result["file"]["transport"] == "psdirect"
+
+    staged_result = service.guest_put_file(
+        "NORTH-Test", str(staged), r"C:\DriverLab\package.sys"
+    )
+    assert staged_result["file"]["size"] == 2
 
 
 def test_guest_get_file_refuses_to_overwrite_without_confirmation(

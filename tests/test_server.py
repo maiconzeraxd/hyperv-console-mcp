@@ -93,7 +93,7 @@ def test_enabling_every_toolset_exposes_the_whole_surface() -> None:
         ),
     )
     tools = {tool.name: tool for tool in anyio.run(create_server(service).list_tools)}
-    assert len(tools) == 55
+    assert len(tools) == 64
     assert tools["lab_run"].annotations.destructive_hint is True
     assert tools["lab_cycle"].annotations.destructive_hint is True
     assert tools["lab_verify"].annotations.read_only_hint is True
@@ -143,8 +143,9 @@ def test_the_host_report_states_the_surface_it_registered() -> None:
     assert toolsets["counts"] == {
         "core": 8, "guest": 6, "console": 4, "config": 3, "credentials": 2,
         "media": 3, "ssh": 3, "serial": 5, "lab": 10, "kd": 9, "debug": 2,
+        "files": 9,
     }
-    assert toolsets["total"] == 55
+    assert toolsets["total"] == 64
     assert toolsets["disabled"] == []
 
 
@@ -166,12 +167,13 @@ def test_every_tool_belongs_to_a_known_toolset() -> None:
         )
         if isinstance(first, ast.Constant):
             names.add(first.value)
-    assert len(names) == 55
+    assert len(names) == 64
     assert {toolset_for(name) for name in names} <= TOOLSETS
     # The budget the roadmap asks for is "~40" per profile. `safe` holds it
     # exactly; `lab` is 42 since phase 6 added Driver Verifier and the driver
     # service, and the read side of the verifier lives in `lab_diagnostics`
-    # rather than in a second listing tool.
+    # rather than in a second listing tool. The file manager is its own
+    # opt-in family, so neither default pays for it.
     for profile, limit in (("safe", 40), ("lab", 43)):
         enabled = DEFAULT_TOOLSETS[profile]
         visible = [name for name in names if toolset_for(name) in enabled]
@@ -182,8 +184,9 @@ def test_every_tool_belongs_to_a_known_toolset() -> None:
     assert counts == {
         "core": 8, "guest": 6, "console": 4, "config": 3, "credentials": 2,
         "media": 3, "ssh": 3, "serial": 5, "lab": 10, "kd": 9, "debug": 2,
+        "files": 9,
     }
-    assert sum(counts.values()) == 55
+    assert sum(counts.values()) == 64
     assert sum(counts[family] for family in DEFAULT_TOOLSETS["safe"]) == 29
     assert sum(counts[family] for family in DEFAULT_TOOLSETS["lab"]) == 42
 

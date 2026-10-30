@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
+
+# (bytes done, bytes total). A transport calls it while a file crosses the
+# boundary; the service turns it into one progress event per whole percent.
+ProgressCallback = Callable[[int, int], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,9 +67,15 @@ class GuestTransport(Protocol):
 
     def exec(self, vm: str, command: str, *, timeout: float, max_output: int) -> ExecResult: ...
 
-    def put_file(self, vm: str, local: Path, remote: str, *, overwrite: bool) -> FileResult: ...
+    def put_file(
+        self, vm: str, local: Path, remote: str, *, overwrite: bool,
+        on_progress: ProgressCallback | None = None,
+    ) -> FileResult: ...
 
-    def get_file(self, vm: str, remote: str, local: Path) -> FileResult: ...
+    def get_file(
+        self, vm: str, remote: str, local: Path,
+        on_progress: ProgressCallback | None = None,
+    ) -> FileResult: ...
 
     def health(self, vm: str) -> dict[str, Any]: ...
 

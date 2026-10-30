@@ -25,7 +25,7 @@ from typing import Any
 
 from .. import credentials
 from ..errors import BackendError, PolicyError, ValidationError
-from .base import ExecResult, FileResult
+from .base import ExecResult, FileResult, ProgressCallback
 
 # Installed in the guest by guest_ssh_provision; it implements the structured
 # guest operations so the two transports run the same PowerShell.
@@ -49,6 +49,9 @@ GUEST_OPERATIONS = frozenset({
     "guest_read_file", "guest_read_chunk", "guest_assemble_file",
     "guest_write_file", "guest_package_inspect", "guest_package_list",
     "guest_package_commit",
+    # The file manager's half of the contract; the guest script implements the
+    # same four operations PowerShell Direct runs as scriptblocks.
+    "guest_list_dir", "guest_make_dir", "guest_rename", "guest_delete",
 })
 
 _CLIENTS: dict[tuple[str, int, str, str], Any] = {}
@@ -467,7 +470,10 @@ class SshTransport:
                 return value
         raise BackendError(f"Could not hash {remote} in {vm}.", code="ssh_error")
 
-    def put_file(self, vm: str, local: Path, remote: str, *, overwrite: bool) -> FileResult:
+    def put_file(
+        self, vm: str, local: Path, remote: str, *, overwrite: bool,
+        on_progress: ProgressCallback | None = None,
+    ) -> FileResult:
         source = Path(local)
         if not source.is_file():
             raise ValidationError(f"{source} is not a file.")
@@ -486,7 +492,9 @@ class SshTransport:
                     f"Guest file already exists; overwrite was not approved: {remote}"
                 )
             try:
-                sftp.put(str(source), temporary)
+                # SFTP hands back a byte count per block, which is the one
+                # transport here that can report the middle of a transfer.
+                sftp.put(str(source), temporary, callback=on_progress)
                 if exists:
                     sftp.remove(target)
                 sftp.rename(temporary, target)
@@ -519,7 +527,10 @@ class SshTransport:
             transport=self.name, bytes_transferred=source.stat().st_size,
         )
 
-    def get_file(self, vm: str, remote: str, local: Path) -> FileResult:
+    def get_file(
+        self, vm: str, remote: str, local: Path,
+        on_progress: ProgressCallback | None = None,
+    ) -> FileResult:
         target = Path(local)
         target.parent.mkdir(parents=True, exist_ok=True)
         expected = self._guest_sha256(vm, remote)
@@ -527,7 +538,7 @@ class SshTransport:
         sftp = client.open_sftp()
         temporary = str(target) + ".part"
         try:
-            sftp.get(_sftp_path(remote), temporary)
+            sftp.get(_sftp_path(remote), temporary, callback=on_progress)
         finally:
             sftp.close()
         try:

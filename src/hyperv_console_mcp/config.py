@@ -99,7 +99,7 @@ def _profile(values: Mapping[str, str]) -> str:
 # is a cost the model pays anyway.
 TOOLSETS = frozenset({
     "core", "guest", "console", "config", "credentials", "media", "serial", "ssh",
-    "lab", "kd", "debug",
+    "lab", "kd", "debug", "files",
 })
 
 # A profile is a starting point, not a ceiling: HYPERV_MCP_TOOLSETS can add or

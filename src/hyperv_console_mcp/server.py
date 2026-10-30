@@ -28,6 +28,18 @@ MUTATION = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentH
 # Which family a tool belongs to, decided by its name. The order matters: the
 # specific prefixes must come before the general ones they extend.
 TOOLSET_PREFIXES: tuple[tuple[str, str], ...] = (
+    # The file manager is its own family, and an opt-in one: nine schemas that
+    # every conversation would otherwise carry for a task the operator does from
+    # the window. It comes before the generic prefixes so its names win.
+    ("guest_list_dir", "files"),
+    ("guest_make_dir", "files"),
+    ("guest_rename", "files"),
+    ("guest_delete", "files"),
+    ("host_list_dir", "files"),
+    ("host_make_dir", "files"),
+    ("host_rename", "files"),
+    ("host_delete", "files"),
+    ("file_roots", "files"),
     ("vm_inject_nmi", "kd"),
     ("guest_ssh_", "ssh"),
     ("guest_credential", "credentials"),
@@ -382,6 +394,77 @@ def create_server(
         return await _invoke(
             service.guest_get_file, vm_name, guest_path, local_path,
             overwrite=overwrite, confirm_path=confirm_path,
+        )
+
+    @tool(
+        "guest_list_dir", annotations=READ_ONLY,
+        description="List one guest directory: directories first, then files, each with its size and last write time. Needs the guest capability; returns at most 500 entries.",
+    )
+    async def guest_list_dir(vm_name: str, guest_path: str) -> dict[str, Any]:
+        return await _invoke(service.guest_list_dir, vm_name, guest_path)
+
+    @tool(
+        "guest_make_dir", annotations=MUTATION,
+        description="Create one guest directory. Creating one that already exists is not an error; the result says whether it was made now.",
+    )
+    async def guest_make_dir(vm_name: str, guest_path: str) -> dict[str, Any]:
+        return await _invoke(service.guest_make_dir, vm_name, guest_path)
+
+    @tool(
+        "guest_rename", annotations=MUTATION,
+        description="Rename a guest file or directory inside its own parent. The destination must not already exist.",
+    )
+    async def guest_rename(vm_name: str, guest_path: str, new_name: str) -> dict[str, Any]:
+        return await _invoke(service.guest_rename, vm_name, guest_path, new_name)
+
+    @tool(
+        "guest_delete", annotations=MUTATION,
+        description="Delete a guest file, or a directory with recursive=true. Requires confirm_path equal to guest_path; a non-empty directory without recursive is refused.",
+    )
+    async def guest_delete(
+        vm_name: str, guest_path: str, confirm_path: str, recursive: bool = False
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.guest_delete, vm_name, guest_path, confirm_path, recursive=recursive
+        )
+
+    @tool(
+        "file_roots", annotations=READ_ONLY,
+        description="Name the host directories the file tools may browse: the lab, evidence, transfer and media roots, and whether each exists. C:\\ is never one of them.",
+    )
+    async def file_roots() -> dict[str, Any]:
+        return await _invoke(service.file_roots)
+
+    @tool(
+        "host_list_dir", annotations=READ_ONLY,
+        description="List one host directory under a named root (lab, evidence, transfer, media). The path is relative to the root; anything that resolves outside it is refused.",
+    )
+    async def host_list_dir(root: str, path: str = "") -> dict[str, Any]:
+        return await _invoke(service.host_list_dir, root, path)
+
+    @tool(
+        "host_make_dir", annotations=MUTATION,
+        description="Create one host directory under a named root. Creating one that already exists is not an error.",
+    )
+    async def host_make_dir(root: str, path: str) -> dict[str, Any]:
+        return await _invoke(service.host_make_dir, root, path)
+
+    @tool(
+        "host_rename", annotations=MUTATION,
+        description="Rename a host file or directory inside its own parent, under a named root.",
+    )
+    async def host_rename(root: str, path: str, new_name: str) -> dict[str, Any]:
+        return await _invoke(service.host_rename, root, path, new_name)
+
+    @tool(
+        "host_delete", annotations=MUTATION,
+        description="Delete a host file, or a directory with recursive=true, under a named root. Requires confirm_path equal to the path as listed.",
+    )
+    async def host_delete(
+        root: str, path: str, confirm_path: str, recursive: bool = False
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.host_delete, root, path, confirm_path, recursive=recursive
         )
 
     @tool(

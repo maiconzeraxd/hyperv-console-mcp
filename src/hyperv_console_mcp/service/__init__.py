@@ -1,6 +1,6 @@
 """The service façade: one object, one policy boundary, one audit trail.
 
-The implementation is split by domain — ``vm``, ``guest``, ``ssh``,
+The implementation is split by domain — ``vm``, ``guest``, ``files``, ``ssh``,
 ``credentials``, ``guest_config``, ``lab``, ``console``, ``media``,
 ``serial_console``, ``debug_setup`` and ``debugger`` — and composed here.
 Callers keep importing ``HyperVService`` from this package, so the split moves
@@ -30,6 +30,7 @@ from .console import ConsoleService
 from .credentials import CredentialService
 from .debug_setup import DebugSetupService
 from .debugger import DebuggerService
+from .files import FileService
 from .guest import GuestService
 from .guest_config import GuestConfigService
 from .lab import LabService
@@ -56,6 +57,7 @@ __all__ = [
 class HyperVService(
     VmService,
     GuestService,
+    FileService,
     SshService,
     CredentialService,
     GuestConfigService,

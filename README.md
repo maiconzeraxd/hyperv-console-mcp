@@ -2,7 +2,7 @@
 
 A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/) server for **Hyper-V on Windows**. It combines VM management, checkpoints, PowerShell Direct diagnostics, synthetic keyboard/mouse input, console screenshots without VMConnect, installation media, serial consoles, and serial WinDbg preparation and a live kd.exe kernel-debugging session in one stdio server.
 
-**Alpha status:** 884 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test and one assertion set that runs over both guest transports; the smoke checks each profile's tool surface, per toolset, over a real stdio client. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
+**Alpha status:** 902 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test and one assertion set that runs over both guest transports; the smoke checks each profile's tool surface, per toolset, over a real stdio client. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
 
 ## Highlights
 
@@ -107,7 +107,7 @@ client can either ask you or, in the lab profile, do it.
 Every tool belongs to one toolset. A profile decides which toolsets are registered, and a
 tool that is not registered is never advertised, so its schema never enters the model's
 context. The `safe` profile registers 29 tools, `lab` registers 42, `HYPERV_MCP_TOOLSETS`
-replaces the set outright, and `all` enables everything (55 tools).
+replaces the set outright, and `all` enables everything (64 tools).
 
 | Toolset | Tools | safe | lab |
 |---|---|:--:|:--:|
@@ -118,6 +118,7 @@ replaces the set outright, and `all` enables everything (55 tools).
 | `credentials` | `guest_credential_status`, `guest_credential` | ✓ | |
 | `media` | `media_list`, `media_mount`, `media_eject` | ✓ | |
 | `ssh` | `guest_ssh_provision`, `guest_ssh_status`, `guest_ssh_deprovision` | ✓ | |
+| `files` | `file_roots`, `host_list_dir`, `host_make_dir`, `host_rename`, `host_delete`, `guest_list_dir`, `guest_make_dir`, `guest_rename`, `guest_delete` | | |
 | `serial` | `serial_status`, `serial_connect`, `serial_read`, `serial_send`, `serial_disconnect` | | |
 | `lab` | `lab_init`, `lab_diagnostics`, `lab_stage`, `lab_verify`, `lab_collect`, `lab_guest_configure`, `lab_verifier`, `lab_driver_service`, `lab_run`, `lab_cycle` | | ✓ |
 | `kd` | `kd_attach`, `kd_status`, `kd_detach`, `kd_execution`, `kd_command`, `kd_wait_event`, `kd_breakpoint`, `kd_inspect`, `vm_inject_nmi` | | ✓ |
@@ -136,7 +137,9 @@ separate from mutating ones, so a listing never asks for approval.
 
 Power actions are `start`, `shutdown`, `save`, `pause`, `resume`, `turn_off`, and `reset`. Forced power needs `confirm_vm` equal to `vm_name`. Restore/delete need the VM name and exact checkpoint GUID confirmed. Overwriting an existing guest file needs `overwrite=true` and an exact `confirm_path`.
 
-`guest_read_file`/`guest_write_file` move small content inline (≤ 8 MiB of base64 in one request). `guest_put_file`/`guest_get_file` copy whole files between the guest and a host path under `HYPERV_MCP_TRANSFER_ROOT`, verifying SHA-256 on both sides; they are the right choice for drivers, dumps and anything else measured in tens of MiB. Every guest result carries `transport` (`psdirect` or `ssh`); see [client configuration](docs/SETUP.md) for the optional SSH transport, which stays unused until `guest_ssh_provision` has set it up.
+`guest_read_file`/`guest_write_file` move small content inline (≤ 8 MiB of base64 in one request). `guest_put_file`/`guest_get_file` copy whole files between the guest and a host path under one of the configured roots (`HYPERV_MCP_TRANSFER_ROOT`, `HYPERV_MCP_LAB_ROOT`, `HYPERV_MCP_EVIDENCE_ROOT`, `HYPERV_MCP_ISO_ROOT`), verifying SHA-256 on both sides; they are the right choice for drivers, dumps and anything else measured in tens of MiB, and they publish `progress` events as the bytes move. Every guest result carries `transport` (`psdirect` or `ssh`); see [client configuration](docs/SETUP.md) for the optional SSH transport, which stays unused until `guest_ssh_provision` has set it up.
+
+The `files` family is the browsing half of the same job: `file_roots` names the four host roots and whether each exists, `host_list_dir`/`host_make_dir`/`host_rename`/`host_delete` work inside one of them (a path is resolved and refused if it lands outside its root, so `..` and an absolute path both fail), and `guest_list_dir`/`guest_make_dir`/`guest_rename`/`guest_delete` do the same inside the VM over the configured transport. Deleting anything needs the path spelled back in `confirm_path`; a non-empty directory needs `recursive=true` as well. The dashboard draws this as two panels; the tools exist so an agent can do it too.
 
 The guest password lives in the current user's Windows Credential Manager under `HyperVConsoleMCP/<vm>`, so it never has to sit in the MCP host environment. `guest_autologon_configure` then makes the VM boot straight to the desktop: the password goes into LSA private data rather than the registry, and the no-lock-screen, no-Ctrl+Alt+Del, power, UAC and update-reboot toggles each record the value they replaced in the guest's `C:\DriverLab\State\guest-config.json`, which `guest_config_revert` restores. `guest_credential_status` reports which source is in use and whether PowerShell Direct and SSH accept it without returning the secret; `guest_credential(action="rotate")` changes the password in the guest, proves a fresh session accepts it and only then replaces the stored one. The `HYPERV_MCP_GUEST_USERNAME`/`HYPERV_MCP_GUEST_PASSWORD` pair still works as a fallback.
 

@@ -40,10 +40,11 @@ CONFIGURATIONS = (
     (
         "all toolsets",
         {"HYPERV_MCP_TOOLSETS": "all"},
-        55,
+        64,
         {
             "core": 8, "guest": 6, "console": 4, "config": 3, "credentials": 2,
             "media": 3, "ssh": 3, "serial": 5, "lab": 10, "kd": 9, "debug": 2,
+            "files": 9,
         },
     ),
 )

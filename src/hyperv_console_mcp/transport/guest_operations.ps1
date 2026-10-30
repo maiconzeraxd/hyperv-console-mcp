@@ -166,6 +166,66 @@ function Invoke-GuestOperation {
                 path = $path; bytes_written = $bytes.Length; sha256 = Get-Sha256Hex $bytes
             } }
         }
+        'guest_list_dir' {
+            $path = Get-AbsolutePath ([string]$Body.path)
+            if (-not [IO.Directory]::Exists($path)) { throw "Guest directory not found: $path" }
+            # Directories first, then files, each by name: the page draws the list
+            # in the order it arrives rather than sorting it in JavaScript.
+            $entries = @([IO.DirectoryInfo]::new($path).EnumerateFileSystemInfos() |
+                Sort-Object -Property @{ Expression = { -not $_.PSIsContainer } }, Name |
+                Select-Object -First 500 | ForEach-Object {
+                    @{
+                        name = $_.Name
+                        path = $_.FullName
+                        type = if ($_.PSIsContainer) { 'directory' } else { 'file' }
+                        size = if ($_.PSIsContainer) { $null } else { [Int64]$_.Length }
+                        last_write_utc = $_.LastWriteTimeUtc.ToString('o')
+                    }
+                })
+            return @{ directory = @{ path = $path; entries = $entries } }
+        }
+        'guest_make_dir' {
+            $path = Get-AbsolutePath ([string]$Body.path)
+            $created = -not [IO.Directory]::Exists($path)
+            if ($created) { [IO.Directory]::CreateDirectory($path) | Out-Null }
+            # Asking twice is not an error; the answer says whether it was made now.
+            return @{ directory = @{ path = $path; created = $created } }
+        }
+        'guest_rename' {
+            $path = Get-AbsolutePath ([string]$Body.path)
+            $newName = [string]$Body.new_name
+            if ($newName -notmatch '^[^\\/:*?"<>|]{1,255}$' -or $newName -in @('.', '..')) {
+                throw 'new_name must be a single file or directory name.'
+            }
+            $parent = [IO.Path]::GetDirectoryName($path)
+            if (-not $parent) { throw 'A drive root cannot be renamed.' }
+            $target = [IO.Path]::Combine($parent, $newName)
+            if ([IO.Directory]::Exists($target) -or [IO.File]::Exists($target)) {
+                throw "The destination already exists: $target"
+            }
+            if ([IO.Directory]::Exists($path)) {
+                [IO.Directory]::Move($path, $target)
+            } elseif ([IO.File]::Exists($path)) {
+                [IO.File]::Move($path, $target)
+            } else {
+                throw "Guest path not found: $path"
+            }
+            return @{ entry = @{ path = $target; previous_path = $path } }
+        }
+        'guest_delete' {
+            $path = Get-AbsolutePath ([string]$Body.path)
+            if ($path -eq [IO.Path]::GetPathRoot($path)) { throw 'A drive root cannot be deleted.' }
+            $recursive = [bool]$Body.recursive
+            if ([IO.File]::Exists($path)) {
+                [IO.File]::Delete($path)
+                return @{ deleted = @{ path = $path; type = 'file' } }
+            }
+            if (-not [IO.Directory]::Exists($path)) { throw "Guest path not found: $path" }
+            # A non-empty directory is refused unless the caller said recursive,
+            # so a stray click cannot take a tree with it.
+            [IO.Directory]::Delete($path, $recursive)
+            return @{ deleted = @{ path = $path; type = 'directory'; recursive = $recursive } }
+        }
         'guest_assemble_file' {
             $path = [IO.Path]::GetFullPath([string]$Body.path)
             $parts = [IO.Path]::GetFullPath([string]$Body.parts_directory)

@@ -137,17 +137,22 @@ class FakeSftp:
             raise IOError("No such file")
         return object()
 
-    def put(self, local: str, remote: str) -> None:
+    def put(self, local: str, remote: str, callback: Any = None) -> None:
         data = Path(local).read_bytes()
         if self.client.corrupt_upload:
             data = data[::-1]
         self.client.files[_norm(remote)] = data
+        if callback is not None:
+            # paramiko reports the block it just wrote; one block is enough here.
+            callback(len(data), len(data))
 
-    def get(self, remote: str, local: str) -> None:
+    def get(self, remote: str, local: str, callback: Any = None) -> None:
         data = self.client.files[_norm(remote)]
         if self.client.corrupt_download:
             data = data[:-1]
         Path(local).write_bytes(data)
+        if callback is not None:
+            callback(len(data), len(data))
 
     def remove(self, path: str) -> None:
         self.client.files.pop(_norm(path), None)

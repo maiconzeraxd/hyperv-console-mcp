@@ -1536,6 +1536,48 @@ rendered from a live VM — the capture path needs an elevated session.
 - Still open: waves 3–5 (file manager, lab/debugger, matrix), the `docs/DASHBOARD.md` rewrite,
   and the console cadence measurements for `docs/PERFORMANCE.md`.
 
+### 2026-10-29 — dashboard wave 3: the file manager, host roots and the guest half
+
+- **The host side is four roots, not a disk.** `service/files.py` (`FileService`) browses
+  `lab`, `evidence`, `transfer` and `media` — `HOST_ROOTS` in `service/_base.py` maps each
+  name to its setting — and every path is resolved and then checked against the resolved
+  root, so `..` and an absolute path elsewhere both fail with the same refusal. The page
+  gets `file_roots` (name, path, whether it exists) and draws its picker from that rather
+  than from a hard-coded list.
+- **A guest directory listing, a folder, a rename and a delete — on both transports.**
+  `guest_list_dir`, `guest_make_dir`, `guest_rename` and `guest_delete` are structured guest
+  operations: a `switch` arm in `transport/guest_operations.ps1` for SSH and the matching
+  block in `HyperVBridge.ps1` for PowerShell Direct, with both `GUEST_OPERATIONS` sets
+  updated. The duplication is the established pattern for the guest half, and
+  `tests/test_transport_conformance.py` now holds the four to one contract over both.
+- **Deleting is the only thing that needs a second look.** `host_delete` and `guest_delete`
+  take `confirm_path` and refuse anything that is not the exact path, and a non-empty
+  directory additionally needs `recursive=True`; the guest script refuses the same tree
+  without the flag, so the confirmation is not the only barrier. Neither root itself can be
+  renamed or deleted.
+- **A transfer says how far it got.** `ProgressReporter` was already on the bus; the
+  transports now take an `on_progress` callback (SFTP's `put`/`get` callback, and the two
+  ends of a `Copy-Item` for PowerShell Direct, which reports nothing in between and does
+  not pretend otherwise). `_TransferProgress` throttles that to one event per whole percent
+  in the 5–90 band, leaving 99 for the verified digest — a 100 MB file is thousands of
+  blocks and none of them deserves a line in the feed.
+- **Transfers may start anywhere under a configured root.** `guest_put_file` used to accept
+  only `transfer_root`; a staged package lives under `lab_root`, so the window copying it in
+  one hop would have needed a detour through the transfer folder. `_confined_to_roots`
+  replaces `_confined_path` and allows any of the four, and
+  `test_guest_put_file_stays_inside_a_configured_root` documents both the refusal and the
+  widening.
+- **Nine tools, one opt-in family.** The file manager is its own `files` toolset: neither
+  `safe` nor `lab` pays for nine schemas a conversation would carry for a task the operator
+  does from the window, and `all` is 64 tools.
+- Tests: `tests/test_files.py` (root confinement, directory-first ordering, idempotent
+  mkdir, rename refusals, confirm-gated delete, recursive refusal, the progress band and its
+  throttle), the four operations over both transports in the conformance file, and the
+  service-layout test now counts `files` as a domain and reads only `*Service` classes so a
+  private helper's `__init__` is not mistaken for a method with two homes.
+- Still open: the two-panel page itself, waves 4–5, the `docs/DASHBOARD.md` rewrite, and the
+  console cadence measurements for `docs/PERFORMANCE.md`.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,

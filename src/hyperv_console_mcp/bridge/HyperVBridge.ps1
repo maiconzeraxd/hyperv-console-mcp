@@ -1006,6 +1006,101 @@ function Invoke-BridgeOperation {
                 }
             $result = @{ vm = $vm.Name; file = $guestResult }
         }
+        'guest_list_dir' {
+            $vm = Get-ExactVm -Name $request.vm
+            $encodedPath = Convert-ToBase64Text -Text ([string]$request.path)
+            $guestResult = Invoke-GuestQuery -Vm $vm -Request $request -Arguments $encodedPath -Query {
+                param($EncodedPath)
+                $path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedPath))
+                if (-not [IO.Path]::IsPathRooted($path)) { throw 'The guest path must be absolute.' }
+                $path = [IO.Path]::GetFullPath($path)
+                if (-not [IO.Directory]::Exists($path)) {
+                    throw [IO.DirectoryNotFoundException]::new("Guest directory not found: $path")
+                }
+                # Directories first, then files, each by name: the order the page
+                # draws is the order the guest answered with.
+                $entries = @([IO.DirectoryInfo]::new($path).EnumerateFileSystemInfos() |
+                    Sort-Object -Property @{ Expression = { -not $_.PSIsContainer } }, Name |
+                    Select-Object -First 500 | ForEach-Object {
+                        [pscustomobject]@{
+                            name = $_.Name
+                            path = $_.FullName
+                            type = if ($_.PSIsContainer) { 'directory' } else { 'file' }
+                            size = if ($_.PSIsContainer) { $null } else { [Int64]$_.Length }
+                            last_write_utc = $_.LastWriteTimeUtc.ToString('o')
+                        }
+                    })
+                [pscustomobject]@{ path = $path; entries = $entries }
+            }
+            $result = @{ vm = $vm.Name; directory = $guestResult }
+        }
+        'guest_make_dir' {
+            $vm = Get-ExactVm -Name $request.vm
+            $encodedPath = Convert-ToBase64Text -Text ([string]$request.path)
+            $guestResult = Invoke-GuestQuery -Vm $vm -Request $request -Arguments $encodedPath -Query {
+                param($EncodedPath)
+                $path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedPath))
+                if (-not [IO.Path]::IsPathRooted($path)) { throw 'The guest path must be absolute.' }
+                $path = [IO.Path]::GetFullPath($path)
+                $created = -not [IO.Directory]::Exists($path)
+                if ($created) { [void][IO.Directory]::CreateDirectory($path) }
+                # Asking twice is not an error; the answer says whether it was made now.
+                [pscustomobject]@{ path = $path; created = $created }
+            }
+            $result = @{ vm = $vm.Name; directory = $guestResult }
+        }
+        'guest_rename' {
+            $vm = Get-ExactVm -Name $request.vm
+            $encodedPath = Convert-ToBase64Text -Text ([string]$request.path)
+            $guestResult = Invoke-GuestQuery -Vm $vm -Request $request `
+                -Arguments $encodedPath, ([string]$request.new_name) -Query {
+                    param($EncodedPath, $NewName)
+                    $path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedPath))
+                    if (-not [IO.Path]::IsPathRooted($path)) { throw 'The guest path must be absolute.' }
+                    $path = [IO.Path]::GetFullPath($path)
+                    if ($NewName -notmatch '^[^\\/:*?"<>|]{1,255}$' -or $NewName -in @('.', '..')) {
+                        throw 'new_name must be a single file or directory name.'
+                    }
+                    $parent = [IO.Path]::GetDirectoryName($path)
+                    if (-not $parent) { throw 'A drive root cannot be renamed.' }
+                    $target = [IO.Path]::Combine($parent, $NewName)
+                    if ([IO.Directory]::Exists($target) -or [IO.File]::Exists($target)) {
+                        throw "The destination already exists: $target"
+                    }
+                    if ([IO.Directory]::Exists($path)) {
+                        [IO.Directory]::Move($path, $target)
+                    } elseif ([IO.File]::Exists($path)) {
+                        [IO.File]::Move($path, $target)
+                    } else {
+                        throw "Guest path not found: $path"
+                    }
+                    [pscustomobject]@{ path = $target; previous_path = $path }
+                }
+            $result = @{ vm = $vm.Name; entry = $guestResult }
+        }
+        'guest_delete' {
+            $vm = Get-ExactVm -Name $request.vm
+            $encodedPath = Convert-ToBase64Text -Text ([string]$request.path)
+            $recursive = [bool](Get-RequestField -Request $request -Name 'recursive' -Default $false)
+            $guestResult = Invoke-GuestQuery -Vm $vm -Request $request `
+                -Arguments $encodedPath, $recursive -Query {
+                    param($EncodedPath, $Recursive)
+                    $path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($EncodedPath))
+                    if (-not [IO.Path]::IsPathRooted($path)) { throw 'The guest path must be absolute.' }
+                    $path = [IO.Path]::GetFullPath($path)
+                    if ($path -eq [IO.Path]::GetPathRoot($path)) { throw 'A drive root cannot be deleted.' }
+                    if ([IO.File]::Exists($path)) {
+                        [IO.File]::Delete($path)
+                        return [pscustomobject]@{ path = $path; type = 'file'; recursive = $false }
+                    }
+                    if (-not [IO.Directory]::Exists($path)) { throw "Guest path not found: $path" }
+                    # A non-empty directory is refused unless the caller said
+                    # recursive, so a stray click cannot take a tree with it.
+                    [IO.Directory]::Delete($path, [bool]$Recursive)
+                    [pscustomobject]@{ path = $path; type = 'directory'; recursive = [bool]$Recursive }
+                }
+            $result = @{ vm = $vm.Name; deleted = $guestResult }
+        }
         'guest_read_chunk' {
             $vm = Get-ExactVm -Name $request.vm
             $encodedPath = Convert-ToBase64Text -Text ([string]$request.path)

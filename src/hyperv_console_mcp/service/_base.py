@@ -33,6 +33,8 @@ KD_SYMBOL_SERVER = "https://msdl.microsoft.com/download/symbols"
 GATED_TOOLS = frozenset({
     "vm_power", "checkpoint", "guest_exec",
     "guest_write_file", "guest_put_file", "guest_get_file",
+    "guest_make_dir", "guest_rename", "guest_delete",
+    "host_make_dir", "host_rename", "host_delete",
     "guest_ssh_provision", "guest_ssh_deprovision",
     "guest_credential", "guest_autologon_configure", "guest_config_revert",
     "lab_init", "lab_stage", "lab_collect", "lab_run", "lab_cycle",
@@ -90,6 +92,39 @@ def _confined_path(value: str, label: str, root: Path, suffix: str) -> str:
     if full == base or not full.is_relative_to(base):
         raise PolicyError(f"{label} must remain under the configured root: {base}")
     return str(full)
+
+
+# The host directories this server may touch by path: a package to stage,
+# evidence to collect, a transfer to land, media to mount. The file manager
+# browses exactly these, and a transfer may read from or write into only these,
+# so a path that names C:\Windows fails here rather than in the page.
+HOST_ROOTS: dict[str, str] = {
+    "lab": "lab_root",
+    "evidence": "evidence_root",
+    "transfer": "transfer_root",
+    "media": "iso_root",
+}
+
+
+def _confined_to_roots(value: str, label: str, settings: Any) -> str:
+    """Resolve a host path, requiring it to sit inside one of the host roots."""
+    text = _text(value, label, 32_768)
+    full = Path(os.path.abspath(os.path.expandvars(os.path.expanduser(text)))).resolve()
+    roots = [
+        Path(
+            os.path.abspath(
+                os.path.expandvars(os.path.expanduser(str(getattr(settings, field))))
+            )
+        ).resolve()
+        for field in HOST_ROOTS.values()
+    ]
+    for root in roots:
+        if full == root or full.is_relative_to(root):
+            return str(full)
+    raise PolicyError(
+        f"{label} must remain under a configured root: "
+        + ", ".join(str(root) for root in roots)
+    )
 
 
 def _command_summary(command: str) -> dict[str, Any]:
@@ -240,7 +275,7 @@ class ServiceBase:
         return invoke()
 
     def _approve(
-        self, operation: str, vm_name: str, summary: dict[str, Any] | None = None
+        self, operation: str, vm_name: str | None, summary: dict[str, Any] | None = None
     ) -> AbstractContextManager[None]:
         """One dashboard approval per tool call; nested mutations inherit it."""
         from ..events import approval_scope

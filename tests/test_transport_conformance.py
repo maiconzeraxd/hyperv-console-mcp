@@ -27,6 +27,7 @@ from test_ssh_transport import (
     FakeRejectPolicy,
     FakeSSHClient,
     FakeSSHException,
+    _default_guest,
     provision,
 )
 
@@ -54,6 +55,37 @@ def _ssh_exec(command: str) -> dict[str, Any]:
     }
 
 
+def _guest_result(operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """The file-manager operations, answered the way the guest script answers.
+
+    One body for both transports: the PowerShell Direct fake wraps it in the
+    bridge envelope, the SSH fake hands it to the stub client's guest handler.
+    If the two transports ever disagree about these shapes, it is the service
+    callers below that notice, which is the point of this file.
+    """
+    path = str(payload["path"])
+    if operation == "guest_list_dir":
+        return {"directory": {"path": path, "entries": [
+            {"name": "Packages", "path": path + "\\Packages", "type": "directory",
+             "size": None, "last_write_utc": "2026-10-29T00:00:00+00:00"},
+            {"name": "run.log", "path": path + "\\run.log", "type": "file",
+             "size": 12, "last_write_utc": "2026-10-29T00:00:00+00:00"},
+        ]}}
+    if operation == "guest_make_dir":
+        return {"directory": {"path": path, "created": True}}
+    if operation == "guest_rename":
+        parent = path.rpartition("\\")[0]
+        return {"entry": {
+            "path": parent + "\\" + str(payload["new_name"]), "previous_path": path,
+        }}
+    if operation == "guest_delete":
+        return {"deleted": {
+            "path": path, "type": "directory",
+            "recursive": bool(payload.get("recursive")),
+        }}
+    raise AssertionError(f"the guest was asked for an operation it does not serve: {operation}")
+
+
 class ConformingBridge:
     """The bridge envelope, with the guest-side behaviour the real one has."""
 
@@ -66,6 +98,8 @@ class ConformingBridge:
     ) -> dict[str, Any]:
         self.calls.append((operation, dict(payload)))
         vm = payload.get("vm")
+        if operation in {"guest_list_dir", "guest_make_dir", "guest_rename", "guest_delete"}:
+            return {"vm": vm, **_guest_result(operation, payload)}
         if operation == "guest_exec":
             limit = int(payload.get("max_output_chars") or LIMIT)
             report = _ssh_exec(payload["command"])
@@ -124,9 +158,11 @@ def fake_world(monkeypatch: pytest.MonkeyPatch):
     }.items():
         setattr(FakeSSHClient, attribute, value)
     FakeSSHClient.exec_handler = _ssh_exec
+    FakeSSHClient.guest_handler = _guest_result
     ssh_module._CLIENTS.clear()
     _HEALTH.clear()
     yield
+    FakeSSHClient.guest_handler = _default_guest
     ssh_module._CLIENTS.clear()
     _HEALTH.clear()
 
@@ -206,6 +242,37 @@ def test_put_then_get_round_trips_the_same_bytes(case: Case, tmp_path: Path) -> 
     assert target.read_bytes() == payload
     assert fetched["file"]["sha256"] == written["file"]["sha256"]
     assert fetched["file"]["transport"] == case.name
+
+
+def test_the_file_manager_answers_the_same_shape_from_both_transports(case: Case) -> None:
+    """Listing, mkdir and rename: one set of keys whichever transport served it."""
+    listed = case.service.guest_list_dir(VM, r"C:\DriverLab")
+    assert listed["transport"] == case.name
+    assert listed["vm"] == VM
+    assert listed["directory"]["path"] == r"C:\DriverLab"
+    assert [entry["name"] for entry in listed["directory"]["entries"]] == [
+        "Packages", "run.log",
+    ]
+
+    made = case.service.guest_make_dir(VM, r"C:\DriverLab\new")
+    assert made["directory"] == {"path": r"C:\DriverLab\new", "created": True}
+    assert made["transport"] == case.name
+
+    renamed = case.service.guest_rename(VM, r"C:\DriverLab\new", "renamed")
+    assert renamed["entry"] == {
+        "path": r"C:\DriverLab\renamed", "previous_path": r"C:\DriverLab\new",
+    }
+    assert renamed["transport"] == case.name
+
+
+def test_a_delete_carries_the_recursive_flag_to_both_transports(case: Case) -> None:
+    deleted = case.service.guest_delete(
+        VM, r"C:\DriverLab\old", r"C:\DriverLab\old", recursive=True
+    )
+    assert deleted["deleted"] == {
+        "path": r"C:\DriverLab\old", "type": "directory", "recursive": True,
+    }
+    assert deleted["transport"] == case.name
 
 
 def test_a_structured_operation_outside_the_shared_set_is_refused_first(case: Case) -> None:
