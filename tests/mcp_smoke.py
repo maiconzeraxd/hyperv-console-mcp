@@ -14,6 +14,7 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
@@ -25,24 +26,24 @@ CONFIGURATIONS = (
     (
         "safe",
         {},
-        30,
+        31,
         {
-            "core": 8, "guest": 7, "console": 4, "config": 3,
+            "core": 9, "guest": 7, "console": 4, "config": 3,
             "credentials": 2, "media": 3, "ssh": 3,
         },
     ),
     (
         "lab profile",
         {"HYPERV_MCP_PROFILE": "lab"},
-        45,
-        {"core": 8, "guest": 7, "console": 4, "config": 3, "lab": 12, "kd": 9, "debug": 2},
+        46,
+        {"core": 9, "guest": 7, "console": 4, "config": 3, "lab": 12, "kd": 9, "debug": 2},
     ),
     (
         "all toolsets",
         {"HYPERV_MCP_TOOLSETS": "all"},
-        67,
+        68,
         {
-            "core": 8, "guest": 7, "console": 4, "config": 3, "credentials": 2,
+            "core": 9, "guest": 7, "console": 4, "config": 3, "credentials": 2,
             "media": 3, "ssh": 3, "serial": 5, "lab": 12, "kd": 9, "debug": 2,
             "files": 9,
         },
@@ -68,6 +69,14 @@ async def check(
         # host would keep that policy after the smoke exits, and the next window
         # would find itself read-only. tests/live_service_host.py covers the split.
         HYPERV_MCP_SHARED_SERVICE="false",
+        # A throwaway access file, for the same reason: a level the operator
+        # saved for this VM is more specific than the flags above and wins over
+        # them, so without this the denied call below asserts against the host's
+        # own policy — and on a host where NORTH-Test is `lab` it is refused by
+        # Hyper-V's own permissions instead of by the allowlist.
+        HYPERV_MCP_ACCESS_FILE=str(
+            Path(tempfile.mkdtemp(prefix="hvmcp-smoke-")) / "access.json"
+        ),
     )
     environment.update(extra)
     parameters = StdioServerParameters(

@@ -224,22 +224,54 @@ class EventBus:
             correlation = uuid.uuid4().hex
             started = utc_now()
             self.publish(name, "started", vm_name=vm_name, correlation_id=correlation, started_utc=started)
+            _log(name, "started", vm_name, correlation)
             try:
                 yield correlation
             except Exception as exc:
+                code = _text(getattr(exc, "code", type(exc).__name__), 128)
                 self.publish(
                     name, "failed", vm_name=vm_name, correlation_id=correlation,
                     started_utc=started, finished_utc=utc_now(),
-                    error_code=_text(getattr(exc, "code", type(exc).__name__), 128),
+                    error_code=code,
                     message="Operation failed; see the tool result for details.",
                 )
+                _log(name, "failed", vm_name, correlation, level="error", detail=code)
                 raise
             self.publish(
                 name, "completed", vm_name=vm_name, correlation_id=correlation,
                 started_utc=started, finished_utc=utc_now(), progress=100,
             )
+            _log(name, "completed", vm_name, correlation)
         finally:
             _operation_depth.reset(token)
+
+
+def _log(
+    operation: str,
+    phase: str,
+    vm_name: str | None,
+    correlation: str,
+    *,
+    level: str = "info",
+    detail: str = "",
+) -> None:
+    """Mirror one operation phase into the unified log stream.
+
+    The event says *what* happened and the log says *where from*, under the same
+    correlation id, so a dock that groups by id shows the operation and the
+    subsystem lines it produced together. A log that cannot be written must not
+    fail the operation it describes.
+    """
+    from .logs import LOGS, source_for
+
+    message = f"{operation} {phase}" + (f" ({detail})" if detail else "")
+    try:
+        LOGS.publish(
+            source_for(operation), message,
+            vm=vm_name, level=level, correlation_id=correlation,
+        )
+    except (OSError, ValidationError):
+        pass
 
 
 class ProgressReporter:

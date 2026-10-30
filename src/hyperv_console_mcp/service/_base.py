@@ -183,6 +183,49 @@ class ServiceBase:
         # A window that asks for an hour would hold a worker thread for an hour.
         return EVENTS.wait(after, min(max(float(timeout_seconds), 0.0), 30.0))
 
+    def logs_subscribe(
+        self,
+        after: int = 0,
+        *,
+        vm: str | None = None,
+        source: str | None = None,
+        level: str | None = None,
+        correlation_id: str | None = None,
+        timeout_seconds: float = 15.0,
+    ) -> dict[str, Any]:
+        """The unified log stream, from an offset, optionally held open.
+
+        The event bus says an operation started and finished; this says what the
+        subsystems did inside it. One door, one offset, the same filters a dock
+        offers, and the same shape as ``events_wait`` so a client can subscribe
+        to both the same way.
+        """
+        from ..logs import LEVELS, LOGS, SOURCES
+
+        if not isinstance(after, int) or isinstance(after, bool) or after < 0:
+            raise ValidationError("after must be a non-negative integer.")
+        if source is not None and str(source).casefold() not in SOURCES:
+            raise ValidationError(
+                f"Unknown log source {source!r}. Known: {', '.join(sorted(SOURCES))}."
+            )
+        if level is not None and str(level).casefold() not in LEVELS:
+            raise ValidationError(
+                f"Unknown log level {level!r}. Known: {', '.join(LEVELS)}."
+            )
+        if correlation_id is not None and not isinstance(correlation_id, str):
+            raise ValidationError("correlation_id must be a string.")
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+            raise ValidationError("timeout_seconds must be a number.")
+        # A window that asks for an hour would hold a worker thread for an hour.
+        return LOGS.wait(
+            after,
+            timeout_seconds=min(max(float(timeout_seconds), 0.0), 30.0),
+            vm=vm,
+            source=source,
+            level=level,
+            correlation_id=correlation_id,
+        )
+
     def reload_policy(self) -> dict[str, Any]:
         """Re-read the environment and the operator's access file.
 

@@ -2234,6 +2234,49 @@ host without the WebView2 runtime — had no way to open VMConnect or to prepare
   bundle in `dist/` carries it (`requireAdministrator` is in the built executable), but the Inno
   installer is built only by the release workflow.
 
+### 2026-10-30 — v0.4 wave 1: one log stream, from an offset, with the secret taken out
+
+The v0.4 prompt's dock needs a stream that says what the subsystems did, not only that an
+operation started and finished. The event bus already had the shape — a sequence, a condition,
+daily JSONL — so this is an extension of it rather than a second bus: `logs.py` holds a `LogBus`
+whose records carry `timestamp, source, vm, level, correlation_id, message`, and
+`EventBus.operation` mirrors each started/completed/failed into it under the operation's own
+correlation id.
+
+- **The sources are a closed set** (`worker`, `kd`, `serial`, `ssh`, `wmi`, `lab`, `service`)
+  and `source_for(operation)` is the single mapping from a tool name to one of them, so a
+  dock's per-source filter means the same thing everywhere. An unknown source or level is
+  refused instead of stored: a filter over an open set filters nothing.
+- **A level is a floor, not an equality** — `level="warning"` returns warnings and errors, which
+  is what a dock that says "show me problems" means.
+- **Readers resume from an offset and never hold the writer.** `snapshot`/`wait` slice the record
+  list without the writer's lock, and `logs_subscribe` joins `events_wait` in the host's
+  `LOCK_FREE` set, so a 30-second subscription does not stop the service from working. A test
+  holds a reader open and asserts a publish still returns immediately.
+- **Redaction happens before storage**, in one function: `password=`, `token:`, `secret`,
+  `api_key` and bare `key=` assignments are masked, and so is a long base64 blob — but not a hex
+  digest, which is a fact worth keeping and is how the two are told apart. `guest_exec`'s command
+  never enters a message at all: the line says the operation started and finished.
+- **Persisted as `logs-YYYYMMDD.jsonl`** beside the event logs, pruned on the same retention
+  setting, and a log that cannot be written never fails the operation it describes.
+- Tools: `logs_subscribe` (core, read-only) is the MCP door; `ServiceBase.logs_subscribe`
+  validates the offset, the source, the level and the timeout, and clamps the wait to 30 s.
+- Tests: `tests/test_logs.py` (nine) — the record shape, the offset, the four filters, a refused
+  source and level, the redaction of a password/token/key and the survival of a plain line, the
+  daily file, the non-blocking reader, and a `guest_exec` producing two lines that share the
+  correlation id its events carry and contain no command text.
+- Counts moved with the tool: core 8→9, safe 30→31, lab 45→46, all 67→68, in
+  `tests/test_server.py`, `tests/mcp_smoke.py` and the README table.
+- Gate: 1130 passed / 1 skipped, ruff clean, MCP stdio smoke green at 31 / 46 / 68.
+- **The smoke was asserting against this host's own policy.** It sets `HYPERV_MCP_ALLOW_*` to
+  false and expects `not_authorized`, but a level the operator saved for `NORTH-Test` is more
+  specific and wins, so on this machine the refusal was Hyper-V's `access_denied` instead — the
+  run failed for a reason that had nothing to do with the change. It now points
+  `HYPERV_MCP_ACCESS_FILE` at a throwaway file.
+- **Not validated live:** no real service host has streamed to a dock yet — there is no dock
+  until the interface wave — and the stream has been exercised in-process and against fakes
+  only. `kd_output_subscribe`, the roadmap's other streaming enabler, is not in this wave.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three

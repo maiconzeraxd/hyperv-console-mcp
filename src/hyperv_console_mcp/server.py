@@ -762,6 +762,28 @@ def create_server(
         return await _invoke(service.event_snapshot, after_sequence)
 
     @tool(
+        "logs_subscribe", annotations=READ_ONLY,
+        description="Read the unified log stream from an offset: one record per line with timestamp, "
+        "source (worker, kd, serial, ssh, wmi, lab, service), VM, level, correlation id and a "
+        "redacted message. Filters narrow by VM, source, a minimum level and correlation id; the "
+        "call is held open until a matching line arrives or timeout_seconds runs out, so a client "
+        "subscribes instead of polling. Commands, typed text and secrets never appear.",
+    )
+    async def logs_subscribe(
+        after_sequence: int = 0,
+        vm_name: str | None = None,
+        source: str | None = None,
+        level: str | None = None,
+        correlation_id: str | None = None,
+        timeout_seconds: float = 15.0,
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.logs_subscribe, after_sequence,
+            vm=vm_name, source=source, level=level,
+            correlation_id=correlation_id, timeout_seconds=timeout_seconds,
+        )
+
+    @tool(
         "console_info", annotations=READ_ONLY,
         description="Read guest video-head resolutions for mouse coordinate planning.",
     )

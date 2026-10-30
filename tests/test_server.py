@@ -36,7 +36,7 @@ def test_the_safe_profile_exposes_the_everyday_surface(server) -> None:
     # The safe profile registers only its own families — core, guest, console,
     # config, credentials, media and ssh. The debugger, the lab cycle, the serial
     # console and the debug setup are opt-in through HYPERV_MCP_TOOLSETS.
-    assert len(tools) == 30
+    assert len(tools) == 31
     assert {
         "kd_attach", "kd_status", "kd_inspect", "debug_status", "debug_setup",
         "lab_run", "lab_cycle", "serial_connect", "vm_inject_nmi",
@@ -98,7 +98,7 @@ def test_enabling_every_toolset_exposes_the_whole_surface() -> None:
         ),
     )
     tools = {tool.name: tool for tool in anyio.run(create_server(service).list_tools)}
-    assert len(tools) == 67
+    assert len(tools) == 68
     assert tools["lab_run"].annotations.destructive_hint is True
     assert tools["lab_cycle"].annotations.destructive_hint is True
     assert tools["lab_verify"].annotations.read_only_hint is True
@@ -149,11 +149,11 @@ def test_the_host_report_states_the_surface_it_registered() -> None:
     assert result.is_error is False
     toolsets = result.structured_content["toolsets"]
     assert toolsets["counts"] == {
-        "core": 8, "guest": 7, "console": 4, "config": 3, "credentials": 2,
+        "core": 9, "guest": 7, "console": 4, "config": 3, "credentials": 2,
         "media": 3, "ssh": 3, "serial": 5, "lab": 12, "kd": 9, "debug": 2,
         "files": 9,
     }
-    assert toolsets["total"] == 67
+    assert toolsets["total"] == 68
     assert toolsets["disabled"] == []
 
 
@@ -175,7 +175,7 @@ def test_every_tool_belongs_to_a_known_toolset() -> None:
         )
         if isinstance(first, ast.Constant):
             names.add(first.value)
-    assert len(names) == 67
+    assert len(names) == 68
     assert {toolset_for(name) for name in names} <= TOOLSETS
     # The budget the roadmap asks for is "~40" per profile. `safe` holds it
     # exactly; `lab` is 45 since phase 6 added Driver Verifier and the driver
@@ -190,7 +190,7 @@ def test_every_tool_belongs_to_a_known_toolset() -> None:
     # switch is its own tool because `guest_report` is read-only and a switch
     # that also read would make that annotation a lie. The file manager is its
     # own opt-in family, so neither default pays for it.
-    for profile, limit in (("safe", 40), ("lab", 45)):
+    for profile, limit in (("safe", 40), ("lab", 46)):
         enabled = DEFAULT_TOOLSETS[profile]
         visible = [name for name in names if toolset_for(name) in enabled]
         assert len(visible) <= limit, (profile, len(visible))
@@ -198,13 +198,13 @@ def test_every_tool_belongs_to_a_known_toolset() -> None:
     # asserts over a real stdio client, come from this same map.
     counts = Counter(toolset_for(name) for name in names)
     assert counts == {
-        "core": 8, "guest": 7, "console": 4, "config": 3, "credentials": 2,
+        "core": 9, "guest": 7, "console": 4, "config": 3, "credentials": 2,
         "media": 3, "ssh": 3, "serial": 5, "lab": 12, "kd": 9, "debug": 2,
         "files": 9,
     }
-    assert sum(counts.values()) == 67
-    assert sum(counts[family] for family in DEFAULT_TOOLSETS["safe"]) == 30
-    assert sum(counts[family] for family in DEFAULT_TOOLSETS["lab"]) == 45
+    assert sum(counts.values()) == 68
+    assert sum(counts[family] for family in DEFAULT_TOOLSETS["safe"]) == 31
+    assert sum(counts[family] for family in DEFAULT_TOOLSETS["lab"]) == 46
 
 
 def test_tool_calls_service_and_returns_structured_output(server) -> None:
