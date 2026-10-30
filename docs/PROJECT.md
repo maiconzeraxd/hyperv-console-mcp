@@ -1885,8 +1885,92 @@ rendered from a live VM — the capture path needs an elevated session.
   wizard screenshots are **not** in it: there is no installer binary to capture them from and
   the wizard has never been opened on a clean machine, so the page describes the window instead
   of linking to an image that does not exist.
-- Still to come in this wave: those screenshots, after the first clean-machine install, and the
-  service under `HyperVConsoleMCPSvc`.
+- Still to come in this wave: those screenshots, after the first clean-machine install. The
+  service under `HyperVConsoleMCPSvc` is decided against, below.
+
+### 2026-10-29 — the service stays per user, and why that is not a shortcut
+
+The install section asked for the host to run as a Windows service named
+`HyperVConsoleMCPSvc`, in *Hyper-V Administrators*, with `SeServiceLogonRight`. That would be a
+machine-wide process, and this product is not one. Five things break at once, and four of them
+are the security model:
+
+1. **The pipe is current-user-only.** `ipc._security()` builds a DACL that grants this user and
+   nobody else. A service account is not that user, so either the service cannot be reached or
+   the DACL has to widen to a group — and then every member of that group can drive Hyper-V
+   through it.
+2. **The peer check refuses it.** `_verify_server_process` requires the server's token to carry
+   the client's user SID. A service account fails that check by design; the check is what makes
+   a guessable pipe name safe.
+3. **The secrets are the user's.** The guest password and the KDNET key live in *this user's*
+   Windows Credential Manager under `HyperVConsoleMCP/<vm>`. A service account has its own
+   vault and cannot read it; moving them to a machine-wide store puts a guest's password where
+   every administrator can read it — the opposite of the "segredo nunca em claro" rule.
+4. **The state is the user's.** `%LOCALAPPDATA%\HyperVConsoleMCP` holds events, transfers,
+   evidence, receipts and logs. A service account would write them to its own profile, where the
+   operator who paid for the run cannot see them.
+5. **The configuration is the user's.** `Settings.from_env()` reads the environment the client
+   is started with; a service has none, so every setting would move into a machine-wide file —
+   and the second user of the same machine would inherit the first one's allowlist.
+
+So the answer is not a dispatcher. The host stays a per-user process, started on demand by the
+first client (`ensure_running()` → `_spawn`) and verified as a peer. It already outlives the
+client that started it, which is the property the service was wanted for; what it does not do is
+start at boot, and a boot-start service is precisely the shape that cannot hold a user's
+secrets.
+
+If the host should be up before anyone opens anything, the shape that keeps all five properties
+is a **per-user logon task** — `schtasks` with the user as principal, no elevation, the user's
+environment, the user's vault — rather than a service. That is a small addition to the routine
+and is not built here, because nothing in the wave needs the host running before the first
+client asks.
+
+What would change this decision: a deployment that genuinely serves several users of one
+machine from one host. That is a different product — a shared service with a per-user policy
+store and a per-user secret store in front of it — and it should not be grown out of this one by
+widening a DACL.
+
+## Install wave report
+
+**What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three
+questions that need a person (`vm`, `level`, `credential`) and writes the same `access.json` and
+the same stored password the operator tools write. §1: three paths, in the order a beginner
+should meet them — the installer on the releases page, `winget install
+maiconzeraxd.HyperVConsoleMCP`, and `scripts/install.ps1` documented as the advanced one. §2:
+the runtime is inside the download; `packaging/hyperv-console-mcp.spec` freezes four programs
+into one folder and the release workflow builds them on a tag. §3: `hyperv-setup` does the
+pre-check (edition, Hyper-V state, resumable after the restart), writes each detected client's
+config, adds the Start Menu shortcut, runs the self-test that names the failing step, and is
+idempotent — a second run reports `unchanged`. §4: one command, one click and a tray. §5:
+`--uninstall` removes the entries and the shortcut, and keeps credentials and data unless asked.
+§6: `docs/QUICKSTART.md`. §7: the build is ready to sign — `signtool` runs in CI when the secret
+is present and a `::warning::` names SmartScreen when it is not; Hyper-V is a pre-check answer,
+never a stack trace. §8: `tests/test_packaging.py` keeps the spec, the installer, the workflow
+and the winget manifests from drifting apart.
+
+**Definition of done, audited.**
+
+| Item | State |
+|---|---|
+| Download one thing → open → it works | **Partly.** The frozen folder runs on this host; the `.exe` installer around it has never been compiled. |
+| Three install paths | Installer script and winget manifests exist; neither has been run end to end. `scripts/install.ps1` is the only one exercised. |
+| Embedded runtime | **Done.** PyInstaller 6.22.3 built it here and the four programs ran. |
+| Install routine: pre-check, one UAC, service, clients, shortcuts, self-test, idempotent | **Done except the SCM service**, decided against with the reasoning above. The installer asks for *no* elevation at all, so it is one UAC fewer than promised. |
+| One click / one command + tray + wizard | Done. |
+| Uninstall | Done in the routine; the Inno uninstaller that would call it has not been compiled. |
+| Beginner README with GIFs | **Text only.** No installer exists to capture screens from. |
+| Ready to sign | Done in CI; nothing has been signed. |
+| Hyper-V as a hard prerequisite with a readable message | Done and validated on this host (`action: proceed`). |
+| Tests and CI | Done; the release workflow has never run. |
+| Offline install finishes once downloaded | **Untested.** The bundle carries its own interpreter and data, but no machine has been taken offline and installed on. |
+
+**Not validated live, and therefore not claimed.** No clean Windows machine has run the
+installer, because there is no installer: Inno Setup is not installed here, so `installer.iss`
+has never been compiled. The release workflow has never run on GitHub. Nothing has been signed.
+The winget manifests have never been through `winget validate`. The bundle built here was built
+without `pywebview` and `pystray`, so its window is the tkinter one and its tray is absent — CI
+installs `.[dev,ui]`. Those five are the first things to close after this wave, in that order:
+compile the installer, run it on a clean machine, then sign, then submit the manifest.
 
 ## Phase 4 report
 
