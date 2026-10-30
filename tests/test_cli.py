@@ -150,6 +150,32 @@ def test_help_lists_the_two_doors(
     assert ran == []
 
 
+def test_the_help_asks_stdout_for_utf8(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A captured help takes the locale's code page, and cp1252 has no em dash.
+
+    The frozen launcher is windowed, so its stdout is whatever the caller gave
+    it: a console, or a pipe whose encoding is the locale's. The second case is
+    where the dash came back as a lone byte.
+    """
+
+    class _Stream:
+        def __init__(self) -> None:
+            self.asked: list[str] = []
+            self.written = ""
+
+        def reconfigure(self, *, encoding: str) -> None:
+            self.asked.append(encoding)
+
+        def write(self, text: str) -> None:
+            self.written += text
+
+    stream = _Stream()
+    monkeypatch.setattr(cli.sys, "stdout", stream)
+    assert cli.main(["--help"]) == 0
+    assert stream.asked == ["utf-8"]
+    assert "—" in stream.written
+
+
 def test_the_console_script_is_the_launcher_not_the_server() -> None:
     """The shortcut runs this bare command; it must not drift back to the server.
 

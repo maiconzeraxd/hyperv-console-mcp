@@ -41,6 +41,24 @@ hyperv-console-mcp — the MCP server, and the window that belongs to it.
   hyperv-console-mcp --version    print the version and exit.
 """
 
+
+def _say(text: str) -> None:
+    """Write to stdout as UTF-8, whatever the stream was opened with.
+
+    The help goes to a console, where the text is written through the console
+    API and needs no encoding; captured to a pipe, it takes the locale's code
+    page, and cp1252 turns the em dash into a byte no reader can decode. The
+    server writes UTF-8 on this same stream, so the help matches it.
+    """
+    stream = sys.stdout
+    try:
+        stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError, OSError):
+        # A stream that cannot be reconfigured still gets the text.
+        pass
+    stream.write(text)
+
+
 def wants_window(stream: Any) -> bool:
     """Whether this invocation came from a person rather than from a client.
 
@@ -57,6 +75,7 @@ def wants_window(stream: Any) -> bool:
         # its end still asked for the server.
         return False
 
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if not arguments:
@@ -67,14 +86,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if first in WINDOW_FLAGS or first.startswith("--vm="):
         return _window([item for item in arguments if item not in WINDOW_ONLY])
     if first in ("-h", "--help"):
-        print(USAGE, end="")
+        _say(USAGE)
         return 0
     if first == "--version":
         from . import __version__
 
-        print(__version__)
+        _say(f"{__version__}\n")
         return 0
     return _serve()
+
 
 def _serve() -> int:
     from .server import main as server_main
@@ -82,11 +102,13 @@ def _serve() -> int:
     server_main()
     return 0
 
+
 def _window(arguments: list[str]) -> int:
     from .dashboard import main as dashboard_main
 
     dashboard_main(arguments)
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

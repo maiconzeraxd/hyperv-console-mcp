@@ -2,7 +2,7 @@
 
 A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/) server for **Hyper-V on Windows**. It combines VM management, checkpoints, PowerShell Direct diagnostics, synthetic keyboard/mouse input, console screenshots without VMConnect, installation media, serial consoles, and serial WinDbg preparation and a live kd.exe kernel-debugging session in one stdio server.
 
-**Alpha status:** 1012 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test and one assertion set that runs over both guest transports; the smoke checks each profile's tool surface, per toolset, over a real stdio client. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
+**Alpha status:** 1036 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test and one assertion set that runs over both guest transports; the smoke checks each profile's tool surface, per toolset, over a real stdio client. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
 
 ## Highlights
 
@@ -33,6 +33,24 @@ A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/)
   Console input has no network dependency.
 
 ## Install
+
+Three ways in, in the order to consider them:
+
+1. **The installer.** `HyperVConsoleMCP-Setup-<version>.exe` from the
+   [releases page](https://github.com/maiconzeraxd/hyperv-console-mcp/releases): one download,
+   no administrator prompt, and no Python — the runtime is inside it. It installs into
+   `%LOCALAPPDATA%\Programs\Hyper-V Console`, then runs `hyperv-setup` once, so the client
+   config, the shortcut and the self-test happen during the install.
+2. **winget.** `winget install maiconzeraxd.HyperVConsoleMCP`, once the manifest has been
+   accepted into `microsoft/winget-pkgs`. `packaging/winget/` holds the manifests this project
+   submits and `packaging/winget/README.md` says what changes per release.
+3. **From source**, below: what development and the lab use, and the only path that needs
+   Python.
+
+`scripts/install.ps1` runs the same routine for a machine where the package is already
+installed. It is the advanced path and not the first one: downloading and running a script as
+administrator is a habit worth not forming for a tool that runs as a service and controls
+Hyper-V.
 
 From the repository root, using a virtual environment is recommended:
 

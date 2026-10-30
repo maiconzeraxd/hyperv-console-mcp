@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
+from . import frozen
 from .errors import ValidationError
 
 CLIENTS = ("claude", "codex", "cursor")
@@ -46,6 +47,12 @@ def server_entry(*, uvx: bool = False, profile: str | None = None) -> dict[str, 
     """The one server entry both JSON clients and the TOML section carry."""
     if uvx:
         command, args = "uvx", ["hyperv-console-mcp"]
+    elif frozen.is_frozen():
+        # A frozen install has no interpreter to name and no module path to
+        # pass: the launcher beside this program is the server when a client
+        # runs it and the window when a person does, which is the one entry a
+        # shortcut and a client config should both point at.
+        command, args = str(frozen.sibling(frozen.LAUNCHER)), []
     else:
         # The interpreter running this install: guaranteed to have the package,
         # and the right one when several Pythons are on the machine.
@@ -157,11 +164,12 @@ def create_shortcut(path: Path) -> dict[str, Any]:
     """A Start Menu entry that opens the window, made by the shell's own COM object."""
     if os.name != "nt":
         return {"shortcut": None, "action": "skipped", "reason": "Windows only"}
-    if getattr(sys, "frozen", False):
-        # A frozen build ships one windowed executable: there is no interpreter
-        # to point at and no module path to pass, and the executable opens the
-        # window by itself when nothing is writing into its stdin.
-        target, arguments = Path(sys.executable), ""
+    if frozen.is_frozen():
+        # A frozen build's shortcut opens the launcher beside this program —
+        # not this program: re-running the installer from the Start Menu is the
+        # one thing a shortcut must never do. The launcher opens the window by
+        # itself when nothing is writing into its stdin.
+        target, arguments = frozen.sibling(frozen.LAUNCHER), ""
     else:
         python = Path(sys.executable)
         windowed = python.with_name("pythonw.exe")

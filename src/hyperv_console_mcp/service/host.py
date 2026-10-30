@@ -337,13 +337,22 @@ def service_log() -> Path:
     return local_root("service") / "service.log"
 
 
+def _spawn_command() -> list[str]:
+    """The host as a command: a module under an interpreter, a sibling when frozen."""
+    from ..frozen import HOST, is_frozen, sibling
+
+    if is_frozen():
+        return [str(sibling(HOST))]
+    return [sys.executable, "-m", "hyperv_console_mcp.service.host"]
+
+
 def _spawn() -> None:
     """Start the host detached, so it outlives the client that asked for it."""
     log = service_log()
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("ab") as stream:
         subprocess.Popen(
-            [sys.executable, "-m", "hyperv_console_mcp.service.host"],
+            _spawn_command(),
             stdin=subprocess.DEVNULL,
             stdout=stream,
             stderr=stream,

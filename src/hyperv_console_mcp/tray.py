@@ -15,8 +15,10 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+from pathlib import Path
 from typing import Any, Mapping
 
+from . import frozen
 from .errors import HyperVError
 
 TITLE = "Hyper-V Console"
@@ -69,8 +71,8 @@ def window_command() -> list[str]:
     The same entry point a person types and the shortcut runs, so there is
     still one door; ``--ui`` says which half of it is wanted.
     """
-    if getattr(sys, "frozen", False):
-        return [sys.executable, "--ui"]
+    if frozen.is_frozen():
+        return [str(frozen.sibling(frozen.LAUNCHER)), "--ui"]
     return [sys.executable, "-m", "hyperv_console_mcp.cli", "--ui"]
 
 
@@ -103,6 +105,18 @@ def icon_image() -> Any:
     draw.rectangle((11, 31, 36, 37), fill=(56, 189, 248, 255))
     draw.rectangle((11, 41, 47, 47), fill=(148, 163, 184, 255))
     return image
+
+
+def write_icon(path: Path) -> Path:
+    """The same glyph as an ``.ico``, for the frozen build and the installer.
+
+    PyInstaller wants an icon file and Inno Setup wants one; both get the tray's
+    own drawing instead of a second copy of it that could drift.
+    """
+    image = icon_image()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(path, format="ICO", sizes=[(16, 16), (32, 32), (48, 48), (64, 64)])
+    return path
 
 
 def tray_service() -> tuple[Any, Any]:

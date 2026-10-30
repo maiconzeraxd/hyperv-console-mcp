@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import sys
 import threading
 import uuid
 from collections.abc import Callable
@@ -12,6 +13,7 @@ from ctypes import wintypes
 from pathlib import Path
 from typing import Any
 
+from . import frozen
 from .errors import PolicyError
 
 PIPE_BUFFER = 16384
@@ -35,6 +37,9 @@ PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 TOKEN_QUERY = 0x0008
 INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
 PYTHON_IMAGES = frozenset({"python.exe", "pythonw.exe", "py.exe"})
+# A frozen install has no interpreter to check for: the service is one of the
+# programs built beside this one, and the window is another.
+FROZEN_IMAGES = frozenset({frozen.LAUNCHER.casefold(), frozen.HOST.casefold()})
 MAX_SUMMARY_CHARS = 16_384
 
 if os.name == "nt":
@@ -205,11 +210,31 @@ def _write(handle: wintypes.HANDLE, message: dict) -> None:
         raise ctypes.WinError(ctypes.get_last_error())
 
 
+def _trusted_image(image: Path) -> bool:
+    """Whether this executable could be the other end of one of our pipes.
+
+    Under an interpreter the server is ``python -m hyperv_console_mcp…``. A
+    frozen install has no interpreter: the server is ``hyperv-service.exe`` and
+    the window is the launcher, both built beside this program — so the folder
+    is compared as well as the name, and a copy of the file somewhere else is
+    not the program that was installed.
+    """
+    if image.name.casefold() in PYTHON_IMAGES:
+        return True
+    if not frozen.is_frozen() or image.name.casefold() not in FROZEN_IMAGES:
+        return False
+    try:
+        return image.parent.resolve() == Path(sys.executable).parent.resolve()
+    except OSError:
+        return False
+
+
 def _verify_server_process(handle: wintypes.HANDLE, label: str = "approval broker") -> None:
     """Refuse an instance that is not the expected server process of this user.
 
     A pipe name is guessable, so the client never trusts a connection just because
-    the pipe exists: the server must be a Python interpreter owned by this user.
+    the pipe exists: the server must be a program this install runs, owned by this
+    user.
     """
     pid = wintypes.DWORD()
     if not kernel32.GetNamedPipeServerProcessId(handle, ctypes.byref(pid)) or not pid.value:
@@ -222,9 +247,9 @@ def _verify_server_process(handle: wintypes.HANDLE, label: str = "approval broke
         buffer = ctypes.create_unicode_buffer(size.value)
         if not kernel32.QueryFullProcessImageNameW(process, 0, buffer, ctypes.byref(size)):
             raise PolicyError(f"The {label} executable could not be identified.")
-        if Path(buffer.value).name.casefold() not in PYTHON_IMAGES:
+        if not _trusted_image(Path(buffer.value)):
             raise PolicyError(
-                f"The {label} is not a Python process; refusing to trust the pipe."
+                f"The {label} is not a program this install runs; refusing to trust the pipe."
             )
         token = ctypes.c_void_p()
         if not kernel32.OpenProcessToken(process, TOKEN_QUERY, ctypes.byref(token)):

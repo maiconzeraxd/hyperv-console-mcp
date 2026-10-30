@@ -1,0 +1,24 @@
+PackageIdentifier: maiconzeraxd.HyperVConsoleMCP
+PackageVersion: 0.1.0
+InstallerType: inno
+Scope: user
+InstallModes:
+  - Interactive
+  - Silent
+  - SilentWithProgress
+UpgradeBehavior: install
+AppsAndFeaturesEntries:
+  # Inno Setup registers `{AppId}_is1` as its uninstall key; the AppId is the
+  # one in packaging/installer.iss, and a test keeps the two the same.
+  - DisplayName: Hyper-V Console
+    Publisher: hyperv-console-mcp contributors
+    DisplayVersion: 0.1.0
+    ProductCode: '{7F3B2C4E-9A61-4B7D-8E52-1C6D9A0B4F31}_is1'
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/maiconzeraxd/hyperv-console-mcp/releases/download/v0.1.0/HyperVConsoleMCP-Setup-0.1.0.exe
+    # Replace with the hash of the published installer before opening the PR to
+    # microsoft/winget-pkgs: `winget hash <file>` prints it.
+    InstallerSha256: '0000000000000000000000000000000000000000000000000000000000000000'
+ManifestType: installer
+ManifestVersion: 1.6.0

@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from hyperv_console_mcp import install
+from hyperv_console_mcp import frozen, install
 from hyperv_console_mcp.errors import ValidationError
 
 
@@ -134,16 +134,17 @@ def test_a_shortcut_outside_windows_is_skipped_rather_than_faked(
     assert not (tmp_path / "x.lnk").exists()
 
 
-def test_a_frozen_build_points_the_shortcut_at_itself(
+def test_a_frozen_build_points_the_shortcut_at_the_launcher_beside_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One windowed executable: no interpreter to name and no module path to pass.
+    """A shortcut that re-ran the installer would be the one thing it must not do.
 
-    It opens the window by itself when nothing writes into its stdin, which is
-    exactly what a shortcut does.
+    The launcher opens the window by itself when nothing writes into its stdin,
+    which is exactly what a shortcut does.
     """
     link = tmp_path / "x.lnk"
     seen: list[str] = []
+    launcher = Path(sys.executable).with_name(frozen.LAUNCHER)
     monkeypatch.setattr(install, "os", SimpleNamespace(name="nt"))
     monkeypatch.setattr(sys, "frozen", True, raising=False)
 
@@ -155,8 +156,18 @@ def test_a_frozen_build_points_the_shortcut_at_itself(
     monkeypatch.setattr(install.subprocess, "run", run)
     result = install.create_shortcut(link)
     assert result["action"] == "created"
-    assert f"$link.TargetPath = {json.dumps(str(Path(sys.executable)))};" in seen[0]
+    assert f"$link.TargetPath = {json.dumps(str(launcher))};" in seen[0]
     assert '$link.Arguments = "";' in seen[0]
+
+
+def test_a_frozen_install_writes_the_launcher_into_the_client_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client entry naming the installer would reinstall the machine on start."""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    entry = install.server_entry()
+    assert entry["command"] == str(Path(sys.executable).with_name(frozen.LAUNCHER))
+    assert entry["args"] == []
 
 
 def test_the_command_writes_the_client_it_was_given(

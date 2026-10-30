@@ -1818,6 +1818,68 @@ rendered from a live VM — the capture path needs an elevated session.
   different. The first run of `hyperv-tray` with the extra installed is the test that closes it.
 - Still to come in this wave: the PyInstaller build and release CI, the beginner README.
 
+### 2026-10-29 — v0.3 install wave 5: one folder, four programs, and a pipe that trusts it
+
+- **The four program names live in one module.** `frozen.py` holds `LAUNCHER`, `SETUP`, `HOST`
+  and `ACCESS`, and the spec, the Inno script and the three places in the code that name a
+  program all read them. The three places need three *different* siblings: the client entry must
+  be the launcher (naming the installer would reinstall the machine every time the AI starts),
+  the shortcut must be the launcher (naming the installer would re-run the installer from the
+  Start Menu), and `_spawn` must be the host (naming the launcher would start a second server on
+  a pipe nobody reads).
+- **One analysis, four executables.** The spec analyses the four entry scripts once and splits
+  the script table per `EXE` with `scripts_for()` — runtime hooks plus that one program. Handing
+  the whole table to an `EXE` would put four entry points in one bundle.
+- **Four shims, because each has a reason.** `packaging/entrypoints/*.py` import their module
+  absolutely: the launcher is `__main__`, where relative imports fail; the host has to exist
+  beside the launcher or a client opens a window with nothing answering; and the refusal
+  messages name `hyperv-access`, so it ships.
+- **The installer runs the routine, not a second installer.** `installer.iss` is per-user
+  (`PrivilegesRequired=lowest`, `{localappdata}\Programs\Hyper-V Console`) with a fixed `AppId`,
+  and its last page runs `hyperv-setup.exe --no-shortcut`; uninstall runs the same program with
+  `--uninstall`.
+- **The workflow ships tags and says when it cannot sign.** `.github/workflows/release.yml`
+  builds on `v*`, signs with `signtool` only when `WINDOWS_CERT_PFX_BASE64` is present, and
+  emits a `::warning::` naming SmartScreen when it is not. It submits no winget manifest: a
+  manifest that has never been through `winget validate` should not be.
+- **winget's uninstall key is Inno's `AppId`.** `packaging/winget/` carries the three manifests
+  and a test reads the `AppId` out of the `.iss` and requires `{…}_is1` in the installer
+  manifest — the failure that leaves an old version installed after an upgrade.
+- **The live run found the bug the tests could not.** `ipc._verify_server_process` accepted only
+  `python.exe`/`pythonw.exe`/`py.exe`, so the frozen service — `hyperv-service.exe` — was
+  refused with *"The service host is not a Python process; refusing to trust the pipe"* and
+  every tool call in a frozen install failed. `_trusted_image()` now accepts a Python image, or
+  `hyperv-service.exe`/`HyperVConsoleMCP.exe` **in the same folder as the running program** — a
+  copy elsewhere is not the program the installer wrote.
+- **Two more things the build itself corrected.** The spec imported the package before
+  `Analysis` set `pathex` up, so `pyinstaller` died with `ModuleNotFoundError`; and the help
+  text went out in the locale's code page, which turned the em dash into a lone byte in a pipe —
+  `cli._say()` writes stdout as UTF-8, which is what the server writes on that stream anyway.
+- Tests: `tests/test_packaging.py` (14) — the spec parses, freezes exactly the four names with
+  only the launcher windowed, every console script is shipped or named as left out
+  (`hyperv-lab`, `hyperv-dashboard`, `hyperv-tray`, `hyperv-install`), each shipped stub imports
+  the `main` its entry point names, the installer installs what the spec builds, installs
+  without elevation, runs the routine's own flags, the workflow builds both artifacts and only
+  on tags, and the winget manifests describe one package at the current version with the
+  installer's `AppId`. `tests/test_frozen.py` grew to 8 (the two `_trusted_image` cases), and
+  `tests/test_cli.py` to 24 (the UTF-8 help).
+- Gate: 1036 passed / 1 skipped, ruff clean, smoke 29 / 43 / 65 unchanged, 14 PowerShell files
+  parse, 0 analyzer findings on `scripts`, `node --check` on the page's script.
+- **Validated live on this host** (PyInstaller 6.22.3): the spec builds
+  `dist/HyperVConsoleMCP/` — 160 MB, four executables; `HyperVConsoleMCP.exe --version` and
+  `--help`; an MCP `initialize` handed to the launcher over a pipe, answered as
+  `hyperv-console-mcp 0.1.0`; `tools/call hyperv_host_status` answered through the service the
+  launcher started, whose process is `dist\HyperVConsoleMCP\hyperv-service.exe`;
+  `hyperv-setup.exe --check` reporting `action: proceed`; `hyperv-access.exe --help`.
+- **Not validated live.** The bundle was built without `pywebview` and `pystray` (neither is
+  installed here), so this folder's window is the tkinter one and the tray extra is absent; CI
+  installs `.[dev,ui]`. Inno Setup is not installed, so `installer.iss` has never been
+  compiled and no `Setup.exe` exists. The workflow has never run, nothing has been signed, and
+  **no install has been tried on a clean machine** — that is wave 6's test, not a claim made
+  here.
+- Still to come in this wave: the beginner README with the wizard's screens and the SmartScreen
+  section, and the service under `HyperVConsoleMCPSvc`.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,

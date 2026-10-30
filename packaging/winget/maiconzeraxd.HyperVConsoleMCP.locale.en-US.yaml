@@ -1,0 +1,26 @@
+PackageIdentifier: maiconzeraxd.HyperVConsoleMCP
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: hyperv-console-mcp contributors
+PublisherUrl: https://github.com/maiconzeraxd/hyperv-console-mcp
+PublisherSupportUrl: https://github.com/maiconzeraxd/hyperv-console-mcp/issues
+PackageName: Hyper-V Console
+PackageUrl: https://github.com/maiconzeraxd/hyperv-console-mcp
+License: MIT
+LicenseUrl: https://github.com/maiconzeraxd/hyperv-console-mcp/blob/main/LICENSE
+ShortDescription: A local, policy-gated MCP server and window for Hyper-V management and driver labs.
+Description: >-
+  Hyper-V Console is an MCP server an AI client can drive and a window a person
+  can use, both clients of one background service. Access is granted per virtual
+  machine — read-only, control or lab — and the lab level adds guest automation,
+  checkpoints, a kernel debugger and evidence collection. It never enables test
+  signing, loads no driver and bypasses no signature enforcement on the host.
+Moniker: hyperv-console
+Tags:
+  - hyper-v
+  - mcp
+  - virtualization
+  - automation
+  - driver-testing
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

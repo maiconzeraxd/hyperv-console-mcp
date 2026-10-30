@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from hyperv_console_mcp import tray
+from hyperv_console_mcp import frozen, tray
 from hyperv_console_mcp.errors import PolicyError
 
 
@@ -91,11 +91,11 @@ def test_the_window_is_the_command_a_person_types() -> None:
     assert tray.window_command() == [sys.executable, "-m", "hyperv_console_mcp.cli", "--ui"]
 
 
-def test_a_frozen_build_opens_itself(
+def test_a_frozen_build_opens_the_launcher_beside_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    assert tray.window_command() == [sys.executable, "--ui"]
+    assert tray.window_command() == [str(Path(sys.executable).with_name(frozen.LAUNCHER)), "--ui"]
 
 
 def test_a_second_click_does_not_open_a_second_window(

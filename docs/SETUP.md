@@ -2,6 +2,15 @@
 
 ## Install on a new machine
 
+On a machine without Python, start with the release: `HyperVConsoleMCP-Setup-<version>.exe`
+from the [releases page](https://github.com/maiconzeraxd/hyperv-console-mcp/releases), or
+`winget install maiconzeraxd.HyperVConsoleMCP`. Both install per user into
+`%LOCALAPPDATA%\Programs\Hyper-V Console`, ask for no elevation, and run the routine below once
+from the installer's last page — so on that path `hyperv-setup` is the installer's own step, and
+`hyperv-setup --check` is what you run to look without installing. The bundle is four programs
+beside each other: `HyperVConsoleMCP.exe` (the window, and the server when a client gives it a
+pipe), `hyperv-setup.exe`, `hyperv-service.exe` and `hyperv-access.exe`.
+
 One routine does the whole install, and every path into it ends in the same place:
 
 ```powershell
