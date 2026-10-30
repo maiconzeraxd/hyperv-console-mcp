@@ -331,6 +331,7 @@
 
 const PAGES = [
   ["Fleet", "fleet", "Every VM Hyper-V reported, the level this host allows each one, and its power."],
+  ["Matrix", "matrix", "The same package on several VMs, one after another, and the outcomes side by side."],
   ["Overview", "overview", "The VM's state, its checkpoints and what the AI may do with it."],
   ["Activity", "activity", "Cross-process operation history, including what the MCP server did."],
   ["Console", "console", "Keyboard, mouse and a screenshot of the guest display."],
@@ -365,6 +366,9 @@ const state = {
   // The debugger's own state: the last analysis, the serial tail and whether
   // the serial loop is running. It survives a render for the same reason.
   debug: null,
+  // The matrix spans VMs, so it belongs to no workspace: its own state holds the
+  // VMs ticked for the next run and the result the comparison table reads.
+  matrix: null,
 };
 
 /* ---------- small helpers ---------- */
@@ -508,9 +512,57 @@ const builders = {
           el("button", { class: "act", onclick: openChooser }, "Type a VM name"))));
   },
 
+  async matrix() {
+    const response = await api().vms();
+    const all = ((response && response.ok && response.ok.vms) || []).map((vm) => String(vm.name || ""));
+    const matrix = matrixState();
+    // A first visit ticks the first two VMs: a matrix is two runs, and starting
+    // from nothing would ask the operator to tick before they can read anything.
+    if (!matrix.vms.length) matrix.vms = all.slice(0, 2);
+    const labProfile = Boolean(state.hello && state.hello.profile === "lab");
+    const tick = (name) => el("label", { class: "field" },
+      el("input", {
+        type: "checkbox",
+        checked: matrixState().vms.includes(name) ? "checked" : null,
+        onchange: (event) => {
+          const chosen = matrixState().vms;
+          const index = chosen.indexOf(name);
+          if (event.currentTarget.checked && index < 0) chosen.push(name);
+          if (!event.currentTarget.checked && index >= 0) chosen.splice(index, 1);
+        },
+      }), name);
+
+    return el("div", { class: "grid" },
+      panel("The matrix", "One package, one run id per VM, one comparison. The runs are sequential: each cycle owns the guest for its whole length.",
+        el("div", { id: "matrix-live" }, "No matrix has run in this window yet.")),
+      labProfile
+        ? panel("Run it", "Every ticked VM gets the same package, the same manifest hash and its own run id.",
+            el("div", { class: "row", style: "flex-wrap:wrap" }, ...all.map(tick)),
+            el("div", { class: "row" },
+              field("Package id", input_("matrix-package", "")),
+              field("Manifest SHA-256", input_("matrix-sha", ""))),
+            el("div", { class: "row" },
+              field("Run id", input_("matrix-run", "matrix-1")),
+              field("Timeout (s)", input_("matrix-timeout", "600", "number")),
+              field("Debugger", el("select", { id: "matrix-debugger" },
+                ...["none", "serial", "kdnet"].map((name) => el("option", { value: name }, name))))),
+            el("div", { class: "row" },
+              field("Record the console", el("input", { id: "matrix-record", type: "checkbox" })),
+              field("Revert each checkpoint afterwards", el("input", { id: "matrix-revert", type: "checkbox" }))),
+            el("div", { class: "row", style: "margin:0" },
+              el("button", { class: "act primary", onclick: runMatrix }, "Run the matrix")))
+        : panel("Manual run", "Outside the lab profile a matrix is not offered: the same call is refused there, and a button that cannot work is worse than none.",
+            el("p", { class: "hint", style: "margin:0" },
+              "Set HYPERV_MCP_PROFILE=lab and give each VM the lab level to run the same package on several of them.")),
+      matrixPanel(matrix.result));
+  },
+
   async overview() {
-    const [host, vm, checkpoints] = await Promise.all([
+    const [host, vm, checkpoints, transport] = await Promise.all([
       api().call("host_status", {}), api().call("get_vm", vmArg()), api().call("list_checkpoints", vmArg()),
+      // The probe is one trivial command, and it runs beside the host reads, so
+      // the light is this page's answer rather than a remembered one.
+      api().call("guest_transport_status", { ...vmArg(), probe: true }),
     ]);
     const record = (vm && vm.ok && vm.ok.vm) || {};
     const levelSelect = el("select", { id: "level" },
@@ -532,6 +584,7 @@ const builders = {
           ["Service", state.hello.shared_service ? "shared host" : "private copy"],
           ["Approvals", state.hello.approvals],
         ])),
+      transportPanel(transport),
       panel("Access level", "The file hyperv-access writes. No tool can change it.",
         el("p", { class: "hint", id: "level-note" }, state.hello.level
           ? state.vm + " is " + state.hello.level + "."
@@ -1033,6 +1086,7 @@ const builders = {
             onclick: async () => { lab.picked = []; lab.comparison = null; await render(); },
           }, "Clear"),
           el("button", { class: "act", onclick: async () => { await render(); } }, "Refresh"),
+          action("Export all", "lab_receipts", () => ({ action: "export", vm_name: state.vm })),
           el("span", { class: "hint", style: "margin:0" },
             lab.picked.length ? "picked: " + lab.picked.join(" and ") : "no run picked")),
         receipts && receipts.ok && receipts.ok.truncated
@@ -1625,6 +1679,20 @@ function outcomeBadge(outcome) {
   return el("span", { class: "outcome " + name }, name);
 }
 
+// Whether the driver's symbols resolved: a crash is only as useful as the stack
+// kd could name. A run with no crash has the debugger's own answer instead.
+function symbolsBadge(item) {
+  const value = item.symbols_resolved === null || item.symbols_resolved === undefined
+    ? item.symbols_all_loaded : item.symbols_resolved;
+  if (value === null || value === undefined) {
+    return el("span", { class: "hint", style: "margin:0" }, "—");
+  }
+  return el("span", {
+    class: "outcome " + (value ? "ok" : "failed"),
+    title: value ? "the driver's symbols resolved" : "a symbol did not resolve",
+  }, value ? "symbols" : "no symbols");
+}
+
 // The triage reads one of two shapes, because a cycle can leave both: the
 // report a cycle returns, where kd's reading is nested under `bugcheck`, and
 // the receipt `lab_receipts` returns, where the record already flattened it.
@@ -1808,7 +1876,7 @@ function receiptTable(items, lab) {
       "No run has left a receipt under the evidence root yet.");
   }
   return el("table", { class: "events" },
-    el("thead", {}, el("tr", {}, ...["Run", "Finished", "Outcome", "Package", "Blame", "Files", ""].map((head) => el("th", {}, head)))),
+    el("thead", {}, el("tr", {}, ...["Run", "Finished", "Outcome", "Package", "Blame", "Symbols", "Files", ""].map((head) => el("th", {}, head)))),
     el("tbody", {}, ...items.map((item) => {
       const picked = lab.picked.includes(item.run_id);
       return el("tr", { class: picked ? "picked" : null, style: "cursor:pointer", onclick: () => pickReceipt(item.run_id) },
@@ -1817,6 +1885,7 @@ function receiptTable(items, lab) {
         el("td", {}, outcomeBadge(item.outcome)),
         el("td", { class: "mono" }, item.package_id || "—"),
         el("td", {}, item.blamed_driver || "—"),
+        el("td", {}, symbolsBadge(item)),
         el("td", {}, String(item.evidence_files === undefined ? 0 : item.evidence_files)),
         el("td", {}, el("button", {
           class: "act",
@@ -1917,6 +1986,136 @@ function comparePanel(lab) {
     rows);
 }
 
+/* ---------- the guest transport ---------- */
+// The light is the probe's answer, not the saved setting: green means the guest
+// answered a command just now, and the number beside it is that round trip.
+function transportPanel(response) {
+  const status = (response && response.ok) || null;
+  const failure = response && response.error;
+  const healthy = status ? status.healthy : null;
+  const ssh = (status && status.ssh) || {};
+  const light = failure || healthy === false ? "down" : healthy === true ? "up" : "";
+  const millis = (value) => (value === null || value === undefined ? "—" : value + " ms");
+  const yes = (value) => (value === null || value === undefined ? "—" : value ? "yes" : "no");
+  return panel("Guest transport",
+    "Which path carries a command into the guest, whether it answers right now, and how long that took.",
+    el("div", { class: "row", style: "margin:0 0 8px;align-items:center" },
+      el("span", { class: "conn " + light }, el("span", { class: "dot" }),
+        failure ? "not reachable" : healthy === true ? "answering" : healthy === false ? "no answer" : "not probed"),
+      el("span", { class: "hint", style: "margin:0" }, status ? millis(status.latency_ms) : "")),
+    status
+      ? facts([
+          ["Configured", status.configured || "—"],
+          ["Saved choice", status.saved || "none (auto)"],
+          ["Would use", status.selected || "—"],
+          ["SSH provisioned", yes(ssh.provisioned)],
+          ["SSH answer", yes(ssh.healthy)],
+          ["SSH latency", millis(ssh.latency_ms)],
+          ["Guest", status.guest || "—"],
+          ["VM state", status.state || "—"],
+        ])
+      : el("p", { class: "hint", style: "margin:0" },
+          (failure && failure.message) || "The service did not answer."),
+    status && status.error
+      ? el("p", { class: "hint", style: "margin:8px 0 0" },
+          "Refused: " + status.error + " — " + (status.message || ""))
+      : null,
+    el("div", { class: "row" },
+      field("Transport", el("select", { id: "transport-choice" },
+        ...["auto", "psdirect", "ssh"].map((name) =>
+          el("option", { value: name, selected: status && status.configured === name ? "selected" : null }, name))))),
+    el("div", { class: "row", style: "margin:0" },
+      action("Apply", "guest_transport_set", () => ({ vm_name: state.vm, transport: fieldValue("transport-choice") }), "primary", render),
+      el("span", { class: "hint", style: "margin:0" },
+        "auto lets the host prefer SSH when it answers; a saved choice applies to the next call.")));
+}
+
+/* ---------- the matrix ---------- */
+// One call, one approval, one row per VM. The service runs the cycles in
+// sequence and does the comparing; this only draws the answer, because a page
+// that decided what "same" meant would be a second implementation of it.
+function matrixState() {
+  if (!state.matrix) state.matrix = { vms: [], result: null };
+  return state.matrix;
+}
+
+async function runMatrix() {
+  const matrix = matrixState();
+  if (matrix.vms.length < 2) {
+    show("lab_matrix", { error: { message: "A matrix compares at least two VMs; tick two first." } });
+    return;
+  }
+  const response = await call("lab_matrix", {
+    vm_names: [...matrix.vms],
+    package_id: fieldValue("matrix-package"),
+    run_id: fieldValue("matrix-run") || "matrix-1",
+    expected_manifest_sha256: fieldValue("matrix-sha"),
+    timeout_seconds: Number(fieldValue("matrix-timeout")) || 600,
+    debugger: fieldValue("matrix-debugger") || "none",
+    record: checked("matrix-record"),
+    revert_after: checked("matrix-revert"),
+  });
+  matrix.result = (response && response.ok) || null;
+  await render();
+}
+
+function drawMatrix() {
+  const host = document.getElementById("matrix-live");
+  if (!host) return;
+  const relevant = state.events.filter((event) => event.operation === "lab_matrix");
+  const last = relevant[relevant.length - 1];
+  if (!last) {
+    host.textContent = "No matrix has run in this window yet.";
+    return;
+  }
+  const same = relevant.filter((event) => event.correlation_id === last.correlation_id);
+  const progress = [...same].reverse().find((event) => event.phase === "progress");
+  const failed = same.some((event) => event.phase === "failed");
+  const done = same.some((event) => event.phase === "completed");
+  const percent = failed ? 100 : progress ? Number(progress.progress) || 0 : done ? 100 : 0;
+  host.replaceChildren(
+    el("div", { class: "row", style: "margin:0 0 6px;align-items:center" },
+      el("span", { class: "mono" }, last.vm_name || "host"),
+      outcomeBadge(failed ? "failed" : done ? "ok" : "running")),
+    el("progress", { class: "transfer", max: "100", value: String(percent) }),
+    el("div", { class: "transfer-line" },
+      el("span", {}, failed ? "failed" : progress ? (progress.message || "") : done ? "completed" : "starting"),
+      el("span", {}, String(last.started_utc || "").slice(11, 19))));
+}
+
+function matrixPanel(result) {
+  if (!result) {
+    return panel("The comparison", "Run a matrix and the outcomes land here, side by side.",
+      el("p", { class: "hint", style: "margin:0" }, "No matrix has run in this window yet."));
+  }
+  const rows = result.vms || [];
+  const vms = rows.map((row) => String(row.vm));
+  const fields = result.fields || [];
+  return panel("The comparison",
+    "One row per VM, then the compared fields with each VM's value. A VM that refused the run is a row of its own, not the end of the matrix.",
+    el("p", { class: "hint", style: "margin:0 0 10px" },
+      result.same
+        ? "Every VM agreed on all " + fields.length + " compared fields."
+        : "These fields differ: " + (result.differs || []).join(", ") + "."),
+    el("table", { class: "events" },
+      el("thead", {}, el("tr", {}, ...["VM", "Run", "Outcome", "Duration (s)", "Bugcheck", "Blamed driver", "Symbols", "Recording"].map((head) => el("th", {}, head)))),
+      el("tbody", {}, ...rows.map((row) => el("tr", {},
+        el("td", { title: row.detail || null }, row.vm),
+        el("td", { class: "mono" }, row.run_id || "—"),
+        el("td", {}, row.error ? el("span", { class: "outcome failed" }, row.error) : outcomeBadge(row.outcome)),
+        el("td", {}, shown(row.duration_seconds)),
+        el("td", { class: "mono" }, row.bugcheck_code || "—"),
+        el("td", {}, row.blamed_driver || "—"),
+        el("td", {}, row.symbols_all_loaded === null || row.symbols_all_loaded === undefined
+          ? "—" : row.symbols_all_loaded ? "loaded" : "missing"),
+        el("td", { class: "mono" }, row.recording || "—"))))),
+    el("table", { class: "events changed", style: "margin-top:12px" },
+      el("thead", {}, el("tr", {}, ...["Field", ...vms].map((head) => el("th", {}, head)))),
+      el("tbody", {}, ...fields.map((item) => el("tr", { class: item.same ? null : "picked" },
+        el("td", {}, item.field),
+        ...vms.map((vm) => el("td", {}, shown(item.values[vm]))))))));
+}
+
 /* ---------- chrome ---------- */
 function renderConn() {
   const node = document.getElementById("conn");
@@ -1942,10 +2141,11 @@ function renderNav() {
       onclick: (event) => { event.stopPropagation(); closeTab(name); },
     }, "×"))));
 
-  // The fleet is always reachable; the per-VM pages need a VM to be about.
+  // The fleet and the matrix are about the host, not one VM, so they stay
+  // reachable with no workspace open; every other page needs a VM to be about.
   const buttons = document.getElementById("nav-buttons");
   buttons.replaceChildren(...PAGES
-    .filter(([, key]) => key === "fleet" || state.vm)
+    .filter(([, key]) => key === "fleet" || key === "matrix" || state.vm)
     .map(([label, key]) =>
       el("button", { class: key === state.page ? "active" : "", onclick: () => go(key) }, label)));
 
@@ -1988,7 +2188,7 @@ async function render() {
   const entry = PAGES.find(([, key]) => key === state.page) || PAGES[0];
   const page = document.getElementById("page");
   page.replaceChildren(el("header", { class: "page" }, el("h1", {}, entry[0]), el("p", {}, entry[2])));
-  if (!state.vm && state.page !== "fleet") {
+  if (!state.vm && state.page !== "fleet" && state.page !== "matrix") {
     page.append(panel("No VM is open", "Pick one from the fleet to open a workspace.",
       el("div", { class: "row", style: "margin:0" },
         el("button", { class: "act primary", onclick: () => go("fleet") }, "Open the fleet"))));
@@ -2002,6 +2202,7 @@ async function render() {
   if (state.page === "activity") drawActivity();
   if (state.page === "files") drawTransfer();
   if (state.page === "lab") drawCycle();
+  if (state.page === "matrix") drawMatrix();
   // The serial loop draws into an element this render just replaced, so it is
   // restarted here and left to die on its next tick when the page moves on.
   if (state.page === "debugger") { drawSerial(); startSerial(); } else { stopSerial(); }

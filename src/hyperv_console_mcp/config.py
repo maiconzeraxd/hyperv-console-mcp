@@ -177,6 +177,9 @@ class Settings:
     guest_password: str | None = field(default=None, repr=False)
     guest_transport: str = "auto"
     guest_transport_overrides: Mapping[str, str] = field(default_factory=dict)
+    # The operator's saved per-VM choice, written by the window's transport
+    # switch. It sits between the per-VM environment override and the default.
+    transport_choice_file: Path = field(default_factory=lambda: _local_root("transport.json"))
     timeout_seconds: float = 90.0
     max_output_chars: int = 65_536
     audit_log: Path | None = None
@@ -254,6 +257,9 @@ class Settings:
             guest_password=env.get("HYPERV_MCP_GUEST_PASSWORD") or None,
             guest_transport=_transport(env, "HYPERV_MCP_GUEST_TRANSPORT"),
             guest_transport_overrides=overrides,
+            transport_choice_file=_absolute_path(
+                env, "HYPERV_MCP_TRANSPORT_FILE", _local_root("transport.json", env)
+            ),
             timeout_seconds=float(
                 _integer(env, "HYPERV_MCP_TIMEOUT_SECONDS", 90, 1, 900)
             ),

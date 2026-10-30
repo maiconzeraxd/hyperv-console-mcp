@@ -40,21 +40,29 @@ class LabService(ServiceBase):
         vm_name: str | None = None,
         limit: int = 20,
     ) -> dict[str, Any]:
-        """What this host kept from earlier runs: list them, open one, compare two.
+        """What this host kept from earlier runs: list them, open one, compare two, export all.
 
         A read of the evidence root, not of a VM. ``lab.report`` wrote one record
         per cycle beside its evidence; this reads those records back so a window
         can show a receipt without a second implementation of what it means.
+        ``export`` copies the whole history into one timestamped file under
+        ``exports/``; it copies and never moves, so no receipt stops resolving.
         """
         from ..lab import receipts
 
-        if action not in {"list", "get", "compare"}:
-            raise ValidationError("action must be list, get, or compare.")
+        if action not in {"list", "get", "compare", "export"}:
+            raise ValidationError("action must be list, get, compare, or export.")
         if vm_name:
             self._vm(vm_name)
         root = self.settings.evidence_root.expanduser().resolve()
         if action == "list":
             return receipts.list_receipts(
+                root,
+                vm_name=vm_name or None,
+                limit=_integer(limit, "limit", 1, receipts.MAX_RECEIPTS),
+            )
+        if action == "export":
+            return receipts.export(
                 root,
                 vm_name=vm_name or None,
                 limit=_integer(limit, "limit", 1, receipts.MAX_RECEIPTS),
@@ -174,6 +182,7 @@ class LabService(ServiceBase):
         revert_after: bool = False,
         include_kernel_dump: bool = True,
         debugger: str = "none",
+        record: bool = False,
     ) -> dict[str, Any]:
         from ..lab.run import checkpoint_name, cycle
 
@@ -187,6 +196,7 @@ class LabService(ServiceBase):
             "timeout_seconds": timeout_seconds,
             "revert_after": bool(revert_after),
             "debugger": debugger,
+            "records_console": bool(record),
             "executes_staged_payload": True,
         }
         with self._approve("lab_cycle", name, summary):
@@ -198,7 +208,58 @@ class LabService(ServiceBase):
                     expected_manifest_sha256=expected_manifest_sha256,
                     timeout_seconds=timeout_seconds, checkpoint_before=checkpoint_before,
                     revert_after=revert_after, include_kernel_dump=include_kernel_dump,
-                    debugger=debugger, progress=progress,
+                    debugger=debugger, record=record, progress=progress,
+                ),
+            )
+
+    def lab_matrix(
+        self,
+        vm_names: list[str],
+        package_id: str,
+        run_id: str,
+        expected_manifest_sha256: str,
+        timeout_seconds: int = 600,
+        checkpoint_before: bool = True,
+        revert_after: bool = False,
+        include_kernel_dump: bool = True,
+        debugger: str = "none",
+        record: bool = False,
+    ) -> dict[str, Any]:
+        """The same package through the same cycle on several VMs, compared.
+
+        One approval covers the whole matrix, and its summary names every VM and
+        the per-VM run ids, because a single click that runs a payload four times
+        has to say so. The runs are sequential: each cycle owns the guest worker,
+        a checkpoint and the console for its whole length.
+        """
+        from ..lab.matrix import matrix, normalise_vms, run_id_for
+        from ..lab.run import checkpoint_name
+
+        names = [self._guest_vm(value) for value in normalise_vms(vm_names)]
+        self._require_lab_profile("lab_matrix")
+        summary = {
+            "package_id": package_id,
+            "run_id": run_id,
+            "vms": names,
+            "run_ids": [run_id_for(run_id, value) for value in names],
+            "manifest_sha256": expected_manifest_sha256,
+            "checkpoint": checkpoint_name(run_id) if checkpoint_before else None,
+            "timeout_seconds": timeout_seconds,
+            "revert_after": bool(revert_after),
+            "debugger": debugger,
+            "records_console": bool(record),
+            "executes_staged_payload": True,
+        }
+        with self._approve("lab_matrix", ",".join(names), summary):
+            return self._tracked(
+                "lab_matrix", ",".join(names),
+                lambda progress: matrix(
+                    self, names,
+                    package_id=package_id, run_id=run_id,
+                    expected_manifest_sha256=expected_manifest_sha256,
+                    timeout_seconds=timeout_seconds, checkpoint_before=checkpoint_before,
+                    revert_after=revert_after, include_kernel_dump=include_kernel_dump,
+                    debugger=debugger, record=record, progress=progress,
                 ),
             )
 

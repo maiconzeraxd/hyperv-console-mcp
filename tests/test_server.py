@@ -36,7 +36,7 @@ def test_the_safe_profile_exposes_the_everyday_surface(server) -> None:
     # The safe profile registers only its own families — core, guest, console,
     # config, credentials, media and ssh. The debugger, the lab cycle, the serial
     # console and the debug setup are opt-in through HYPERV_MCP_TOOLSETS.
-    assert len(tools) == 29
+    assert len(tools) == 30
     assert {
         "kd_attach", "kd_status", "kd_inspect", "debug_status", "debug_setup",
         "lab_run", "lab_cycle", "serial_connect", "vm_inject_nmi",
@@ -61,11 +61,16 @@ def test_the_safe_profile_exposes_the_everyday_surface(server) -> None:
         "create", "restore", "delete"
     }
     assert set(tools["guest_report"].input_schema["properties"]["what"]["enum"]) == {
-        "status", "processes", "services", "events"
+        "status", "processes", "services", "events", "transport"
     }
     assert set(tools["guest_credential"].input_schema["properties"]["action"]["enum"]) == {
         "rotate", "forget"
     }
+    assert set(tools["guest_transport"].input_schema["properties"]["transport"]["enum"]) == {
+        "auto", "psdirect", "ssh"
+    }
+    # The switch changes where the next command goes, so it is a mutation.
+    assert tools["guest_transport"].annotations.destructive_hint is True
     assert tools["guest_read_file"].input_schema["properties"]["max_bytes"]["default"] == 65_536
     assert set(tools["console_screenshot"].input_schema["properties"]["source"]["enum"]) == {
         "thumbnail", "vmconnect"
@@ -93,7 +98,7 @@ def test_enabling_every_toolset_exposes_the_whole_surface() -> None:
         ),
     )
     tools = {tool.name: tool for tool in anyio.run(create_server(service).list_tools)}
-    assert len(tools) == 65
+    assert len(tools) == 67
     assert tools["lab_run"].annotations.destructive_hint is True
     assert tools["lab_cycle"].annotations.destructive_hint is True
     assert tools["lab_verify"].annotations.read_only_hint is True
@@ -141,11 +146,11 @@ def test_the_host_report_states_the_surface_it_registered() -> None:
     assert result.is_error is False
     toolsets = result.structured_content["toolsets"]
     assert toolsets["counts"] == {
-        "core": 8, "guest": 6, "console": 4, "config": 3, "credentials": 2,
-        "media": 3, "ssh": 3, "serial": 5, "lab": 11, "kd": 9, "debug": 2,
+        "core": 8, "guest": 7, "console": 4, "config": 3, "credentials": 2,
+        "media": 3, "ssh": 3, "serial": 5, "lab": 12, "kd": 9, "debug": 2,
         "files": 9,
     }
-    assert toolsets["total"] == 65
+    assert toolsets["total"] == 67
     assert toolsets["disabled"] == []
 
 
@@ -167,17 +172,22 @@ def test_every_tool_belongs_to_a_known_toolset() -> None:
         )
         if isinstance(first, ast.Constant):
             names.add(first.value)
-    assert len(names) == 65
+    assert len(names) == 67
     assert {toolset_for(name) for name in names} <= TOOLSETS
     # The budget the roadmap asks for is "~40" per profile. `safe` holds it
-    # exactly; `lab` is 43 since phase 6 added Driver Verifier and the driver
+    # exactly; `lab` is 45 since phase 6 added Driver Verifier and the driver
     # service, and the read side of the verifier lives in `lab_diagnostics`
-    # rather than in a second listing tool. `lab_receipts` is one tool with three
-    # actions (list, get, compare) for the same reason: a receipt is a read, and
-    # the window needs all three to show a run without a second implementation of
-    # what a record means. The file manager is its own opt-in family, so neither
-    # default pays for it.
-    for profile, limit in (("safe", 40), ("lab", 43)):
+    # rather than in a second listing tool. `lab_receipts` is one tool with four
+    # actions (list, get, compare, export) and `guest_report` one with five
+    # (status, processes, services, events, transport) for the same reason: a
+    # receipt and a transport probe are reads, and the window needs them without
+    # a second implementation of what the answer means. `lab_matrix` is its own
+    # tool because it takes a list of VMs where `lab_cycle` takes one, and a
+    # shared signature would be a worse lie than an extra schema. The transport
+    # switch is its own tool because `guest_report` is read-only and a switch
+    # that also read would make that annotation a lie. The file manager is its
+    # own opt-in family, so neither default pays for it.
+    for profile, limit in (("safe", 40), ("lab", 45)):
         enabled = DEFAULT_TOOLSETS[profile]
         visible = [name for name in names if toolset_for(name) in enabled]
         assert len(visible) <= limit, (profile, len(visible))
@@ -185,13 +195,13 @@ def test_every_tool_belongs_to_a_known_toolset() -> None:
     # asserts over a real stdio client, come from this same map.
     counts = Counter(toolset_for(name) for name in names)
     assert counts == {
-        "core": 8, "guest": 6, "console": 4, "config": 3, "credentials": 2,
-        "media": 3, "ssh": 3, "serial": 5, "lab": 11, "kd": 9, "debug": 2,
+        "core": 8, "guest": 7, "console": 4, "config": 3, "credentials": 2,
+        "media": 3, "ssh": 3, "serial": 5, "lab": 12, "kd": 9, "debug": 2,
         "files": 9,
     }
-    assert sum(counts.values()) == 65
-    assert sum(counts[family] for family in DEFAULT_TOOLSETS["safe"]) == 29
-    assert sum(counts[family] for family in DEFAULT_TOOLSETS["lab"]) == 43
+    assert sum(counts.values()) == 67
+    assert sum(counts[family] for family in DEFAULT_TOOLSETS["safe"]) == 30
+    assert sum(counts[family] for family in DEFAULT_TOOLSETS["lab"]) == 45
 
 
 def test_tool_calls_service_and_returns_structured_output(server) -> None:

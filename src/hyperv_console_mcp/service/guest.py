@@ -6,11 +6,12 @@ import base64
 import binascii
 import hashlib
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from ..errors import BackendError, ValidationError
+from ..errors import BackendError, HyperVError, ValidationError
 from ..events import EVENTS, ProgressReporter
 from ..lab.publish import identifier, verify_staged
 from ._base import (
@@ -22,6 +23,35 @@ from ._base import (
     _integer,
     _text,
 )
+
+MAX_PROBE_ERROR_CHARS = 300
+# The cheapest thing a guest can answer that still proves the transport carries
+# a command: a variable that exists in every Windows session.
+PROBE_COMMAND = "$env:COMPUTERNAME"
+PROBE_TIMEOUT_SECONDS = 15.0
+
+
+def _probe(transport: Any, vm_name: str) -> dict[str, Any]:
+    """Time one round trip over the transport the next call would use."""
+    started = time.monotonic()
+    try:
+        execution = transport.exec(
+            vm_name, PROBE_COMMAND, timeout=PROBE_TIMEOUT_SECONDS, max_output=512
+        )
+    except HyperVError as exc:
+        return {
+            "healthy": False,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "guest": None,
+            "error": exc.code,
+            "message": str(exc)[:MAX_PROBE_ERROR_CHARS],
+        }
+    return {
+        "healthy": bool(execution.success),
+        "latency_ms": int((time.monotonic() - started) * 1000),
+        "guest": execution.output.strip()[:128],
+        "error": None if execution.success else "guest_command_failed",
+    }
 
 
 class _TransferProgress:
@@ -150,6 +180,112 @@ class GuestService(ServiceBase):
                 ),
             )
         return {"vm": name, "execution": execution.as_dict()}
+
+    def guest_transport_set(self, vm_name: str, transport: str) -> dict[str, Any]:
+        """Save which path carries this VM's guest commands.
+
+        ``auto`` is the absence of a preference rather than a third saved value,
+        so it removes the record instead of writing one: the file says what the
+        operator decided, and "let the probe decide" is a decision to stop
+        deciding. The next call selects again immediately — no restart.
+        """
+        from ..transport import invalidate_health
+        from ..transport.choice import TransportChoiceStore, normalise_transport
+
+        name = self._guest_vm(vm_name)
+        choice = normalise_transport(transport)
+
+        def write() -> dict[str, Any]:
+            store = TransportChoiceStore(self.settings.transport_choice_file)
+            if choice == "auto":
+                store.remove(name)
+            else:
+                store.set(name, choice)
+            invalidate_health(self.settings, name)
+            environment = self.settings.guest_transport_overrides.get(
+                name.casefold().replace("_", "-")
+            )
+            return {
+                "vm": name,
+                "transport": choice,
+                "saved": store.get(name) or "auto",
+                "environment": environment,
+                "path": str(store.path),
+            }
+
+        with self._approve("guest_transport", name, {"transport": choice}):
+            return self._call("guest_transport_set", name, write)
+
+    def guest_transport_status(self, vm_name: str, probe: bool = True) -> dict[str, Any]:
+        """Which transport a VM is on, whether it answers, and how long it took.
+
+        The configured choice, whether SSH was provisioned for this VM, and - when
+        ``probe`` is set - one trivial round trip over the transport that would
+        actually carry the next call. A green light means the guest answered just
+        now, not that it was configured once; the latency is that round trip.
+        """
+        from ..transport import TRANSPORTS, chosen_transport, select_transport
+        from ..transport.choice import TransportChoiceStore
+        from ..transport.ssh import SshTransport
+
+        name = self._guest_vm(vm_name)
+        if not isinstance(probe, bool):
+            raise ValidationError("probe must be a boolean value.")
+        result: dict[str, Any] = {
+            "vm": name,
+            "configured": chosen_transport(self.settings, name),
+            "saved": TransportChoiceStore(self.settings.transport_choice_file).get(name),
+            "transports": list(TRANSPORTS),
+            "selected": None,
+            "healthy": None,
+            "latency_ms": None,
+            "state": None,
+            "guest": None,
+            "ssh": {"provisioned": False, "healthy": None, "latency_ms": None, "error": None},
+            "error": None,
+        }
+
+        def read() -> dict[str, Any]:
+            try:
+                result["state"] = str(self.get_vm(name)["vm"].get("state") or "")
+            except HyperVError:
+                result["state"] = None
+            ssh = SshTransport(self.settings)
+            provisioned = ssh.is_provisioned(name)
+            result["ssh"]["provisioned"] = provisioned
+            try:
+                transport = select_transport(self.settings, self.backend, name)
+            except HyperVError as exc:
+                # An explicit `ssh` on an unprovisioned VM is an error, not a
+                # silent fallback; report it as this VM's state.
+                result["error"] = exc.code
+                result["message"] = str(exc)
+                return result
+            result["selected"] = transport.name
+            if probe:
+                result.update(_probe(transport, name))
+            if probe and provisioned:
+                # Timed around the call itself: the latency is the round trip the
+                # indicator reports, so it has to be read after the answer.
+                started = time.monotonic()
+                try:
+                    guest = ssh.health(name)
+                except Exception as exc:  # noqa: BLE001 — a probe that fails is an answer
+                    result["ssh"] = {
+                        "provisioned": True, "healthy": False,
+                        "latency_ms": int((time.monotonic() - started) * 1000),
+                        "guest": None, "error": str(exc)[:MAX_PROBE_ERROR_CHARS],
+                    }
+                else:
+                    result["ssh"] = {
+                        "provisioned": True, "healthy": True,
+                        "latency_ms": int((time.monotonic() - started) * 1000),
+                        "guest": guest,
+                        "error": None,
+                    }
+            return result
+
+        return self._call("guest_transport_status", name, read)
 
     def guest_status(self, vm_name: str) -> dict[str, Any]:
         name = self._guest_vm(vm_name)

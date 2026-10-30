@@ -31,13 +31,13 @@ WAIT_CHANGE_THRESHOLD = 0.01
 KD_SYMBOL_SERVER = "https://msdl.microsoft.com/download/symbols"
 # Every MCP tool annotated MUTATION must request approval here, once per call.
 GATED_TOOLS = frozenset({
-    "vm_power", "checkpoint", "guest_exec",
+    "vm_power", "checkpoint", "guest_exec", "guest_transport",
     "guest_write_file", "guest_put_file", "guest_get_file",
     "guest_make_dir", "guest_rename", "guest_delete",
     "host_make_dir", "host_rename", "host_delete",
     "guest_ssh_provision", "guest_ssh_deprovision",
     "guest_credential", "guest_autologon_configure", "guest_config_revert",
-    "lab_init", "lab_stage", "lab_collect", "lab_run", "lab_cycle",
+    "lab_init", "lab_stage", "lab_collect", "lab_run", "lab_cycle", "lab_matrix",
     "lab_guest_configure", "lab_verifier", "lab_driver_service",
     "vm_inject_nmi",
     "console_input",

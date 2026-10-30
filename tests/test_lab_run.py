@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from PIL import Image
 
 from hyperv_console_mcp.config import Settings
 from hyperv_console_mcp.errors import BackendError, PolicyError, ValidationError
@@ -191,6 +193,19 @@ class FakeLabService:
             "content_base64": base64.b64encode(data).decode(),
             "sha256": hashlib.sha256(data).hexdigest(),
         }}
+
+    # -- console -----------------------------------------------------------
+    def console_frame_size(self, vm_name: str) -> dict[str, Any]:
+        self.calls.append(("console_frame_size", vm_name))
+        return {"vm": vm_name, "width": 1024, "height": 768}
+
+    def console_frame(
+        self, vm_name: str, width: int, height: int, max_width: int = 640
+    ) -> dict[str, Any]:
+        self.calls.append(("console_frame", (width, height)))
+        buffer = io.BytesIO()
+        Image.new("RGB", (8, 6), (10, 20, 30)).save(buffer, format="PNG")
+        return {"vm": vm_name, "png": buffer.getvalue()}
 
     # -- debugger side -----------------------------------------------------
     def kd_attach(self, vm_name: str, transport: str = "kdnet", **kwargs: Any) -> dict[str, Any]:
@@ -953,3 +968,53 @@ def test_a_long_step_appears_once_in_the_feed_with_its_phases() -> None:
     assert events[1]["progress"] == 40
     assert events[1]["message"] == "halfway"
     assert {event["correlation_id"] for event in events} == {events[0]["correlation_id"]}
+
+
+def test_a_recorded_cycle_writes_the_console_beside_the_evidence(tmp_path: Path) -> None:
+    """The GIF is evidence: on disk under the run, and named by the receipt."""
+    service = FakeLabService(run_result={"success": True, "exit_code": 0})
+    service.settings = Settings(evidence_root=tmp_path)
+
+    report = lab_run.cycle(
+        service, "NORTH-Test",
+        package_id="north.1", run_id="run-1",
+        expected_manifest_sha256=DIGEST,
+        checkpoint_before=True, record=True,
+    )
+
+    assert report["recording"]["written"] is True, report["recording"]
+    assert report["recording"]["path"] == "console.gif"
+    assert (tmp_path / "run-1" / "console.gif").is_file()
+    receipt = json.loads((tmp_path / "run-1" / "lab-cycle.json").read_text(encoding="utf-8"))
+    assert receipt["recording"]["path"] == "console.gif"
+    assert receipt["recording"]["frames"] >= 1
+    # The resolution is asked for once, not per frame.
+    assert [call for call in service.calls if call[0] == "console_frame_size"] == [
+        ("console_frame_size", "NORTH-Test")
+    ]
+
+
+def test_a_cycle_that_is_not_recorded_writes_no_gif(tmp_path: Path) -> None:
+    service = FakeLabService(run_result={"success": True, "exit_code": 0})
+    service.settings = Settings(evidence_root=tmp_path)
+
+    report = lab_run.cycle(
+        service, "NORTH-Test",
+        package_id="north.1", run_id="run-1",
+        expected_manifest_sha256=DIGEST,
+        checkpoint_before=True,
+    )
+
+    assert "recording" not in report
+    assert not (tmp_path / "run-1" / "console.gif").exists()
+    assert not [call for call in service.calls if call[0] == "console_frame"]
+
+
+def test_recording_must_be_a_boolean() -> None:
+    service = FakeLabService(run_result={"success": True, "exit_code": 0})
+    with pytest.raises(ValidationError, match="record must be a boolean"):
+        lab_run.cycle(
+            service, "NORTH-Test",
+            package_id="north.1", run_id="run-1",
+            expected_manifest_sha256=DIGEST, record="yes",
+        )

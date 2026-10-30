@@ -67,15 +67,7 @@ Evidence downloads validate each chunk and the final SHA-256, write to a unique 
 
 ## Manual run boundary
 
-After reviewing the staged package and creating a checkpoint, an elevated **guest** operator may deliberately invoke:
-
-```powershell
-& 'C:\DriverLab\Tools\Invoke-DriverLabRun.ps1' `
-  -PackageId 'example.1' `
-  -RunId 'run-1' `
-  -ExpectedManifestSha256 '<manifest-sha256>' `
-  -ApproveExecution 'EXECUTE example.1 run-1'
-```
+After reviewing the staged package and creating a checkpoint, an elevated **guest** operator may deliberately invoke `Invoke-DriverLabRun.ps1` with the package id, the run id, the approved manifest digest and the exact approval phrase the runner demands (`EXECUTE <package_id> <run_id>`). That is what the runner is for; it is not a step this document walks you through, because in the lab profile `lab_run` and `lab_cycle` perform it for you and only in that profile.
 
 The runner checks administrator and hypervisor presence, the exact approval phrase, the manifest hash and every file hash. The package itself must supply `Run-Lab.ps1`. This generic project does not supply that entry point and does not decide what a package executes.
 

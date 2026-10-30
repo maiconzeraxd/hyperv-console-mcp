@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from .base import ExecResult, FileResult, GuestTransport
+from .choice import TransportChoiceStore
 from .psdirect import PowerShellDirectTransport
 from .ssh import SshTransport
 
@@ -47,6 +48,25 @@ def note_ssh_down(settings: Any, vm_name: str) -> None:
     _HEALTH[_health_key(settings, vm_name)] = (time.monotonic(), False)
 
 
+def chosen_transport(settings: Any, vm_name: str) -> str:
+    """The transport this VM is configured for, in order of who said it.
+
+    A per-VM environment override wins because it is explicit and per-process;
+    then the operator's saved choice, which the window's switch writes; then the
+    host-wide default.
+    """
+    key = vm_name.casefold().replace("_", "-")
+    override = settings.guest_transport_overrides.get(key)
+    if override:
+        return str(override)
+    path = getattr(settings, "transport_choice_file", None)
+    if path:
+        saved = TransportChoiceStore(path).get(vm_name)
+        if saved:
+            return saved
+    return settings.guest_transport
+
+
 def select_transport(settings: Any, backend: Any, vm_name: str) -> GuestTransport:
     """Return the transport for one VM.
 
@@ -54,7 +74,7 @@ def select_transport(settings: Any, backend: Any, vm_name: str) -> GuestTranspor
     within the health timeout; otherwise it is PowerShell Direct. An explicit
     `ssh` never falls back silently: an unprovisioned VM is an error.
     """
-    choice = settings.guest_transport_for(vm_name)
+    choice = chosen_transport(settings, vm_name)
     ssh = SshTransport(settings)
     if choice == "ssh":
         ssh.state(vm_name)  # Raises PolicyError when provisioning is missing.
@@ -66,6 +86,6 @@ def select_transport(settings: Any, backend: Any, vm_name: str) -> GuestTranspor
 
 __all__ = [
     "ExecResult", "FileResult", "GuestTransport", "PowerShellDirectTransport",
-    "SshTransport", "TRANSPORTS", "invalidate_health", "note_ssh_down",
-    "select_transport",
+    "SshTransport", "TRANSPORTS", "TransportChoiceStore", "chosen_transport",
+    "invalidate_health", "note_ssh_down", "select_transport",
 ]

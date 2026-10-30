@@ -1930,6 +1930,72 @@ machine from one host. That is a different product — a shared service with a p
 store and a per-user secret store in front of it — and it should not be grown out of this one by
 widening a DACL.
 
+### 2026-10-30 — v0.3 dashboard wave 5: a matrix, a recording and a light that says which path
+
+- **A recording is sampled, not streamed.** `lab/recording.py` runs one thread that asks the
+  console for a frame every two seconds and keeps at most sixty; past that it **halves** the kept
+  set and doubles the stride, so the picture still spans the run's wall time instead of ending at
+  the moment the cap was hit. The writer thins again until the GIF is under 8 MiB, and the report
+  says how many were sampled and how many survived. `console_frame_size`/`console_frame` were added
+  to `ConsoleService` with `audit=False` per frame: a frame is not an operation, and sixty of them
+  in the audit log would bury the run that produced them.
+- **The recording had to be staged outside the run's directory.** `DriverLabTransfer.collect`
+  creates its destination with `mkdir(exist_ok=False)`, so writing the GIF into the run's evidence
+  folder from the host would have raced the collector that owns it. The recorder writes to
+  `<root>/.recording-<run_id>` and `file_recording()` moves it in afterwards, which also means a
+  cycle that fails mid-way leaves a `.recording-` directory rather than a half-written evidence
+  entry. `lab_cycle(record=true)` and `lab_matrix(record=true)` both go through that path.
+- **A matrix is a loop with a receipt per row, not a new kind of run.** `lab/matrix.py` takes two
+  to four VMs (`MAX_VMS = 4`), gives each one `<run_id>-<vm>` and its own checkpoint, and runs the
+  ordinary cycle sequentially — each cycle owns the guest worker, the checkpoint, the debugger and
+  the console for its whole length, so running them in parallel would be four processes claiming
+  one pipe. A VM that refuses is a row carrying its error code, not the end of the matrix, and one
+  approval names every VM so the operator approved the set they are looking at.
+- **`compare` is the same idea as `lab_receipts`, over `FIELDS`.** `("outcome",
+  "duration_seconds", "bugcheck_code", "blamed_driver", "symbols_all_loaded", "recording")` is what
+  two runs of one package can honestly differ on; a field both rows lack is not compared, so "no
+  recording either way" is not printed as agreement and a bugcheck that has no blamed driver is not
+  printed as a change from one.
+- **The transport switch is its own tool because a read cannot be a switch.** `guest_report` is
+  `read_only_hint`, and a `transport=` argument on it would make that annotation a lie the first
+  time someone saved a choice through it. `guest_transport` is a separate mutation, gated like the
+  others; `guest_transport_status` stays the read and gained `configured` (what the next call would
+  use) beside `saved` (what the operator decided).
+- **`auto` deletes the record instead of writing a third value.** `transport/choice.py` keeps
+  `%LOCALAPPDATA%\HyperVConsoleMCP\transport.json`, and choosing `auto` removes the VM's row: the
+  file then states only decisions the operator made, and an absent row and a row saying "auto" can
+  never disagree about what "no preference" means. Precedence is environment override → saved
+  choice → `settings.guest_transport`, and the answer names which one won.
+- **The probe's latency is measured around the call that produced it.** The first version started
+  the clock before the health check and read it after building the answer, so the number included
+  the bookkeeping. It is now read immediately after `ssh.health()` returns, in both branches, and a
+  probe that fails is an answer with `healthy: false` and a message rather than an exception that
+  would take the whole status down.
+- **The page draws both, and draws nothing it computes.** The Matrix page ticks the VMs, runs
+  `lab_matrix` and paints the service's comparison — one row per VM, then a field × VM table with
+  the differing rows marked, which is the wave's definition of done as a screen. Outside the lab
+  profile it shows the manual-run explanation instead of a button the service would refuse. The
+  Overview shows the transport light: one `guest_transport_status(probe=true)` beside the host
+  reads, latency, what is configured versus what is saved, and a select that calls
+  `guest_transport_set`. The receipts table gained a symbols column and an "Export all" button
+  (`lab_receipts(action="export")`, written under `exports/`).
+- Tests: `tests/test_lab_matrix.py` (the VM normalisation and its refusals, per-VM run ids, the
+  comparison and its absent fields, a refusing VM as a row, the service's argument checks);
+  `tests/test_lab_recording.py` (the stride past the cap, the byte bound, the staging directory, the
+  move into the evidence set, a frame that cannot be read costing one frame); `tests/test_guest_transport.py`
+  (17 — the probe and its latency, a red probe as an answer, `probe=false` sending nothing, both
+  paths on a provisioned VM, the saved choice surviving a second service instance, `auto` removing
+  the row, a bad row ignored while the good one counts, an unreadable file loud); `tests/test_server.py`
+  and `tests/mcp_smoke.py` for the surface; `tests/test_webui_contract.py` because every new button
+  names a real service method.
+- Gate: 1080 passed / 1 skipped, ruff clean, 13 PowerShell files parse, 0 analyzer findings, smoke
+  30 / 45 / 67.
+- Not validated live: every number this wave produced is synthetic. The recording has only ever
+  sampled generated PNGs, never a real `GetVirtualSystemThumbnailImage`; the matrix has never run
+  two real VMs; `guest_transport_status` has never probed a real guest; and the switch has never
+  written to a real profile from the window. What is proved without a VM is the reading and the
+  refusal paths.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three

@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,9 @@ from .report import REPORT_NAME, SCHEMA
 # is joined, so a receipt can never be read from outside that root.
 _RUN_ID = re.compile(r"[A-Za-z0-9_.-]+")
 MAX_RECEIPTS = 200
+# Where ``export`` writes its bundles. It is a directory under the evidence root
+# and would otherwise be read back as a run with no record.
+EXPORT_DIR = "exports"
 MAX_DETAIL_CHARS = 300
 
 # The fields a comparison looks at, in the order a reader wants them. A driver
@@ -50,6 +54,7 @@ COMPARED = (
     "symbols_resolved",
     "evidence_files",
     "evidence_sha256",
+    "recording",
     "checkpoint",
     "reverted",
 )
@@ -75,6 +80,7 @@ def view(record: dict[str, Any]) -> dict[str, Any]:
     debug = _mapping(record.get("debugger"))
     evidence = _mapping(record.get("evidence"))
     checkpoint = _mapping(record.get("checkpoint"))
+    recording = _mapping(record.get("recording"))
     revert = checkpoint.get("revert")
     collected = bool(evidence.get("collected"))
     contents = [item for item in evidence.get("contents") or [] if isinstance(item, dict)]
@@ -100,6 +106,11 @@ def view(record: dict[str, Any]) -> dict[str, Any]:
         "symbols_resolved": crash.get("symbols_resolved"),
         "evidence_files": len(contents) if collected else 0,
         "evidence_sha256": evidence.get("sha256"),
+        # The console GIF is evidence too, but a recording of two runs of the
+        # same package never matches byte for byte, so it is compared by
+        # presence here and by its own hash in the record.
+        "recording": recording.get("path"),
+        "recording_frames": recording.get("frames"),
         "checkpoint": checkpoint.get("name"),
         "reverted": _mapping(revert).get("restored") if isinstance(revert, dict) else revert,
     }
@@ -155,18 +166,19 @@ def read_record(root: Path, run_id: str) -> dict[str, Any] | None:
 
 
 def evidence_files(root: Path, run_id: str, record: dict[str, Any]) -> list[dict[str, Any]]:
-    """The files this run collected, with where they are now.
+    """The files this run left in its directory, with where they are now.
 
     The record names them by their path inside the run's directory; the path
     beside each entry is the absolute one, so a window can hand the operator a
-    place to look instead of a name to search for.
+    place to look instead of a name to search for. The console recording is
+    listed here too: it is evidence, and a run whose guest evidence collection
+    failed can still have one.
     """
     evidence = _mapping(record.get("evidence"))
-    if not evidence.get("collected"):
-        return []
     directory = Path(root) / _run_id(run_id)
     found: list[dict[str, Any]] = []
-    for item in evidence.get("contents") or []:
+    contents = evidence.get("contents") if evidence.get("collected") else []
+    for item in contents or []:
         if not isinstance(item, dict):
             continue
         relative = str(item.get("path") or "").replace("\\", "/").strip("/")
@@ -178,6 +190,17 @@ def evidence_files(root: Path, run_id: str, record: dict[str, Any]) -> list[dict
             "size": item.get("size"),
             "sha256": item.get("sha256"),
         })
+    recording = _mapping(record.get("recording"))
+    relative = str(recording.get("path") or "").replace("\\", "/").strip("/")
+    if recording.get("written") is not False and relative and ".." not in relative.split("/"):
+        if not any(item["path"] == relative for item in found):
+            found.append({
+                "path": relative,
+                "host_path": str(directory / relative),
+                "size": recording.get("size"),
+                "sha256": recording.get("sha256"),
+                "kind": "recording",
+            })
     return found
 
 
@@ -194,7 +217,11 @@ def list_receipts(
     skipped: list[str] = []
     for child in children:
         try:
-            if not child.is_dir() or _RUN_ID.fullmatch(child.name) is None:
+            if (
+                not child.is_dir()
+                or _RUN_ID.fullmatch(child.name) is None
+                or child.name == EXPORT_DIR
+            ):
                 continue
         except OSError:
             continue
@@ -288,7 +315,51 @@ def compare(root: Path, first: str, second: str) -> dict[str, Any]:
     }
 
 
+def export(
+    root: Path, *, vm_name: str | None = None, limit: int = MAX_RECEIPTS
+) -> dict[str, Any]:
+    """Every receipt this host kept, as one file an operator can archive.
+
+    The receipts already live under the evidence root as one small JSON each;
+    this copies them, with their hashes, into a single timestamped file under
+    ``exports/``. It is a copy and not a move: the per-run records stay where
+    the evidence is, so nothing a receipt points at stops resolving.
+    """
+    base = Path(root)
+    listing = list_receipts(base, vm_name=vm_name, limit=limit)
+    records: list[dict[str, Any]] = []
+    for entry in listing.get("receipts") or []:
+        record = read_record(base, str(entry.get("run_id") or ""))
+        if record is None:
+            continue
+        records.append(record)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    document = {
+        "exported_utc": datetime.now(timezone.utc).isoformat(),
+        "root": str(base),
+        "vm_name": vm_name,
+        "count": len(records),
+        "receipts": records,
+    }
+    data = json.dumps(document, indent=2, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    directory = base / EXPORT_DIR
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"receipts-{stamp}.json"
+        path.write_bytes(data)
+    except OSError as exc:
+        return {"written": False, "error": str(exc)[:MAX_DETAIL_CHARS], "count": len(records)}
+    return {
+        "written": True,
+        "path": str(path),
+        "count": len(records),
+        "bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "skipped": listing.get("skipped") or [],
+    }
+
+
 __all__ = [
-    "COMPARED", "MAX_RECEIPTS", "compare", "crash_view", "evidence_files",
-    "get_receipt", "list_receipts", "read_record", "view",
+    "COMPARED", "EXPORT_DIR", "MAX_RECEIPTS", "compare", "crash_view", "evidence_files",
+    "export", "get_receipt", "list_receipts", "read_record", "view",
 ]

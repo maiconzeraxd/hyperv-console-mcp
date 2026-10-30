@@ -25,25 +25,25 @@ CONFIGURATIONS = (
     (
         "safe",
         {},
-        29,
+        30,
         {
-            "core": 8, "guest": 6, "console": 4, "config": 3,
+            "core": 8, "guest": 7, "console": 4, "config": 3,
             "credentials": 2, "media": 3, "ssh": 3,
         },
     ),
     (
         "lab profile",
         {"HYPERV_MCP_PROFILE": "lab"},
-        43,
-        {"core": 8, "guest": 6, "console": 4, "config": 3, "lab": 11, "kd": 9, "debug": 2},
+        45,
+        {"core": 8, "guest": 7, "console": 4, "config": 3, "lab": 12, "kd": 9, "debug": 2},
     ),
     (
         "all toolsets",
         {"HYPERV_MCP_TOOLSETS": "all"},
-        65,
+        67,
         {
-            "core": 8, "guest": 6, "console": 4, "config": 3, "credentials": 2,
-            "media": 3, "ssh": 3, "serial": 5, "lab": 11, "kd": 9, "debug": 2,
+            "core": 8, "guest": 7, "console": 4, "config": 3, "credentials": 2,
+            "media": 3, "ssh": 3, "serial": 5, "lab": 12, "kd": 9, "debug": 2,
             "files": 9,
         },
     ),

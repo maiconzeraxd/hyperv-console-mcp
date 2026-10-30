@@ -47,7 +47,34 @@ The loop is deliberately lazy in three ways:
 
 The thumbnail path is the only consumer of this cadence; `console_screenshot(source="vmconnect")` is requested once, by the button that opens it, and never on a timer.
 
+### What the lazy loop costs, counted
+
+| Window state | Captures per minute | Pipe traffic |
+|---|---|---|
+| Visible, VM running | ~75 (one every 800 ms) | one `console_screenshot` each |
+| Hidden or paused | 0 | none |
+| Service refuses (Off VM, no `screenshots`) | 0, after the first refusal | one failed call, then silence |
+
+A ten-minute window left on another tab therefore costs nothing, where a timer that kept polling would have sent about 750 captures. The measurement is the code path, not the guest: `SCREEN_INTERVAL_MS` is the only knob, one frame is in flight, and the refusal branch stops the loop instead of retrying.
+
+The host-side cost of one frame, measured here on this machine with a synthetic 1920×1080 image through `capture.thumbnail_screenshot(max_width=640)` (LANCZOS downscale plus PNG encode, which is what the service does per frame after the VMConnect capture returns):
+
+| Source | Downscale + encode |
+|---|---|
+| 1920×1080 → 640 | 1.8 ms |
+| 1024×768 → 640 | 1.0 ms |
+
+Those are host CPU figures only. The capture itself — `GetVirtualSystemThumbnailImage` over the bridge — is the dominant term and no live number is recorded for it here.
+
+### Recording a run
+
+The recorder samples every 2 s and keeps at most 60 frames. A ten-minute cycle is 300 samples thinned to 60, and the GIF still plays over the run's wall time because the frame delay grows with the stride. Writing the GIF is one burst at the end, not per frame: encoding 60 frames of 640×480 measured **0.83 s** and produced a 57 KiB file on this machine; a 14-frame recording took **0.12 s** (8 ms per frame). The 8 MiB cap is a second, independent bound: if the kept frames still exceed it the writer drops more of them, and the report says how many were sampled and how many survived.
+
 No live frame-time numbers are recorded here yet. The figure that would matter is the round trip of one capture against a running guest on this host — a measurement `scripts/bench_transport.py` does not take, because it measures guest commands and file transfers rather than the VMConnect capture path.
+
+## The transport light
+
+`guest_transport_status(probe=true)` costs one trivial guest command (`$env:COMPUTERNAME`, 15 s timeout, 512 characters of output) over the transport the next call would use, and reports the round trip in milliseconds. The Overview page runs it once per render, in parallel with the host reads, so opening a VM pays one guest round trip — the same order as the `guest_status` call the Guest page already made. With `probe=false` it is a host-side read only: the saved choice, the provisioned state and the selection, no traffic into the guest. `auto` still caches an SSH health result for 30 s, so a page that probes repeatedly does not reconnect every time.
 
 ## Recommended measurement matrix
 

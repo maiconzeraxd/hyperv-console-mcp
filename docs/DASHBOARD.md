@@ -27,9 +27,9 @@ It decides nothing. It opens the launcher's own command, reads `host_status` and
 
 ## The window
 
-The **fleet** is the home page: every VM Hyper-V reported, its state, the level this host allows it, CPU and memory, and the power actions that level permits. Opening a VM creates a **workspace tab**; several may be open at once and only one is active. A workspace is the full set of per-VM pages:
+The **fleet** is the home page: every VM Hyper-V reported, its state, the level this host allows it, CPU and memory, and the power actions that level permits. Opening a VM creates a **workspace tab**; several may be open at once and only one is active. Two pages are about the host rather than about one VM and stay reachable with no workspace open — **Fleet** and **Matrix**. A workspace is the full set of per-VM pages:
 
-- **Overview** — the VM's state, the level it is held to, and what the AI may do with it.
+- **Overview** — the VM's state, the guest transport with its green/red light and round-trip latency, the level it is held to, and what the AI may do with it.
 - **Activity** — the live feed: actor, operation, VM, phase, progress and error code, for the AI and for this window, read from the same event bus. This is where the operator watches the AI work.
 - **Console** — the guest display as an image you can click and type into.
 - **Checkpoints** — the tree of states, with the operator's baseline marked and locked.
@@ -37,7 +37,7 @@ The **fleet** is the home page: every VM Hyper-V reported, its state, the level 
 - **Media** — an ISO, the DVD drive and boot order.
 - **Debugger** — COM1 serial, the kd session and the symbols it resolves.
 - **Guest** — the credential source, the automation toggles and one command.
-- **Lab** — diagnostics, package staging, verification and the cycle that runs a package.
+- **Lab** — diagnostics, package staging, verification, the cycle that runs a package, receipts with export, and the crash triage.
 - **Files** — the host's four roots beside the guest's own disk.
 
 Closing the window does not stop a VM or guarantee that an already-running guest command was cancelled, and changing pages does not cancel a background operation.
@@ -67,7 +67,27 @@ Everything else the window offers, the AI can do too, through the tool of the sa
 
 The console page renders `console_screenshot(source="thumbnail")` a few frames per second and sends clicks as guest-display pixels, mapping the `<img>`'s CSS box back through the `source_width`/`source_height` in the screenshot metadata. `capture_scale` and `coordinates_match_mouse` say whether that mapping is honest, and the page repeats the answer instead of guessing. Typing is batched into one `console_input` call, and a paste box covers OOBE, where the guest has no clipboard to share. For full fidelity open VMConnect from the same page: this is a picture of the display, not a video stream, and it cannot show a session the VMConnect desktop is drawing exclusively.
 
-Capture stops for a reason: the loop pauses when the window is hidden or the operator paused it, and it *stops asking* — rather than retrying twice a second — when the service refuses, which is what an Off VM or a level without `control` looks like.
+Capture stops for a reason: the loop pauses when the window is hidden or the operator paused it, and it *stops asking* — rather than retrying twice a second — when the service refuses, which is what an Off VM or a level without `control` looks like. `docs/PERFORMANCE.md` records what that costs and what it saves.
+
+## Recording a run
+
+A cycle can carry a GIF of the console. Tick **Record the console** (or pass `record=true` to `lab_cycle`/`lab_matrix`) and the service samples the guest's display every two seconds while the cycle runs, writing one animated GIF into the run's own directory and naming it in `lab-cycle.json`. It is evidence, so it is treated like the rest: listed beside the collected files by `lab_receipts(action="get")` with its host path and SHA-256, and compared between runs by presence rather than by hash, because two recordings of the same package never match byte for byte.
+
+The recorder has a budget in frames and in bytes, and it **thins rather than stops** when it reaches it: past sixty frames it keeps every other one and samples half as often, so a long run is still covered end to end and the GIF still ends on the screen the run stopped on. If the frames then exceed the byte budget the writer drops more, and the report says how many were sampled, how many were kept and whether the set was truncated. A frame that cannot be read is one frame fewer, never an error: a recording must not fail the cycle that produced it.
+
+## The guest transport
+
+The Overview page answers two different questions and does not let one stand in for the other. **Which path is configured** comes from the settings: a per-VM `HYPERV_MCP_GUEST_TRANSPORT_<VM>` variable first, then the operator's saved choice, then the host-wide default. **Whether it answers** comes from one trivial command (`$env:COMPUTERNAME`) sent over the transport the next call would actually use, timed. A green light means the guest replied just now and the number beside it is that round trip; a red one means it did not, with the error code and the message. A failed probe is a state, not an exception: the page has to be able to draw a red light.
+
+The switch below it is `guest_transport_set`, which saves the choice to `%LOCALAPPDATA%\HyperVConsoleMCP\transport.json` and applies it to the next call without a restart. `auto` is the absence of a preference rather than a third saved value, so it removes the record: the file says what the operator decided, and "let the probe decide" is a decision to stop deciding. When an environment variable is setting the transport, the answer says so, because the saved choice is then not what wins. SSH is reported on its own line as well — provisioned, answering, latency — so a VM carried by PowerShell Direct can still show a healthy sshd, or the reason it is not.
+
+## The matrix
+
+The **Matrix** page runs the same package through the same cycle on two to four VMs, one after another, and puts the outcomes side by side. It is one call (`lab_matrix`) and one approval: a single click that runs a payload four times has to say so, and the approval summary names every VM and its per-VM run id. Each VM gets `<run_id>-<vm>`, slugged into a directory name, so the receipts never collide.
+
+The runs are sequential, not concurrent, because each cycle owns the guest worker, a checkpoint, a debugger attachment and the console for its whole length. One VM refusing the run — off, out of level, no guest — becomes that VM's row with its error code, and the matrix continues: the other rows are still the answer. A failure that is not about the VM is not swallowed.
+
+The result is two tables. The first is one row per VM: outcome, duration, bugcheck, blamed driver, whether the symbols loaded, the recording. The second is one row per compared field with a column per VM, so "identical everywhere except the bugcheck on Windows 11" is a highlighted row rather than a reading exercise. The comparing is the service's (`lab.matrix.compare`); the page only draws it, because a page that decided what "same" meant would be a second implementation of it. Progress arrives as the `lab_matrix` events, each band labelled with the VM that is running.
 
 ## The file manager
 
@@ -81,7 +101,7 @@ The lab page is built around one rule: a cycle is a single service call, so the 
 
 Running a package is offered only in the lab profile, because that is where the server accepts it. Staging (`lab_stage`) is a host-to-guest copy of a directory under `HYPERV_MCP_LAB_ROOT` with a manifest built on both sides; `lab_verify` compares the published package with an approved digest; `lab_collect` reads evidence without executing anything. The wave in the roadmap called this pair `lab_plan`/`lab_apply`; the service has no such methods and the page does not invent them, so the staging panel calls what exists.
 
-**Receipts** are the read side of `lab-cycle.json`. `lab_receipts(action="list")` names every run under the evidence root, newest first and optionally for one VM; a directory holding no readable record is listed as skipped rather than guessed at. Clicking a row opens it: the record's fields, and every evidence file with its host path and SHA-256, each with a jump into the file manager. Clicking two rows and then "Compare" runs `lab_receipts(action="compare")`, which reports what matched and what changed, and marks a field one side never had as `absent` — a run that crashed has a blamed driver and a run that passed does not, and that is not the same as "changed to nothing".
+**Receipts** are the read side of `lab-cycle.json`. `lab_receipts(action="list")` names every run under the evidence root, newest first and optionally for one VM; a directory holding no readable record is listed as skipped rather than guessed at. The table carries a **symbols** badge per run — whether the driver's `.pdb` resolved, which is what makes a stack readable — and a console recording shows in the Files column like any other piece of evidence. Clicking a row opens it: the record's fields, and every evidence file with its host path and SHA-256, each with a jump into the file manager. Clicking two rows and then "Compare" runs `lab_receipts(action="compare")`, which reports what matched and what changed, and marks a field one side never had as `absent` — a run that crashed has a blamed driver and a run that passed does not, and that is not the same as "changed to nothing". **Export all** is `lab_receipts(action="export")`: it copies every receipt, optionally for one VM, into one JSON document under `exports/` beneath the evidence root, with each record's hash, and leaves the per-run records where they are. The export directory is not itself read back as a run.
 
 **Crash triage** formats `!analyze -v` instead of showing it: the bugcheck code and its name, the bucket, the blamed driver, whether the symbols resolved, the parameters and the top frames, with the dump and kd's log named where they are. It reads either the report the cycle just returned or the receipt it wrote, because the record keeps the crash — the stack included — so a run can be triaged long after the window that ran it closed.
 
@@ -104,9 +124,9 @@ The dashboard was delivered in waves, each one gated by the full test suite befo
 | 2 | The clickable console, the checkpoint tree with a locked baseline, and in-place two-click confirmations. |
 | 3 | The host↔guest file manager: four roots, both directions, digest and progress. |
 | 4 | Lab receipts and comparison, the live cycle, the crash triage, the kd console and breakpoints, the serial reader and the prepare-guest buttons. |
-| 5 | Multi-VM matrix, run recording and per-VM transport health. |
+| 5 | Multi-VM matrix with the side-by-side comparison, console recording attached to the receipt, the per-VM transport light and switch, the symbols badge and receipt export. |
 
-Wave 5 is not built yet.
+Each wave was closed with the whole suite green — pytest, ruff, the PowerShell parse, `Invoke-ScriptAnalyzer`, the stdio smoke test and `node --check` on the page's script — before it was committed.
 
 ## Cross-process activity
 

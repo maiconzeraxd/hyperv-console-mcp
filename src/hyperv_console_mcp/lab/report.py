@@ -88,6 +88,22 @@ def _debugger(debug: Any) -> dict[str, Any] | None:
     return {key: value for key, value in summary.items() if value is not None}
 
 
+def _recording(recording: Any) -> dict[str, Any] | None:
+    """The console GIF, named by its hash so a receipt can prove which one it is.
+
+    Kept out of ``evidence.sha256`` on purpose: a screen recording of two runs of
+    the same package never matches byte for byte, and a comparison column that
+    always says "differs" says nothing.
+    """
+    if not isinstance(recording, dict) or not recording.get("written"):
+        return None
+    return {
+        key: recording.get(key)
+        for key in ("path", "size", "sha256", "frames", "duration_seconds", "truncated")
+        if recording.get(key) is not None
+    }
+
+
 def build(report: dict[str, Any]) -> dict[str, Any]:
     """One cycle, reduced to what a later run can be compared against."""
     verification = report.get("verification") if isinstance(report.get("verification"), dict) else {}
@@ -111,6 +127,7 @@ def build(report: dict[str, Any]) -> dict[str, Any]:
         "debugger": _debugger(report.get("debugger")),
         "crash": _crash(report.get("crash")),
         "evidence": _evidence(report.get("evidence") or {}),
+        "recording": _recording(report.get("recording")),
     }
     if checkpoint:
         record["checkpoint"] = {

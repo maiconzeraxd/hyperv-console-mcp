@@ -306,12 +306,15 @@ def create_server(
         description="Read guest state through PowerShell Direct. what='status' reports OS, boot time, "
         "memory, system-drive free space and kernel debug settings; 'processes' lists up to 200 "
         "processes; 'services' lists up to 200 services, stopped ones only with include_stopped=true; "
-        "'events' reads recent System, Application, Security or Setup records. Requires ALLOW_GUEST "
-        "and guest credentials.",
+        "'events' reads recent System, Application, Security or Setup records; 'transport' reports which "
+        "guest transport this VM is on (auto, psdirect, ssh), which one the next call would use, whether "
+        "SSH was provisioned, and with probe=true the round-trip latency of one trivial command - a "
+        "failed probe is reported with its error code instead of raised. Requires ALLOW_GUEST and guest "
+        "credentials.",
     )
     async def guest_report(
         vm_name: str,
-        what: Literal["status", "processes", "services", "events"] = "status",
+        what: Literal["status", "processes", "services", "events", "transport"] = "status",
         name_contains: str = "",
         include_stopped: bool = False,
         log_name: Literal["System", "Application", "Security", "Setup"] = "System",
@@ -319,6 +322,7 @@ def create_server(
         event_id: int | None = None,
         level: int | None = None,
         hours: int = 72,
+        probe: bool = True,
     ) -> dict[str, Any]:
         if what == "processes":
             return await _invoke(service.guest_processes, vm_name, name_contains)
@@ -328,7 +332,21 @@ def create_server(
             return await _invoke(
                 service.guest_events, vm_name, log_name, max_events, event_id, level, hours
             )
+        if what == "transport":
+            return await _invoke(service.guest_transport_status, vm_name, probe)
         return await _invoke(service.guest_status, vm_name)
+
+    @tool(
+        "guest_transport", annotations=MUTATION,
+        description="Choose which path carries this VM's guest commands: 'auto' lets the host prefer "
+        "SSH when it is provisioned and answers, otherwise PowerShell Direct; 'psdirect' or 'ssh' pins "
+        "it. The choice is saved and applies to the next call without a restart; 'auto' clears it. A "
+        "per-VM HYPERV_MCP_GUEST_TRANSPORT_<VM> variable still wins, and the answer says so.",
+    )
+    async def guest_transport(
+        vm_name: str, transport: Literal["auto", "psdirect", "ssh"] = "auto"
+    ) -> dict[str, Any]:
+        return await _invoke(service.guest_transport_set, vm_name, transport)
 
     @tool(
         "guest_exec", annotations=MUTATION,
@@ -579,10 +597,11 @@ def create_server(
         description="Read the receipts earlier cycles left under HYPERV_MCP_EVIDENCE_ROOT. action='list' names every run "
         "(newest first, optionally for one VM); action='get' returns one run's record and the evidence it collected, "
         "with the host path and SHA-256 of each file; action='compare' reports field by field what changed between "
-        "two runs. Reads the host only: no VM is touched and nothing is executed.",
+        "two runs; action='export' copies the whole history into one timestamped file under exports/. Reads and "
+        "copies on the host only: no VM is touched and nothing is executed.",
     )
     async def lab_receipts(
-        action: Literal["list", "get", "compare"] = "list",
+        action: Literal["list", "get", "compare", "export"] = "list",
         run_ids: list[str] | None = None,
         vm_name: str | None = None,
         limit: int = 20,
@@ -621,7 +640,8 @@ def create_server(
         "collect evidence into HYPERV_MCP_EVIDENCE_ROOT, then optionally restore checkpoint pre-<run_id>. "
         "With a debugger, a bugcheck is reported as a bugcheck with the parsed !analyze -v instead of a hang; "
         "a crash is triaged from the collected dump either way, and the cycle writes lab-cycle.json beside "
-        "the evidence so runs of the same package can be compared.",
+        "the evidence so runs of the same package can be compared. record=true samples the console while "
+        "the package runs and writes console.gif beside the evidence.",
     )
     async def lab_cycle(
         vm_name: str,
@@ -633,11 +653,38 @@ def create_server(
         revert_after: bool = False,
         include_kernel_dump: bool = True,
         debugger: Literal["none", "serial", "kdnet"] = "none",
+        record: bool = False,
     ) -> dict[str, Any]:
         return await _invoke(
             service.lab_cycle, vm_name, package_id, run_id, expected_manifest_sha256,
             timeout_seconds, checkpoint_before, revert_after, include_kernel_dump,
-            debugger,
+            debugger, record,
+        )
+
+    @tool(
+        "lab_matrix", annotations=MUTATION,
+        description="Lab profile only. Run the same staged package through the same cycle on two to four "
+        "VMs, one after another, and answer field by field what differed: outcome, duration, bugcheck "
+        "code, blamed driver, driver symbols and recording. Each VM gets run id <run_id>-<vm>, so every "
+        "row is its own receipt. One approval covers the whole matrix. A VM that refuses the run is a "
+        "row with its error, not the end of the matrix.",
+    )
+    async def lab_matrix(
+        vm_names: list[str],
+        package_id: str,
+        run_id: str,
+        expected_manifest_sha256: str,
+        timeout_seconds: int = 600,
+        checkpoint_before: bool = True,
+        revert_after: bool = False,
+        include_kernel_dump: bool = True,
+        debugger: Literal["none", "serial", "kdnet"] = "none",
+        record: bool = False,
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.lab_matrix, vm_names, package_id, run_id, expected_manifest_sha256,
+            timeout_seconds, checkpoint_before, revert_after, include_kernel_dump,
+            debugger, record,
         )
 
     @tool(

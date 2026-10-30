@@ -6,7 +6,7 @@ A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/)
 
 ## Highlights
 
-- **55 MCP tools in eleven toolsets**, with read-only/destructive annotations and structured results; a profile registers only its own toolsets, so the default surface is 29 tools rather than every schema in every conversation.
+- **67 MCP tools in twelve toolsets**, with read-only/destructive annotations and structured results; a profile registers only its own toolsets, so the default surface is 30 tools rather than every schema in every conversation.
 - Inventory, pause/resume, bounded state waiting, power, checkpoints, and bounded guest file transfer.
 - A running VM reports its guest's computer name and OS from the Hyper-V key-value pair exchange,
   so a VM can be identified before any guest credential exists.
@@ -137,13 +137,13 @@ client can either ask you or, in the lab profile, do it.
 
 Every tool belongs to one toolset. A profile decides which toolsets are registered, and a
 tool that is not registered is never advertised, so its schema never enters the model's
-context. The `safe` profile registers 29 tools, `lab` registers 43, `HYPERV_MCP_TOOLSETS`
-replaces the set outright, and `all` enables everything (65 tools).
+context. The `safe` profile registers 30 tools, `lab` registers 45, `HYPERV_MCP_TOOLSETS`
+replaces the set outright, and `all` enables everything (67 tools).
 
 | Toolset | Tools | safe | lab |
 |---|---|:--:|:--:|
 | `core` | `hyperv_host_status`, `vm_list`, `vm_get`, `vm_power`, `checkpoint_list`, `checkpoint`, `events_snapshot`, `operation_status` | ✓ | ✓ |
-| `guest` | `guest_report`, `guest_exec`, `guest_read_file`, `guest_write_file`, `guest_put_file`, `guest_get_file` | ✓ | ✓ |
+| `guest` | `guest_report`, `guest_exec`, `guest_transport`, `guest_read_file`, `guest_write_file`, `guest_put_file`, `guest_get_file` | ✓ | ✓ |
 | `console` | `console_info`, `console_input`, `console_wait_for_change`, `console_screenshot` | ✓ | ✓ |
 | `config` | `guest_autologon_configure`, `guest_config_status`, `guest_config_revert` | ✓ | ✓ |
 | `credentials` | `guest_credential_status`, `guest_credential` | ✓ | |
@@ -151,7 +151,7 @@ replaces the set outright, and `all` enables everything (65 tools).
 | `ssh` | `guest_ssh_provision`, `guest_ssh_status`, `guest_ssh_deprovision` | ✓ | |
 | `files` | `file_roots`, `host_list_dir`, `host_make_dir`, `host_rename`, `host_delete`, `guest_list_dir`, `guest_make_dir`, `guest_rename`, `guest_delete` | | |
 | `serial` | `serial_status`, `serial_connect`, `serial_read`, `serial_send`, `serial_disconnect` | | |
-| `lab` | `lab_init`, `lab_diagnostics`, `lab_stage`, `lab_verify`, `lab_collect`, `lab_guest_configure`, `lab_verifier`, `lab_driver_service`, `lab_run`, `lab_cycle`, `lab_receipts` | | ✓ |
+| `lab` | `lab_init`, `lab_diagnostics`, `lab_stage`, `lab_verify`, `lab_collect`, `lab_guest_configure`, `lab_verifier`, `lab_driver_service`, `lab_run`, `lab_cycle`, `lab_matrix`, `lab_receipts` | | ✓ |
 | `kd` | `kd_attach`, `kd_status`, `kd_detach`, `kd_execution`, `kd_command`, `kd_wait_event`, `kd_breakpoint`, `kd_inspect`, `vm_inject_nmi` | | ✓ |
 | `debug` | `debug_status`, `debug_setup` | | ✓ |
 
@@ -159,8 +159,9 @@ Families that only differ by an action share one tool with a typed discriminator
 schema carries the choice instead of a dozen near-duplicates: `console_input` takes an
 ordered list of `text`, `keys`, `key_state`, `mouse_buttons`, `move`, `click`, `scroll`,
 `wait` and `ctrl_alt_delete` actions; `checkpoint` takes `create`/`restore`/`delete`;
-`guest_report` takes `status`/`processes`/`services`/`events`; `guest_credential` takes
-`rotate`/`forget`; `kd_execution` takes `break`/`go`; `kd_breakpoint` takes
+`guest_report` takes `status`/`processes`/`services`/`events`/`transport`; `guest_credential` takes
+`rotate`/`forget`; `lab_receipts` takes `list`/`get`/`compare`/`export`; `kd_execution` takes
+`break`/`go`; `kd_breakpoint` takes
 `set`/`clear`/`on_load`; `kd_inspect` takes `stack`/`modules`/`analyze`/`dump`; and
 `debug_setup` crosses `transport` (`serial`/`kdnet`) with `action` (`prepare`/`guest`/
 `deprovision`). `vm_get(wait_for=[...])` absorbs the old `vm_wait`. Read-only tools stay
@@ -168,7 +169,7 @@ separate from mutating ones, so a listing never asks for approval.
 
 Power actions are `start`, `shutdown`, `save`, `pause`, `resume`, `turn_off`, and `reset`. Forced power needs `confirm_vm` equal to `vm_name`. Restore/delete need the VM name and exact checkpoint GUID confirmed. Overwriting an existing guest file needs `overwrite=true` and an exact `confirm_path`.
 
-`guest_read_file`/`guest_write_file` move small content inline (≤ 8 MiB of base64 in one request). `guest_put_file`/`guest_get_file` copy whole files between the guest and a host path under one of the configured roots (`HYPERV_MCP_TRANSFER_ROOT`, `HYPERV_MCP_LAB_ROOT`, `HYPERV_MCP_EVIDENCE_ROOT`, `HYPERV_MCP_ISO_ROOT`), verifying SHA-256 on both sides; they are the right choice for drivers, dumps and anything else measured in tens of MiB, and they publish `progress` events as the bytes move. Every guest result carries `transport` (`psdirect` or `ssh`); see [client configuration](docs/SETUP.md) for the optional SSH transport, which stays unused until `guest_ssh_provision` has set it up.
+`guest_read_file`/`guest_write_file` move small content inline (≤ 8 MiB of base64 in one request). `guest_put_file`/`guest_get_file` copy whole files between the guest and a host path under one of the configured roots (`HYPERV_MCP_TRANSFER_ROOT`, `HYPERV_MCP_LAB_ROOT`, `HYPERV_MCP_EVIDENCE_ROOT`, `HYPERV_MCP_ISO_ROOT`), verifying SHA-256 on both sides; they are the right choice for drivers, dumps and anything else measured in tens of MiB, and they publish `progress` events as the bytes move. Every guest result carries `transport` (`psdirect` or `ssh`); see [client configuration](docs/SETUP.md) for the optional SSH transport, which stays unused until `guest_ssh_provision` has set it up. `guest_report(what="transport")` says which transport a VM is on and, with `probe=true`, times one trivial command over the path the next call would use; `guest_transport` saves a per-VM choice (`auto`/`psdirect`/`ssh`) that applies to the next call, and a `HYPERV_MCP_GUEST_TRANSPORT_<VM>` variable still wins over it.
 
 The `files` family is the browsing half of the same job: `file_roots` names the four host roots and whether each exists, `host_list_dir`/`host_make_dir`/`host_rename`/`host_delete` work inside one of them (a path is resolved and refused if it lands outside its root, so `..` and an absolute path both fail), and `guest_list_dir`/`guest_make_dir`/`guest_rename`/`guest_delete` do the same inside the VM over the configured transport. Deleting anything needs the path spelled back in `confirm_path`; a non-empty directory needs `recursive=true` as well. The dashboard draws this as two panels; the tools exist so an agent can do it too.
 
@@ -178,7 +179,7 @@ Media operations use an existing DVD drive and require the VM to be Off. `media_
 
 ## Dashboard and reproducible lab
 
-Start the native dashboard with `python -I scripts\run_dashboard.py` or, after installation, `hyperv-dashboard`. `--vm <name>` picks the VM up front; without it the window opens the fleet and asks from a list when there is more than one, so no VM name is built into the program. It uses the same service and policies as MCP and exposes a fleet page, workspace tabs and the activity, console, checkpoint, recovery, media, serial/debugging, guest, lab and file-manager pages. Optional per-request approval of AI mutations is documented in [the dashboard guide](docs/DASHBOARD.md); a pending request is a card in a side queue, never a modal prompt, so the window stays usable while an operation waits.
+Start the native dashboard with `python -I scripts\run_dashboard.py` or, after installation, `hyperv-dashboard`. `--vm <name>` picks the VM up front; without it the window opens the fleet and asks from a list when there is more than one, so no VM name is built into the program. It uses the same service and policies as MCP and exposes a fleet page, a multi-VM matrix page, workspace tabs and the activity, console, checkpoint, recovery, media, serial/debugging, guest, lab and file-manager pages. Optional per-request approval of AI mutations is documented in [the dashboard guide](docs/DASHBOARD.md); a pending request is a card in a side queue, never a modal prompt, so the window stays usable while an operation waits.
 
 `hyperv-console-mcp` on its own is the same window, and that is the command the Start Menu shortcut runs: a terminal gets the window, an MCP client — which always gives the process a pipe — gets the server, and a shortcut started with no stdin gets the window too. `--stdio` and `--ui` say which one you meant; `--vm NAME` and `--classic` are handed to the window unchanged.
 
@@ -190,7 +191,7 @@ A host where no VM has a level yet opens on a three-question wizard — which VM
 
 The MCP server and the dashboard are clients of one background service, so a KD or serial session the AI opens is the session the window shows, and the activity page lists what the other process did. A client that finds no host starts one (`hyperv-service`, or `hyperv-service --pipe NAME`) and joins it; `HYPERV_MCP_SHARED_SERVICE=false` keeps a private copy for a run that must not disturb a live one, and `HYPERV_MCP_SERVICE_PIPE` names a different pipe. The host reads its policy once at startup, so whichever client starts it decides the environment for both — set the level per VM in the access file rather than relying on a client's environment.
 
-The lab workflow initializes fixed guest directories, stages hash-verified packages and collects evidence. Package sources and evidence downloads are confined to `HYPERV_MCP_LAB_ROOT` and `HYPERV_MCP_EVIDENCE_ROOT`. Without the lab profile, running a package is a separate manual guest action requiring an exact run-specific approval phrase; with `HYPERV_MCP_PROFILE=lab`, `lab_run`/`lab_cycle` generate that phrase, checkpoint first and classify the outcome as `ok`, `failed`, `not_verified`, `bugcheck`, `hang` or `timeout`. A bugcheck is then triaged from the dump the run collected — the newest minidump first, `!analyze -v` through kd, merged with the host's own crash record — and each cycle writes `lab-cycle.json` beside the evidence so two runs of the same package can be diffed. `lab_receipts` reads those records back on the host alone — `action="list"` names every run newest first, `action="get"` returns one run with the host path and SHA-256 of each evidence file, and `action="compare"` reports field by field what changed between two runs, marking a field one side never had as absent rather than as changed to nothing. `lab_verifier` turns Driver Verifier on for named test drivers and `lab_driver_service` installs, starts, stops and removes a test kernel-driver service, both recorded and revertible in the guest; a refused driver is reported with its Win32 error and NTSTATUS, and signature enforcement is never bypassed. See [the lab guide](docs/LAB.md); no driver or mapper is bundled or run by this repository.
+The lab workflow initializes fixed guest directories, stages hash-verified packages and collects evidence. Package sources and evidence downloads are confined to `HYPERV_MCP_LAB_ROOT` and `HYPERV_MCP_EVIDENCE_ROOT`. Without the lab profile, running a package is a separate manual guest action requiring an exact run-specific approval phrase; with `HYPERV_MCP_PROFILE=lab`, `lab_run`/`lab_cycle` generate that phrase, checkpoint first and classify the outcome as `ok`, `failed`, `not_verified`, `bugcheck`, `hang` or `timeout`. A bugcheck is then triaged from the dump the run collected — the newest minidump first, `!analyze -v` through kd, merged with the host's own crash record — and each cycle writes `lab-cycle.json` beside the evidence so two runs of the same package can be diffed. `lab_receipts` reads those records back on the host alone — `action="list"` names every run newest first, `action="get"` returns one run with the host path and SHA-256 of each evidence file, `action="compare"` reports field by field what changed between two runs, marking a field one side never had as absent rather than as changed to nothing, and `action="export"` copies every receipt into one JSON document under `exports/` without moving the originals. `lab_cycle(record=true)` keeps a GIF of the guest console as evidence; `lab_matrix` runs the same package on two to four VMs, one after another with a run id per VM, and returns the rows plus a field-by-field comparison so the difference is a column rather than a memory. `lab_verifier` turns Driver Verifier on for named test drivers and `lab_driver_service` installs, starts, stops and removes a test kernel-driver service, both recorded and revertible in the guest; a refused driver is reported with its Win32 error and NTSTATUS, and signature enforcement is never bypassed. See [the lab guide](docs/LAB.md); no driver or mapper is bundled or run by this repository.
 
 ## Performance and debugging
 

@@ -98,15 +98,24 @@ after the crash.
 `outcome` is `ok`, `failed`, `not_verified`, `bugcheck`, `hang` or `timeout`. Use a new `run_id`
 for every attempt: a repeated id is a different run, not a retry of the same one.
 
-Outside the lab profile the same package is run by hand in an elevated guest session:
-
-```powershell
-& 'C:\DriverLab\Tools\Invoke-DriverLabRun.ps1' -PackageId 'example.1' -RunId 'run-1' `
-  -ExpectedManifestSha256 '<manifest-sha256>' -ApproveExecution 'EXECUTE example.1 run-1'
-```
+Outside the lab profile the cycle is refused, and running a package is a deliberate guest action by an elevated operator — the runner demands an exact approval phrase, which is why the profile, not the caller, is what makes the loop autonomous. See [LAB.md](LAB.md#manual-run-boundary).
 
 The runner checks administrator and hypervisor presence, the phrase, the manifest hash and every
 file hash, and refuses when the package does not carry `Run-Lab.ps1`.
+
+With `record=true` the cycle also keeps a GIF of the guest's console, sampled every two seconds and
+written into the run's directory beside the evidence. It is the picture of where the run was when it
+stopped, not a video stream, and it never fails the cycle: an unreadable frame is one frame fewer.
+
+## 4a. Run it on several VMs
+
+`lab_matrix(vm_names, package_id, run_id, expected_manifest_sha256, ...)` takes two to four VMs and
+runs the same cycle on each, one after another, giving every VM its own run id (`<run_id>-<vm>`) and
+its own checkpoint. It returns the rows plus a field-by-field comparison, so "passes on Windows 10,
+bugchecks on Windows 11, blamed driver `MyDriver.sys`" is one table rather than two receipts. One
+approval covers the whole matrix and names every VM; a VM that refuses the run is a row with its
+error code, not the end of the matrix. The runs are sequential on purpose: each cycle owns the guest
+worker, a checkpoint, the debugger and the console for its whole length.
 
 ## 5. Read the crash
 

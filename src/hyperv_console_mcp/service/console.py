@@ -228,9 +228,9 @@ class ConsoleService(ServiceBase):
     def authorize_screenshot(self, vm_name: str) -> str:
         return self._write(vm_name, "screenshots")
 
-    def _video_head(self, vm: str) -> tuple[int, int]:
+    def _video_head(self, vm: str, *, audit: bool = True) -> tuple[int, int]:
         """The guest display resolution, which is the coordinate space mouse tools use."""
-        info = self._run("console_info", "console_info", {"vm": vm}, vm_name=vm)
+        info = self._run("console_info", "console_info", {"vm": vm}, vm_name=vm, audit=audit)
         for head in info.get("video_heads") or []:
             if not isinstance(head, dict):
                 continue
@@ -241,10 +241,10 @@ class ConsoleService(ServiceBase):
             "The VM reported no video head with a current resolution. Start the guest and retry."
         )
 
-    def _thumbnail_image(self, vm: str, width: int, height: int) -> Any:
+    def _thumbnail_image(self, vm: str, width: int, height: int, *, audit: bool = True) -> Any:
         result = self._run(
             "vm_thumbnail", "vm_thumbnail",
-            {"vm": vm, "width": width, "height": height}, vm_name=vm,
+            {"vm": vm, "width": width, "height": height}, vm_name=vm, audit=audit,
         )
         encoded = result.get("data")
         if not isinstance(encoded, str) or not encoded:
@@ -294,6 +294,34 @@ class ConsoleService(ServiceBase):
                 "console_screenshot", name,
                 lambda: self.capture.capture(name, region=region, max_width=max_width),
             )
+
+    def console_frame_size(self, vm_name: str) -> dict[str, Any]:
+        """The guest display size, read once when a recording starts.
+
+        The resolution cannot change between two frames of one driver run, so a
+        recorder asks for it once and then reads only the thumbnail.
+        """
+        name = self.authorize_screenshot(vm_name)
+        width, height = self._video_head(name)
+        return {"vm": name, "width": width, "height": height}
+
+    def console_frame(
+        self, vm_name: str, width: int, height: int, max_width: int = 640
+    ) -> dict[str, Any]:
+        """One console frame as a PNG, for the recording a cycle writes.
+
+        The same thumbnail read the console page uses and the same capability
+        gate, but with no approval and no audit record per frame: the cycle that
+        started the recording already passed both, and a ten-minute run would
+        otherwise write three hundred audit entries for its pictures.
+        """
+        name = self._write(vm_name, "screenshots")
+        size = _integer(max_width, "max_width", 640, 3840)
+        image = self._thumbnail_image(name, int(width), int(height), audit=False)
+        shot = thumbnail_screenshot(
+            image, vm=name, source_width=int(width), source_height=int(height), max_width=size,
+        )
+        return {"vm": name, "png": shot.png, **shot.metadata}
 
     def console_wait_for_change(
         self, vm_name: str, timeout_ms: int = 30_000,

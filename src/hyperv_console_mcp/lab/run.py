@@ -12,17 +12,22 @@ import base64
 import json
 import numbers
 import re
+import shutil
 import time
 from datetime import datetime, timezone
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..errors import HyperVError, PolicyError, ValidationError
+from .recording import MAX_ERROR_CHARS, Recorder
 from .report import write as report_write
 from .transfer import GUEST_ROOT, DriverLabTransfer, guest_script, identifier
 
 RUNNER = rf"{GUEST_ROOT}\Tools\Invoke-DriverLabRun.ps1"
 MAX_RESULT_BYTES = 1024 * 1024
+# Wide enough to read a bugcheck on a 1080p desktop, small enough that sixty
+# frames fit the GIF budget without thinning.
+RECORD_MAX_WIDTH = 640
 # A reboot moves the guest's uptime back to the time since it restarted, so a
 # lower uptime than the pre-run baseline is the reliable bugcheck signal.
 REBOOT_GRACE_SECONDS = 30
@@ -292,7 +297,7 @@ def _say(progress: Any, percent: int, message: str) -> None:
         progress(percent, message)
 
 
-def _band(progress: Any, low: int, high: int) -> Any:
+def band(progress: Any, low: int, high: int) -> Any:
     """Map a nested step's 0-100 onto a slice of the outer step's scale."""
     if progress is None:
         return None
@@ -434,6 +439,51 @@ def _restore(
 DEBUGGERS = ("none", "serial", "kdnet")
 
 
+def frame_reader(service: Any, vm_name: str) -> Any:
+    """A callable the recorder samples: one PNG of the console, or nothing.
+
+    The display size is asked for once and then reused, because it cannot change
+    mid-run and the per-frame cost is what decides how many frames fit a run.
+    """
+    size: dict[str, Any] | None = None
+
+    def read() -> bytes | None:
+        nonlocal size
+        if size is None:
+            size = service.console_frame_size(vm_name)
+        return service.console_frame(
+            vm_name, size["width"], size["height"], RECORD_MAX_WIDTH
+        )["png"]
+
+    return read
+
+
+def staging_directory(root: Path | str, run_id: str) -> Path:
+    """Where a recording is written while its run is still going.
+
+    ``DriverLabTransfer.collect`` creates the run's own directory and refuses one
+    that already exists, so the GIF cannot be written there first. It is staged
+    beside the run and moved in once the evidence is home.
+    """
+    return Path(root) / f".recording-{run_id}"
+
+
+def file_recording(recording: dict[str, Any], root: Path | str, run_id: str) -> dict[str, Any]:
+    """Move a finished recording into the run's evidence directory."""
+    name = str(recording.get("path") or "")
+    source = staging_directory(root, run_id) / name
+    target = Path(root) / str(run_id) / name
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.replace(target)
+    except OSError as exc:
+        recording["written"] = False
+        recording["error"] = str(exc)[:MAX_ERROR_CHARS]
+    finally:
+        shutil.rmtree(staging_directory(root, run_id), ignore_errors=True)
+    return recording
+
+
 def _driver_modules(service: Any, vm_name: str, package_id: str) -> list[str]:
     """The ``.sys`` modules a staged package ships, named the way kd expects.
 
@@ -550,18 +600,22 @@ def cycle(
     revert_after: bool = False,
     include_kernel_dump: bool = True,
     debugger: str = "none",
+    record: bool = False,
     progress: Any = None,
 ) -> dict[str, Any]:
     """One autonomous iteration: run, collect evidence, optionally revert.
 
     With a debugger attached, a bugcheck no longer looks like a hang: kd stops
     at the prompt and the cycle reports the bugcheck plus the parsed analysis
-    instead of guessing from uptime.
+    instead of guessing from uptime. With ``record``, the console is sampled
+    while the package runs and written beside the evidence as one GIF.
     """
     if not isinstance(revert_after, bool):
         raise ValidationError("revert_after must be a boolean value.")
     if not isinstance(include_kernel_dump, bool):
         raise ValidationError("include_kernel_dump must be a boolean value.")
+    if not isinstance(record, bool):
+        raise ValidationError("record must be a boolean value.")
     if debugger not in DEBUGGERS:
         raise ValidationError(f"debugger must be one of: {', '.join(DEBUGGERS)}.")
     attached: dict[str, Any] | None = None
@@ -573,13 +627,24 @@ def cycle(
         # DriverEntry instead of racing the first break-in.
         _say(progress, 8, "arming the driver-load breakpoint")
         breakpoints = _arm_driver_breakpoints(service, vm_name, package_id)
+    recorder: Recorder | None = None
+    root = service.settings.evidence_root.expanduser().resolve()
+    if record:
+        _say(progress, 9, "recording the console while the package runs")
+        recorder = Recorder(frame_reader(service, vm_name))
+        recorder.start()
     report = run(
         service, vm_name,
         package_id=package_id, run_id=run_id,
         expected_manifest_sha256=expected_manifest_sha256,
         timeout_seconds=timeout_seconds, checkpoint_before=checkpoint_before,
-        progress=_band(progress, 10, 60),
+        progress=band(progress, 10, 60),
     )
+    if recorder is not None:
+        # Stopped before the evidence is collected, so the last frame is the
+        # screen the run stopped on and the download is not in the picture.
+        _say(progress, 63, "writing the console recording")
+        report["recording"] = recorder.stop(staging_directory(root, report["run_id"]))
     if attached is not None:
         _say(progress, 62, "asking kd what the target did")
         debug = _debugger_report(
@@ -605,6 +670,13 @@ def cycle(
             # still has to come back.
             evidence = {"collected": False, "error": exc.code, "message": str(exc)}
     report["evidence"] = evidence
+    recording = report.get("recording")
+    if isinstance(recording, dict):
+        if recording.get("written"):
+            file_recording(recording, root, report["run_id"])
+        else:
+            # Nothing was written, so the staging directory only has to go.
+            shutil.rmtree(staging_directory(root, report["run_id"]), ignore_errors=True)
     if report["outcome"] == "bugcheck":
         # The dump is on the host by now, so kd can say what the crash was even
         # when the run had no debugger attached. A failure here never costs the

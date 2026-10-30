@@ -34,6 +34,7 @@ def report(
     debugger: dict[str, Any] | None = None,
     checkpoint: str | None = None,
     finished: str = "2026-10-29T10:00:00+00:00",
+    recording: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One cycle report, shaped as ``lab.run`` returns it."""
     return {
@@ -52,6 +53,7 @@ def report(
         "revert": None,
         "debugger": debugger,
         "crash": {"analyzed": True, "bugcheck": bugcheck} if bugcheck else None,
+        "recording": recording,
         "evidence": evidence
         or {
             "collected": True,
@@ -301,7 +303,7 @@ def test_the_service_lists_receipts_and_refuses_a_bad_action(evidence: Path) -> 
     assert host.lab_receipts("list")["count"] == 1
     assert host.lab_receipts("get", ["run-1"])["found"] is True
     assert host.lab_receipts("compare", ["run-1", "run-1"])["identical"] is True
-    with pytest.raises(ValidationError, match="list, get, or compare"):
+    with pytest.raises(ValidationError, match="list, get, compare, or export"):
         host.lab_receipts("delete")
 
 
@@ -321,3 +323,103 @@ def test_the_service_keeps_a_receipt_read_inside_the_allowlist(
 
     with pytest.raises(Exception, match="is not allowed"):
         host.lab_receipts("list", vm_name="OUTSIDE-Test")
+
+
+# -- the console recording -----------------------------------------------
+
+RECORDING = {
+    "written": True,
+    "path": "console.gif",
+    "size": 9_400,
+    "sha256": "d" * 64,
+    "frames": 12,
+    "duration_seconds": 61.0,
+    "truncated": False,
+}
+
+
+def test_the_console_recording_is_listed_beside_the_evidence(evidence: Path) -> None:
+    """A GIF is evidence; the window has to be able to hand over its path."""
+    written(evidence, "run-1", recording=RECORDING)
+
+    found = receipts.evidence_files(
+        evidence, "run-1", receipts.read_record(evidence, "run-1") or {}
+    )
+
+    gifs = [item for item in found if item.get("kind") == "recording"]
+    assert len(gifs) == 1
+    assert gifs[0]["path"] == "console.gif"
+    assert Path(gifs[0]["host_path"]) == evidence / "run-1" / "console.gif"
+    assert gifs[0]["sha256"] == "d" * 64
+    # The collected files are still listed; the recording is one more, not instead.
+    assert {item["path"] for item in found} == {"run.log", "Minidumps/102926-01.dmp", "console.gif"}
+
+
+def test_a_recording_survives_a_run_whose_evidence_collection_failed(
+    evidence: Path,
+) -> None:
+    """The guest can be gone and the picture still exist on the host."""
+    written(
+        evidence, "run-1",
+        evidence={"collected": False, "error": "bridge_transport"},
+        recording=RECORDING,
+    )
+
+    found = receipts.evidence_files(
+        evidence, "run-1", receipts.read_record(evidence, "run-1") or {}
+    )
+
+    assert [item["path"] for item in found] == ["console.gif"]
+
+
+def test_a_recorded_run_differs_from_an_unrecorded_one(evidence: Path) -> None:
+    written(evidence, "run-1")
+    written(evidence, "run-2", recording=RECORDING)
+
+    result = receipts.compare(evidence, "run-1", "run-2")
+
+    fields = {item["field"] for item in result["different"]}
+    assert "recording" in fields
+    # The recording is compared by presence, not by hash: two recordings of the
+    # same package never match byte for byte, and a column that always differs
+    # would say nothing.
+    assert "recording_frames" not in receipts.COMPARED
+
+
+# -- export --------------------------------------------------------------
+
+def test_export_copies_every_receipt_into_one_file(evidence: Path) -> None:
+    written(evidence, "run-1")
+    written(evidence, "run-2", outcome="bugcheck", bugcheck={"bugcheck_code": "0xd1"})
+
+    result = receipts.export(evidence)
+
+    assert result["written"] is True, result
+    assert result["count"] == 2
+    document = json.loads(Path(result["path"]).read_text(encoding="utf-8"))
+    assert document["count"] == 2
+    assert {item["run_id"] for item in document["receipts"]} == {"run-1", "run-2"}
+    assert all("sha256" in item for item in document["receipts"])
+    # A copy, not a move: the per-run records stay where the evidence is.
+    assert (evidence / "run-1" / REPORT_NAME).is_file()
+
+
+def test_the_export_directory_is_not_read_back_as_a_run(evidence: Path) -> None:
+    """`exports` sits under the evidence root and is not a run id."""
+    written(evidence, "run-1")
+    receipts.export(evidence)
+
+    listed = receipts.list_receipts(evidence)
+
+    assert listed["count"] == 1
+    assert listed["skipped"] == []
+
+
+def test_the_service_exports_through_the_evidence_root(evidence: Path) -> None:
+    written(evidence, "run-1")
+    host = service(evidence)
+
+    result = host.lab_receipts("export")
+
+    assert result["written"] is True, result
+    assert Path(result["path"]).is_relative_to(evidence)
