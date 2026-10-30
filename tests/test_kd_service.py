@@ -344,6 +344,12 @@ def test_dump_open_runs_kd_and_parses(
         return {"dump": str(dump_path), "exit_code": 0, "output": ANALYZE_TEXT}
 
     monkeypatch.setattr("hyperv_console_mcp.service.run_dump", fake_run)
+    # Discovery searches the SDK folders and PATH, and neither holds kd.exe on a
+    # host that is not running the debugger; the test is about the arguments.
+    monkeypatch.setattr(
+        "hyperv_console_mcp.service.find_debugger",
+        lambda *args, **kwargs: Path("C:/Debuggers/kd.exe"),
+    )
 
     result = service.kd_dump_open("NORTH-Test", str(dump))
 

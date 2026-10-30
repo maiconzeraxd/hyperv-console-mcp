@@ -62,8 +62,19 @@ class _Credential(ctypes.Structure):
     ]
 
 
+def _vault_available() -> bool:
+    """Whether this platform has a Credential Manager to read.
+
+    A function rather than an inline `sys.platform` check so a test can stand in
+    for the other platform. There the vault holds nothing, which is not the same
+    as a read that failed: `resolve` falls back to the environment, and that is
+    the only path a host without a vault has.
+    """
+    return sys.platform == "win32"
+
+
 def _advapi32() -> Any:
-    if sys.platform != "win32":
+    if not _vault_available():
         raise PolicyError(
             "The Windows Credential Manager is only available on Windows. "
             "Set HYPERV_MCP_GUEST_PASSWORD in the protected server environment instead."
@@ -196,9 +207,15 @@ def resolve(settings: Any, vm_name: str) -> tuple[str, str]:
 
     The fallback is reported by the caller, never silently: an environment
     variable leaks into child processes and crash dumps in ways a vault entry
-    does not.
+    does not. A host with no vault is not an error — the store holds nothing
+    there, so the environment is the only path it has, and refusing the read
+    refused the call before it ever looked. Only a `PolicyError` is read that
+    way: a vault that exists but will not answer raises `BackendError`.
     """
-    stored = CredentialStore().read(vm_name)
+    try:
+        stored = CredentialStore().read(vm_name)
+    except PolicyError:
+        stored = None
     if stored and stored[1]:
         return stored[0] or (settings.guest_username or ""), stored[1]
     username = settings.guest_username or ""

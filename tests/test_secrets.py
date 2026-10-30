@@ -28,6 +28,7 @@ from hyperv_console_mcp.kd.session import KdSession
 from hyperv_console_mcp.service import HyperVService
 from hyperv_console_mcp.transport import ssh as ssh_module
 from hyperv_console_mcp.transport import ssh_setup
+from hyperv_console_mcp.transport.ssh import vm_key
 
 VM = "NORTH-Test"
 FAKE_KD = Path(__file__).with_name("fake_kd.py")
@@ -318,7 +319,7 @@ def test_the_credential_status_reports_the_source_without_the_secret(
 def test_the_ssh_private_key_stays_in_its_file(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    directory = Path(settings.ssh_root) / VM
+    directory = Path(settings.ssh_root) / vm_key(VM)
     directory.mkdir(parents=True)
     key_path = directory / "id_ed25519"
     key_path.write_text(SSH_PRIVATE_KEY, encoding="utf-8")

@@ -2145,6 +2145,33 @@ installer and the winget manifests all still said `0.1.0`.
   against `HYPERV_MCP_LIVE_TEST_VM` remains outstanding for the dashboard page in WebView2, the
   `Copy-VMFile` upload, and the viewer buttons.
 
+### 2026-10-30 — the Linux job runs the suite for the first time, and it did not
+
+The release workflow's first two attempts failed on Windows; the third passed both Windows jobs and
+failed the Linux one with 30 real failures — the first time the suite had ever run off Windows. None
+of them was a test that needed Hyper-V; each was a place where the code or the test had quietly
+assumed the host's platform.
+
+- **26 of the 30 were one bug in `credentials.resolve`.** It reads the Credential Manager first and
+  falls back to the environment, but on a host without a vault the read raised `PolicyError`
+  ("only available on Windows") instead of reporting nothing stored, so the fallback was
+  unreachable and every guest call on Linux died before it looked at the environment. `resolve` now
+  reads that one error as "nothing stored" and takes the environment; `source()` already did. The
+  store itself keeps saying what it is — `write` and `delete` still refuse on a host with nowhere
+  to put the secret, and a vault that exists but will not answer still raises `BackendError`. The
+  platform check moved into `_vault_available()` so a test can stand in for the other host without
+  patching `sys.platform`.
+- `test_frozen.py` built its paths with backslashes, so on POSIX `Path(...).name` was the whole
+  string and a python image was not recognised; written with forward slashes it splits on both hosts.
+- `test_kd_service.py::test_dump_open_runs_kd_and_parses` faked `run_dump` but not `find_debugger`,
+  so it depended on kd.exe being installed on the runner; it now patches discovery the way the
+  file's own `patched` fixture does.
+- `test_secrets.py::test_the_ssh_private_key_stays_in_its_file` wrote its state to `ssh_root/VM`
+  while the code reads `ssh_root/vm_key(VM)`, which is casefolded — the same directory on Windows,
+  a different one on Linux. It now uses `vm_key`.
+- Gate: 1116 passed / 1 skipped on Windows, ruff clean, MCP stdio smoke green. The Linux job is the
+  evidence that the fix worked, and it is not claimed until it runs.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three

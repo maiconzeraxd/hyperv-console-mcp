@@ -55,6 +55,26 @@ def test_an_empty_stored_password_does_not_win(monkeypatch: pytest.MonkeyPatch) 
     assert credentials.resolve(value, VM) == ("envuser", "from-env")
 
 
+def test_a_host_without_a_vault_reads_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A platform with no Credential Manager has nothing stored, and that is not
+    a failure: every guest call on such a host went through `resolve`, so
+    refusing the read refused the call before it looked at the environment."""
+    monkeypatch.setattr(credentials, "_vault_available", lambda: False)
+    value = settings(Path("."), guest_username="envuser", guest_password="from-env")
+    assert credentials.resolve(value, VM) == ("envuser", "from-env")
+    assert credentials.source(value, VM) == "environment"
+
+
+def test_a_host_without_a_vault_still_refuses_to_store_a_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(credentials, "_vault_available", lambda: False)
+    with pytest.raises(PolicyError, match="only available on Windows"):
+        credentials.CredentialStore().write(VM, "labadmin", "s3cret-value")
+
+
 def test_a_generated_password_satisfies_the_complexity_policy() -> None:
     for _ in range(50):
         password = credentials.generate_password()

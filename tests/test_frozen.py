@@ -68,9 +68,11 @@ def test_the_host_is_started_detached_and_logged(
 
 
 def test_an_interpreter_trusts_a_python_image_only() -> None:
-    assert ipc._trusted_image(Path(r"C:\Python311\python.exe")) is True
+    # Written with forward slashes so `Path` splits it into a name on every host:
+    # this is a rule about file names, and the test runs on Linux too.
+    assert ipc._trusted_image(Path("C:/Python311/python.exe")) is True
     # No interpreter is frozen beside a hyperv-service.exe in a plain checkout.
-    assert ipc._trusted_image(Path(r"C:\Tools\hyperv-service.exe")) is False
+    assert ipc._trusted_image(Path("C:/Tools/hyperv-service.exe")) is False
 
 
 def test_a_frozen_install_trusts_its_own_siblings(monkeypatch: pytest.MonkeyPatch) -> None:
