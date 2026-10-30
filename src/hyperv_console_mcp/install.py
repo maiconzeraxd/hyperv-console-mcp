@@ -56,7 +56,7 @@ def server_entry(*, uvx: bool = False, profile: str | None = None) -> dict[str, 
     return entry
 
 
-def _backup(path: Path) -> Path | None:
+def backup(path: Path) -> Path | None:
     if not path.is_file():
         return None
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -65,7 +65,7 @@ def _backup(path: Path) -> Path | None:
     return backup
 
 
-def _write_atomic(path: Path, text: str) -> None:
+def write_atomic(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(text, encoding="utf-8")
@@ -93,15 +93,15 @@ def install_json(client: str, path: Path, entry: dict[str, Any]) -> dict[str, An
     if servers.get(SERVER_NAME) == entry:
         return {"client": client, "path": str(path), "action": "unchanged"}
     action = "updated" if path.is_file() else "created"
-    backup = _backup(path)
+    backup_path = backup(path)
     servers[SERVER_NAME] = entry
     document["mcpServers"] = servers
-    _write_atomic(path, json.dumps(document, indent=2, ensure_ascii=False) + "\n")
+    write_atomic(path, json.dumps(document, indent=2, ensure_ascii=False) + "\n")
     return {
         "client": client,
         "path": str(path),
         "action": action,
-        "backup": str(backup) if backup else None,
+        "backup": str(backup_path) if backup_path else None,
     }
 
 
@@ -127,14 +127,14 @@ def install_toml(client: str, path: Path, entry: dict[str, Any]) -> dict[str, An
     header = f"[mcp_servers.{SERVER_NAME}]"
     if header in text:
         return {"client": client, "path": str(path), "action": "unchanged"}
-    backup = _backup(path)
+    backup_path = backup(path)
     separator = "" if not text else ("\n" if text.endswith("\n") else "\n\n")
-    _write_atomic(path, text + separator + toml_section(entry))
+    write_atomic(path, text + separator + toml_section(entry))
     return {
         "client": client,
         "path": str(path),
         "action": "updated" if text else "created",
-        "backup": str(backup) if backup else None,
+        "backup": str(backup_path) if backup_path else None,
     }
 
 

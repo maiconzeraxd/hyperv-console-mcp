@@ -2,7 +2,7 @@
 
 A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/) server for **Hyper-V on Windows**. It combines VM management, checkpoints, PowerShell Direct diagnostics, synthetic keyboard/mouse input, console screenshots without VMConnect, installation media, serial consoles, and serial WinDbg preparation and a live kd.exe kernel-debugging session in one stdio server.
 
-**Alpha status:** 902 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test and one assertion set that runs over both guest transports; the smoke checks each profile's tool surface, per toolset, over a real stdio client. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
+**Alpha status:** 953 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test and one assertion set that runs over both guest transports; the smoke checks each profile's tool surface, per toolset, over a real stdio client. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
 
 ## Highlights
 
@@ -77,6 +77,16 @@ hyperv-install --client claude --profile lab --shortcut   # plus a Start Menu sh
 ```
 
 It merges one `mcpServers.hyperv` entry and leaves every other server and setting untouched, appends one `[mcp_servers.hyperv]` section to Codex's TOML rather than re-serialising it, and refuses — without writing — a file it cannot parse. Running it twice reports `unchanged` instead of rewriting.
+
+The whole install is one routine, and it starts by asking the machine whether it can run this at all:
+
+```powershell
+hyperv-setup --check     # edition, Hyper-V state; changes nothing, exit 0 means go
+hyperv-setup             # every detected client's config, the shortcut, the self-test
+hyperv-setup --uninstall # takes the entry back out; keeps your credentials and data unless asked
+```
+
+`--check` refuses Windows Home in one sentence instead of failing inside a feature install, and stops with the exact `Enable-WindowsOptionalFeature` line when Hyper-V is installed but switched off. `scripts/install.ps1` is the same routine for a machine where the package is already present, with `-Check` and `-Uninstall`; it is documented as the advanced path, not the first one.
 
 
 `HYPERV_MCP_PROFILE` picks the default toolset list (`safe` or `lab`); `HYPERV_MCP_TOOLSETS` overrides it with a comma-separated list such as `core,console,guest` or `all`. An unknown name is refused at startup rather than silently ignored.

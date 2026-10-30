@@ -1,5 +1,32 @@
 # MCP client configuration
 
+## Install on a new machine
+
+One routine does the whole install, and every path into it ends in the same place:
+
+```powershell
+hyperv-setup --check     # what this host needs; changes nothing, exit 0 means go
+hyperv-setup             # write the client config, add the shortcut, run the self-test
+```
+
+`--check` answers three questions and prints one sentence per answer: which edition of Windows this is (Home cannot run Hyper-V at all), whether Hyper-V is installed and switched on, and — from `hyperv-setup` rather than the check — which MCP clients are already on the machine. When the feature is installed but off, the routine stops with the exact command that turns it on (`Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V -All`); it never reboots a machine and never asks for a restart itself.
+
+The client config is written into each client that is present — Claude Desktop, Cursor and Codex, detected by their own folder, not by a config file that a fresh install does not have yet. On a machine with none of them the routine prints the entry and the file each client keeps it in, instead of leaving the operator to read the source. `--uvx`, `--profile safe|lab` and `--no-shortcut` behave as they do for `hyperv-install`, which remains the low-level command that writes one client's file and nothing else.
+
+The install is idempotent: a second run reports `unchanged` for every file it already wrote, and repairs a partial install rather than repeating it. The last step asks the service and Hyper-V whether they answer, and names the failing step when they do not.
+
+`scripts/install.ps1` is the same routine with the pre-check in front of it, for a host where the package is installed but nothing has been configured:
+
+```powershell
+.\scripts\install.ps1 -Check
+.\scripts\install.ps1
+.\scripts\install.ps1 -Uninstall
+```
+
+It asks before removing the saved guest credentials or the state folder — `-Uninstall` alone keeps both, because a guest password and a run's evidence are the operator's data, not the installer's. `-RemoveCredentials` and `-RemoveData` answer the two questions without asking. The script is not recommended as a first install: downloading a script and running it as an administrator is a habit this tool should not teach, and the signed installer runs the same routine.
+
+## Profiles
+
 Create a protected environment for the MCP host. Do not commit real passwords.
 
 ```powershell

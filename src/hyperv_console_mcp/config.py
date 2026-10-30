@@ -35,9 +35,13 @@ def _integer(
     return result
 
 
-def _local_root(child: str, values: Mapping[str, str] | None = None) -> Path:
+def data_root(values: Mapping[str, str] | None = None) -> Path:
+    """The folder under ``%LOCALAPPDATA%`` that holds every state file this app writes."""
     base = (os.environ if values is None else values).get("LOCALAPPDATA", str(Path.home()))
-    return Path(base) / "HyperVConsoleMCP" / child
+    return Path(base) / "HyperVConsoleMCP"
+
+def _local_root(child: str, values: Mapping[str, str] | None = None) -> Path:
+    return data_root(values) / child
 
 
 def local_root(child: str) -> Path:

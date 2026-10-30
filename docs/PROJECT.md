@@ -1646,6 +1646,66 @@ rendered from a live VM — the capture path needs an elevated session.
   separate operator decision. What is proved without a VM is the reading: the receipt, the
   comparison and the triage shape are covered by fakes.
 
+### 2026-10-29 — v0.3 install wave 1: one routine, and the questions it asks first
+
+- **One routine, three doors.** `setup.py` holds the install: the signed installer, `winget` and
+  `scripts/install.ps1` are meant to end in the same `first_run`, so there is one answer to "what
+  does an install do on this machine". `hyperv-setup` is that routine's command; `hyperv-install`
+  stays what it was, the low-level writer of one client's file.
+- **The host is asked before anything is written.** `read_host` reads `EditionID`/`ProductName` from
+  the registry and the Hyper-V feature's `InstallState` from `Win32_OptionalFeature` — the CIM class
+  rather than the DISM cmdlets, because it answers without elevation and the pre-check has to run
+  before the one UAC prompt. `assess` turns that into `proceed`, `enable-hyperv` or `stop` plus one
+  sentence; Windows Home is refused by name with the editions that work, and a feature that is
+  installed but off stops with the exact `Enable-WindowsOptionalFeature` line.
+- **`unknown` is not a failure.** A machine that cannot answer the feature query still gets an
+  install; the self-test at the end is the authority on whether Hyper-V works, and a pre-check that
+  blocked on its own blindness would be the more common failure.
+- **The routine never reboots.** Enabling the feature returns `stopped: hyper-v` with the command;
+  `install.ps1` elevates for that one step, enables with `-NoRestart`, registers a `RunOnce` entry
+  that re-runs the script at the next sign-in, and says so. A script that restarts a machine without
+  being asked is not an installer.
+- **Clients are found by their own folder.** A fresh Claude Desktop has `%APPDATA%\Claude` and no
+  config file, which is exactly the case worth catching; `detect_clients` checks the directory and
+  `configure_clients` writes only those. With none found it prints the entry and the file each
+  client keeps it in, instead of leaving the operator to read the source.
+- **The self-test separates the two failures.** `event_snapshot` answers from the service's own bus
+  and touches no VM, so a failure there is "nothing is listening" (start `hyperv-service`), while a
+  failure in `host_status` is "the pipe answered and Hyper-V did not" (check the feature and the
+  Hyper-V Administrators group). Two failures, two fixes, one line each.
+- **Uninstall asks about the operator's own data.** `hyperv-setup --uninstall` takes our entry out
+  of each client file, removes the shortcut and stops; the Credential Manager entries and the state
+  folder are kept unless `--remove-credentials`/`--remove-data` are given, and the answer names both
+  flags. A file it cannot parse is left exactly as it is. `known_vms` returns the spelling the access
+  file records, because the vault's target is built from the VM's name and deleting another case
+  would report a removal that did not happen.
+- **Small refactors the routine needed.** `install._backup`/`_write_atomic` became `backup`/
+  `write_atomic` (two modules now copy a file before touching it), and `config.data_root()` names the
+  folder the uninstaller has to point at, which `_local_root` was building inline.
+- Tests: `tests/test_setup.py` (30) — the Home refusal and its sentence, the enable command, absent
+  and unknown, the probe mapping, the non-Windows host, detection by folder, the snippet when there
+  is no client, the self-test's two failures and its two ready messages, the routine stopping before
+  it writes anything, stopping for the restart rather than taking it, a second run reporting
+  `unchanged`, uninstall removing only our entry and only our TOML section, refusing an unparsable
+  file, keeping credentials and data unless asked, and the wrapper passing only flags the routine
+  accepts. Nothing here needs Windows, Hyper-V or a VM: the OS answers through `probe`, `exists` and
+  `environ`.
+- Gate: 953 passed / 1 skipped, ruff clean, 13 PowerShell files parse (12 plus the new wrapper), 0
+  analyzer findings on `scripts/install.ps1`, smoke 29 / 43 / 65 unchanged — the routine adds no MCP
+  tool, which is the point: an install step an AI could call would be a way to make itself a
+  permanent client.
+- Validated live: `hyperv-setup --check` on this host answered `Windows 10 Pro has Hyper-V ready`,
+  `action: proceed`, exit 0, reading the registry and `Win32_OptionalFeature` unelevated.
+- Not built yet, and not claimed: the signed `.msi`/`.exe`, the `winget` manifest, the PyInstaller
+  bundle, the first-run wizard and the beginner README. The Windows service under a dedicated
+  account is the largest of them and is not a one-line change: the pipe's DACL grants only the
+  current user, `_verify_server_process` requires the server to be that user's interpreter,
+  `Settings.from_env()` has no environment to read inside a service, and SCM needs a dispatcher this
+  codebase does not have. Today the host is a per-user process started on demand by the first client
+  and verified as a peer, which is the safer default until that design is settled.
+- Not validated: the routine has not run on a clean Windows machine, so "installs on a fresh host"
+  is still a claim about code, not about a machine.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,
