@@ -59,6 +59,14 @@ class FakeSession:
         self.state = "broken"
         self.breaks = 0
         self.commands: list[str] = []
+        # What the log would still hand a subscriber, and what it was asked for.
+        self.pending: list[str] = []
+        self.reads: list[tuple[int, float]] = []
+
+    def read_output(self, after: int = 0, timeout: float = 0.0) -> dict[str, Any]:
+        self.reads.append((after, timeout))
+        text = self.pending.pop(0) if self.pending else ""
+        return {"text": text, "offset": after + len(text), "state": self.state}
 
     def status(self) -> dict[str, Any]:
         return {
@@ -381,3 +389,38 @@ def test_symbol_path_has_the_public_server_and_a_lab_package(
     assert entries[0].startswith("srv*")
     assert "https://msdl.microsoft.com/download/symbols" in entries[0]
     assert str(package) in entries
+
+
+def test_kd_output_subscribe_tails_the_log_from_an_offset(service: HyperVService) -> None:
+    """The dock asks where it stopped and gets only what came after."""
+    session = FakeSession()
+    session.pending = ["ModLoad: fffff805`12340000 fffff805`12380000   MyDriver.sys\n"]
+    service.kd.sessions["north-test"] = session  # type: ignore[attr-defined]
+
+    result = service.kd_output_subscribe("NORTH-Test", 12, timeout_seconds=5)
+
+    assert result["vm"] == "NORTH-Test"
+    assert "MyDriver.sys" in result["text"]
+    assert result["offset"] > 12
+    assert session.reads == [(12, 5.0)]
+
+
+def test_kd_output_subscribe_needs_a_session(service: HyperVService) -> None:
+    with pytest.raises(DebuggerError) as failure:
+        service.kd_output_subscribe("NORTH-Test", 0)
+    # The refusal names the call that would close the gap.
+    assert failure.value.code == "kd_not_connected"
+
+
+def test_kd_output_subscribe_validates_and_clamps(service: HyperVService) -> None:
+    session = FakeSession()
+    service.kd.sessions["north-test"] = session  # type: ignore[attr-defined]
+
+    with pytest.raises(ValidationError):
+        service.kd_output_subscribe("NORTH-Test", -1)
+    with pytest.raises(ValidationError):
+        service.kd_output_subscribe("NORTH-Test", 0, timeout_seconds="long")
+
+    service.kd_output_subscribe("NORTH-Test", 0, timeout_seconds=600)
+    # A window that asks for ten minutes would hold a worker thread for ten.
+    assert session.reads[-1][1] == 30.0

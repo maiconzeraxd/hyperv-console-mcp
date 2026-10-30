@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .. import credentials
-from ..access import CAPABILITIES, LEVELS, AccessStore, access_file
+from ..access import CAPABILITIES, LEVEL_CAPABILITIES, LEVELS, AccessStore, access_file
 from ..elevation import is_elevated
 from ..errors import HyperVError, ValidationError
 from ..service.remote import dispatch
@@ -100,6 +100,17 @@ class Api:
             # The fleet badges every VM with its own level, and a level is a
             # property of the VM, not of the window's current choice.
             "levels_by_vm": dict(self.settings.levels),
+            # The matrix: what each VM may actually do, which is its level or the
+            # subset the operator kept.
+            "capabilities_by_vm": {
+                name: sorted(self.settings.capabilities_for(name))
+                for name in self.settings.levels
+            },
+            # What each level offers, so the matrix can grey out what a level
+            # cannot grant instead of offering a checkbox that would be refused.
+            "capabilities_by_level": {
+                level: sorted(names) for level, names in LEVEL_CAPABILITIES.items()
+            },
             "profile": self.settings.profile,
             "elevated": is_elevated(),
             "shared_service": self.settings.shared_service,
@@ -107,6 +118,10 @@ class Api:
                 name: self.settings.allows(self.vm_name, name) if self.vm_name else False
                 for name in CAPABILITIES
             },
+            # Whether this VM has a credential, and which account it uses. The
+            # page needs the fact to know whether to ask; it never gets the
+            # secret, and nothing here reads it out of the vault.
+            "credential": self.credential(),
             "allowlist": sorted(self.settings.allowed_vms),
             "approvals": self.approval_error or "listening",
         }
@@ -124,6 +139,32 @@ class Api:
         means "nothing happened", which is the truth.
         """
         return self.call("events_wait", {"after": after, "timeout_seconds": timeout})
+
+    def logs(
+        self,
+        after: int = 0,
+        vm: str = "",
+        source: str = "",
+        level: str = "",
+        timeout: float = 10,
+    ) -> dict[str, Any]:
+        """The unified log stream, held open, for the window's dock.
+
+        Same shape as ``events``: the page asks from the last sequence it drew
+        and the service answers when there is a line or the wait runs out. The
+        filters are the service's, so a dock that asks for one VM does not make
+        the host send the others for the page to throw away.
+        """
+        return self.call(
+            "logs_subscribe",
+            {
+                "after": after,
+                "vm": vm or None,
+                "source": source or None,
+                "level": level or None,
+                "timeout_seconds": timeout,
+            },
+        )
 
     def choose(self, name: str) -> dict[str, Any]:
         """Point the window at another VM, without reopening it.
@@ -146,20 +187,31 @@ class Api:
 
     # -- the operator's access file ---------------------------------------
 
-    def set_level(self, level: str) -> dict[str, Any]:
-        """Write one level for this VM, then have the service read the file again.
+    def set_level(
+        self, level: str, capabilities: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Write one level for this VM, and optionally narrow what it allows.
 
         This is the same file ``hyperv-access`` writes. It is not a service
         method and no MCP tool reaches it: a level is the operator's decision
         about what the AI may do, so only the operator's own window writes it.
+        ``capabilities`` is the matrix's answer — the ones the operator kept —
+        and it can only take capabilities away from the level.
         """
         if not self.vm_name:
             raise ValidationError("Choose a VM before setting a level.")
         store = self._store()
-        store.set(self.vm_name, level)
-        policy = self.service.reload_policy()
+        store.set(self.vm_name, level, capabilities)
+        # The window tells the truth about the file it just wrote even when the
+        # service cannot be told: a panel that disagrees with the policy file is
+        # worse than a loud error about the service.
         self._reread()
-        return {"level": store.levels().get(self.vm_name.casefold()), "policy": policy}
+        policy = self.service.reload_policy()
+        return {
+            "level": store.levels().get(self.vm_name.casefold()),
+            "capabilities": sorted(self.settings.capabilities_for(self.vm_name)),
+            "policy": policy,
+        }
 
     def remove_level(self) -> dict[str, Any]:
         """Take this VM out of the file, which makes it unreachable again."""
@@ -167,8 +219,8 @@ class Api:
             raise ValidationError("Choose a VM before removing a level.")
         store = self._store()
         store.remove(self.vm_name)
-        policy = self.service.reload_policy()
         self._reread()
+        policy = self.service.reload_policy()
         return {"level": None, "policy": policy}
 
     def set_baseline(self, checkpoint: str) -> dict[str, Any]:
@@ -182,12 +234,58 @@ class Api:
             raise ValidationError("Choose a VM before naming a baseline checkpoint.")
         store = self._store()
         store.set_baseline(self.vm_name, checkpoint)
-        policy = self.service.reload_policy()
         self._reread()
+        policy = self.service.reload_policy()
         return {
             "baseline": store.baselines().get(self.vm_name.casefold()),
             "policy": policy,
         }
+
+    def credential(self) -> dict[str, Any]:
+        """Where this VM's guest credential comes from, and for which account.
+
+        The answer is a word — ``credential_manager``, ``environment`` or
+        ``missing`` — plus the username. The page draws a login screen when it
+        is ``missing`` and nothing else otherwise, so reopening the window does
+        not ask for a password that is already in the vault.
+        """
+        if not self.vm_name:
+            return {"source": "missing", "username": None}
+        entry = None
+        try:
+            entry = credentials.CredentialStore().read(self.vm_name)
+        except HyperVError:
+            # A vault that cannot be read is the same problem as an empty one:
+            # the page must offer the login rather than fail to draw.
+            entry = None
+        return {
+            "source": credentials.source(self.settings, self.vm_name),
+            "username": (entry[0] if entry else None) or self.settings.guest_username or None,
+        }
+
+    def set_credential(self, username: str, password: str) -> dict[str, Any]:
+        """Put this VM's guest credential in the Windows vault, once.
+
+        The password is typed here and goes straight to the service, which
+        writes it to the Credential Manager. It is not kept in the page's state,
+        not echoed back in the answer, and not written to any log.
+        """
+        if not self.vm_name:
+            raise ValidationError("Choose a VM before storing its credential.")
+        return self.call(
+            "guest_credential_set",
+            {"vm_name": self.vm_name, "username": username, "password": password},
+        )
+
+    def check_credential(self) -> dict[str, Any]:
+        """Ask the service whether the stored credential actually works.
+
+        This is the slow one — it opens a session — so the page runs it on a
+        button, not on every draw.
+        """
+        if not self.vm_name:
+            raise ValidationError("Choose a VM before testing its credential.")
+        return self.call("guest_credential_status", {"vm_name": self.vm_name})
 
     def _store(self) -> AccessStore:
         return AccessStore(self.settings.access_path or access_file(self.environ))
@@ -202,8 +300,16 @@ class Api:
         file holds are replaced; the environment the window started with stays.
         """
         store = self._store()
+        entries = store.entries()
         self.settings = replace(
-            self.settings, levels=store.levels(), baselines=store.baselines()
+            self.settings,
+            levels=store.levels(),
+            baselines=store.baselines(),
+            capabilities={
+                key: tuple(record["capabilities"] or ())
+                for key, record in entries.items()
+                if record["capabilities"] is not None
+            },
         )
 
     # -- the first run -----------------------------------------------------

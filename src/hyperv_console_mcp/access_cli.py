@@ -19,12 +19,23 @@ def _store() -> AccessStore:
     return AccessStore(access_file())
 
 
-def _report(entries: dict[str, tuple[str, str]]) -> dict[str, Any]:
+def _report(entries: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    records = sorted(entries.values(), key=lambda record: str(record["name"]).casefold())
     return {
         "access_file": str(_store().path),
         "vms": [
-            {"name": name, "level": level, "capabilities": sorted(LEVEL_CAPABILITIES[level])}
-            for name, level in sorted(entries.values())
+            {
+                "name": str(record["name"]),
+                "level": str(record["level"]),
+                # What the AI may actually do: the level's set, or the subset the
+                # operator kept when they narrowed it.
+                "capabilities": sorted(
+                    record["capabilities"]
+                    if record.get("capabilities") is not None
+                    else LEVEL_CAPABILITIES[str(record["level"])]
+                ),
+            }
+            for record in records
         ],
     }
 
@@ -54,18 +65,30 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="hyperv-access", description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("list", help="Show every VM's level and what it allows.")
-    setting = sub.add_parser("set", help="Give a VM a level.")
+    setting = sub.add_parser("set", help="Give a VM a level, and optionally narrow it.")
     setting.add_argument("vm")
     setting.add_argument("level", choices=LEVELS)
+    setting.add_argument(
+        "--capabilities", metavar="A,B",
+        help="Keep only these capabilities of the level, comma separated. "
+        "A list can narrow a level, never widen it.",
+    )
     removing = sub.add_parser("remove", help="Forget a VM, which removes it from the allowlist.")
     removing.add_argument("vm")
     arguments = parser.parse_args()
     store = _store()
     try:
         if arguments.action == "list":
-            result = _report(store.load())
+            # entries(), not load(): load()'s two-item tuples are a compatibility
+            # shape for callers that only want the level, not a report record.
+            result = _report(store.entries())
         elif arguments.action == "set":
-            result = _report(store.set(arguments.vm, arguments.level))
+            narrowed = (
+                [item.strip() for item in arguments.capabilities.split(",") if item.strip()]
+                if arguments.capabilities is not None
+                else None
+            )
+            result = _report(store.set(arguments.vm, arguments.level, narrowed))
             _notify_service(result)
         else:
             result = _report(store.remove(arguments.vm))

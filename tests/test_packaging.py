@@ -61,11 +61,20 @@ def test_the_spec_parses_as_python() -> None:
 def test_the_spec_freezes_the_programs_the_code_names() -> None:
     text = _text(SPEC)
     assert "from hyperv_console_mcp.frozen import ACCESS, HOST, LAUNCHER, SETUP" in text
-    calls = re.findall(r'program\("(\w+)", (\w+), console=(True|False)\)', text)
-    assert sorted(name for _, name, _ in calls) == ["ACCESS", "HOST", "LAUNCHER", "SETUP"]
+    calls = re.findall(
+        r'program\("(\w+)", (\w+), console=(True|False)(?:, uac_admin=(True|False))?\)', text
+    )
+    assert sorted(name for _, name, _, _ in calls) == ["ACCESS", "HOST", "LAUNCHER", "SETUP"]
     # The launcher is the only windowed program: a console would flash on every
     # double-click, and the three operator tools print their answers.
-    assert [name for _, name, console in calls if console == "False"] == ["LAUNCHER"]
+    assert [name for _, name, console, _ in calls if console == "False"] == ["LAUNCHER"]
+
+
+def test_the_spec_launches_the_window_as_administrator() -> None:
+    """The launcher must always run elevated, which the manifest asks for."""
+    text = _text(SPEC)
+    assert "uac_admin=True" in text
+    assert 'program("launcher", LAUNCHER, console=False, uac_admin=True)' in text
 
 
 def test_every_console_script_is_shipped_or_named_as_left_out() -> None:
@@ -148,3 +157,20 @@ def test_the_winget_hash_is_a_hash_or_the_placeholder() -> None:
     assert match is not None, "the installer manifest names no InstallerSha256"
     value = match.group(1)
     assert value == "0" * 64 or re.fullmatch(r"[0-9a-f]{64}", value), value
+
+def test_the_wheel_carries_the_vendored_terminal() -> None:
+    """A page whose terminal is inlined needs the vendor files in the package.
+
+    `webui/page.py` raises when one is missing, so a wheel without them would
+    install cleanly and fail at the first window — this is the check that keeps
+    that from shipping.
+    """
+    root = Path(__file__).resolve().parents[1]
+    with (root / "pyproject.toml").open("rb") as handle:
+        package_data = tomllib.load(handle)["tool"]["setuptools"]["package-data"]
+    assert "webui/assets/vendor/*" in package_data["hyperv_console_mcp"]
+    vendor = root / "src" / "hyperv_console_mcp" / "webui" / "assets" / "vendor"
+    assert (vendor / "xterm.js").is_file()
+    assert (vendor / "xterm.css").is_file()
+    assert (vendor / "NOTICE.md").is_file()
+

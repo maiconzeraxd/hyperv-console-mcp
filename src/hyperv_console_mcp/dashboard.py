@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -498,6 +499,7 @@ class Dashboard(tk.Tk):
         for text, command in (
             ("Refresh all", self.refresh),
             ("Start VM", lambda: self.mutate("Start this VM?", lambda: self.service.power(self.vm_name, "start"))),
+            ("Open VM", self._open_vm),
             ("Graceful shutdown", lambda: self.mutate("Request a graceful guest shutdown?", lambda: self.service.power(self.vm_name, "shutdown"))),
             ("Pause / resume", self._pause_resume),
             ("Create recovery checkpoint", self._checkpoint),
@@ -616,7 +618,7 @@ class Dashboard(tk.Tk):
             "windows_update": tk.StringVar(value="leave"),
         }
         labels = {
-            "autologon": "Autologon",
+            "autologon": "Autologon (no password prompt)",
             "lock_screen": "No lock screen",
             "disable_cad": "No Ctrl+Alt+Del",
             "power": "No standby, blanking or console lock",
@@ -650,6 +652,51 @@ class Dashboard(tk.Tk):
             "off restores the value it replaced. Every change is recorded in the guest's "
             "C:\\DriverLab\\State\\guest-config.json with the value it replaced.\n"
             "The autologon password is written to LSA private data, never to the registry.",
+        )
+
+        bcd = ttk.LabelFrame(self.content, text="Guest BCD (driver lab)")
+        bcd.pack(fill="x", pady=(14, 0))
+        self.bcd_testsigning = tk.BooleanVar(value=False)
+        self.bcd_kernel_debug = tk.BooleanVar(value=False)
+        self.bcd_crash_dump = tk.StringVar(value="leave")
+        self.bcd_disable_hvci = tk.BooleanVar(value=False)
+        self.bcd_restart = tk.BooleanVar(value=False)
+        rows = (
+            ("Test signing", ttk.Checkbutton(
+                bcd, text="bcdedit /set testsigning on", variable=self.bcd_testsigning,
+            )),
+            ("Kernel debugging", ttk.Checkbutton(
+                bcd, text="bcdedit /set debug on", variable=self.bcd_kernel_debug,
+            )),
+            ("Crash dump", ttk.Combobox(
+                bcd, textvariable=self.bcd_crash_dump, state="readonly", width=10,
+                values=("leave", "none", "kernel", "complete"),
+            )),
+            ("HVCI / VBS", ttk.Checkbutton(
+                bcd, text="Disable HVCI and VBS in the guest", variable=self.bcd_disable_hvci,
+            )),
+            ("Restart after apply", ttk.Checkbutton(
+                bcd, text="Restart the guest afterwards", variable=self.bcd_restart,
+            )),
+        )
+        for row, (label, widget) in enumerate(rows):
+            ttk.Label(bcd, text=label).grid(row=row, column=0, sticky="w", pady=2)
+            widget.grid(row=row, column=1, sticky="w", padx=(10, 0), pady=2)
+        bcd_buttons = ttk.Frame(bcd, style="Panel.TFrame")
+        bcd_buttons.grid(row=len(rows), column=0, columnspan=2, sticky="ew", pady=(8, 4))
+        for text, command in (
+            ("Apply guest BCD", self._apply_bcd),
+            ("Read BCD state", self._read_bcd),
+        ):
+            ttk.Button(bcd_buttons, text=text, command=command).pack(side="left", padx=(0, 6))
+        frame, self.bcd_text = self._text(self.content, 8)
+        frame.pack(fill="both", expand=True, pady=(10, 0))
+        self._write_text(
+            self.bcd_text,
+            "These are guest-only boot settings: nothing on the host is touched. Each change "
+            "is recorded in guest-config.json and reverted by the button above. Test signing "
+            "and kernel debugging are refused while Secure Boot is On; the service explains "
+            "how to turn it off deliberately when that is the case.",
         )
         # No automatic query on page load: reading the status needs the guest
         # capability, and a disabled capability should not open an error dialog
@@ -741,6 +788,46 @@ class Dashboard(tk.Tk):
                 self.vm_name, self.vm_name, restart=bool(self.automation_restart.get())
             ),
             lambda result: self._write_text(self.automation_text, _safe_json(result)),
+        )
+
+    def _apply_bcd(self) -> None:
+        testsigning = bool(self.bcd_testsigning.get())
+        kernel_debug = bool(self.bcd_kernel_debug.get())
+        crash_dump = {
+            "leave": None, "none": "none", "kernel": "kernel", "complete": "complete",
+        }[self.bcd_crash_dump.get()]
+        disable_hvci = bool(self.bcd_disable_hvci.get())
+        restart = bool(self.bcd_restart.get())
+        if not any((testsigning, kernel_debug, crash_dump is not None, disable_hvci)):
+            self._write_text(self.bcd_text, "Nothing selected: every BCD row is set to leave.")
+            return
+        self.mutate(
+            "Apply the selected guest BCD settings?\n\n"
+            + "\n".join(
+                f"{label}: {value}"
+                for label, value in (
+                    ("test signing", "on" if testsigning else "leave"),
+                    ("kernel debugging", "on" if kernel_debug else "leave"),
+                    ("crash dump", crash_dump or "leave"),
+                    ("HVCI / VBS", "off" if disable_hvci else "leave"),
+                )
+                if value != "leave"
+            )
+            + ("\n\nThe guest will be restarted afterwards." if restart else ""),
+            lambda: self.service.lab_guest_configure(
+                self.vm_name, self.vm_name,
+                testsigning=testsigning, kernel_debug=kernel_debug,
+                crash_dump=crash_dump, disable_hvci=disable_hvci,
+                restart=restart,
+            ),
+            lambda result: self._write_text(self.bcd_text, _safe_json(result)),
+        )
+
+    def _read_bcd(self) -> None:
+        self.submit(
+            "guest.bcd_status",
+            lambda: self.service.guest_config_status(self.vm_name),
+            lambda result: self._write_text(self.bcd_text, _safe_json(result)),
         )
 
     def _page_console(self) -> None:
@@ -1043,6 +1130,47 @@ class Dashboard(tk.Tk):
                 self._write_text(self.overview_text, _safe_json(result))
                 self.guest_card.set("Guest diagnostics\nRead completed")
         self.submit("guest.diagnostics", lambda: diagnostics(self.service, self.vm_name), done)
+
+    def _open_vm(self) -> None:
+        """Open VMConnect on the operator's desktop, for full fidelity.
+
+        Starting a VM and opening its window are different actions: this one
+        asks the service only for the inventory, then starts Windows' own
+        viewer. The name is checked against the VMs the service reports, so
+        the allowlist still stands between a name and a process.
+        """
+        name = self.vm_name.strip()
+        if not name:
+            messagebox.showerror("Open VM", "Choose a virtual machine first.", parent=self)
+            return
+        try:
+            reported = self.service.list_vms().get("vms") or []
+        except HyperVError as exc:
+            messagebox.showerror("Open VM", str(exc), parent=self)
+            return
+        known = {str(vm.get("name") or "").casefold() for vm in reported}
+        if name.casefold() not in known:
+            messagebox.showerror(
+                "Open VM",
+                f"{name} is not a virtual machine this host reports to this window.",
+                parent=self,
+            )
+            return
+        executable = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "vmconnect.exe"
+        if not executable.is_file():
+            messagebox.showerror(
+                "Open VM",
+                f"{executable} is not installed on this host, so the VM window cannot be opened.",
+                parent=self,
+            )
+            return
+        try:
+            subprocess.Popen([str(executable), "localhost", name], close_fds=True)
+        except OSError as exc:
+            messagebox.showerror("Open VM", f"VMConnect could not be started: {exc}", parent=self)
+            return
+        if hasattr(self, "status_var"):
+            self.status_var.set(f"VMConnect opened for {name}.")
 
     def _pause_resume(self) -> None:
         action = "resume" if self.last_vm.get("state") == "Paused" else "pause"

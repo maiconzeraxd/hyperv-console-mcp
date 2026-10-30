@@ -2,11 +2,11 @@
 
 A local, policy-gated [Model Context Protocol](https://modelcontextprotocol.io/) server for **Hyper-V on Windows**. It combines VM management, checkpoints, PowerShell Direct diagnostics, synthetic keyboard/mouse input, console screenshots without VMConnect, installation media, serial consoles, and serial WinDbg preparation and a live kd.exe kernel-debugging session in one stdio server.
 
-**Alpha status:** 1117 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test and one assertion set that runs over both guest transports; the smoke checks each profile's tool surface, per toolset, over a real stdio client. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
+**Alpha status:** 1189 unit/transport tests and a real MCP stdio client smoke test pass locally, including a local Windows named-pipe transport test and one assertion set that runs over both guest transports; the smoke checks each profile's tool surface, per toolset, over a real stdio client. Live validation on `NORTH-Test` covered the lab cycle, autologon, kd over COM1, SSH end to end, package staging and host-side verification over both guest transports (including a tampered file being named in the refusal), a ~100 KB `guest_exec` and a 100 KB file transfer over both guest transports, and the test-signing/debug BCD round trip on a pt-BR guest; `docs/PROJECT.md` records what was and was not exercised. The package builds as an sdist and wheel. No driver, mapper, or guest payload is bundled by this project; in the lab profile `lab_run` executes only a package the operator staged.
 
 ## Highlights
 
-- **67 MCP tools in twelve toolsets**, with read-only/destructive annotations and structured results; a profile registers only its own toolsets, so the default surface is 30 tools rather than every schema in every conversation.
+- **69 MCP tools in twelve toolsets**, with read-only/destructive annotations and structured results; a profile registers only its own toolsets, so the default surface is 31 tools rather than every schema in every conversation.
 - Inventory, pause/resume, bounded state waiting, power, checkpoints, and bounded guest file transfer.
 - A running VM reports its guest's computer name and OS from the Hyper-V key-value pair exchange,
   so a VM can be identified before any guest credential exists.
@@ -41,9 +41,10 @@ Three ways in, in the order to consider them:
 
 1. **The installer.** `HyperVConsoleMCP-Setup-<version>.exe` from the
    [releases page](https://github.com/maiconzeraxd/hyperv-console-mcp/releases): one download,
-   no administrator prompt, and no Python — the runtime is inside it. It installs into
+   no administrator prompt during installation, and no Python — the runtime is inside it. It installs into
    `%LOCALAPPDATA%\Programs\Hyper-V Console`, then runs `hyperv-setup` once, so the client
-   config, the shortcut and the self-test happen during the install.
+   config, the shortcut and the self-test happen during the install. The window itself always
+   runs elevated; Windows asks once when it opens.
 2. **winget.** `winget install maiconzeraxd.HyperVConsoleMCP`, once the manifest has been
    accepted into `microsoft/winget-pkgs`. `packaging/winget/` holds the manifests this project
    submits and `packaging/winget/README.md` says what changes per release.
@@ -137,12 +138,12 @@ client can either ask you or, in the lab profile, do it.
 
 Every tool belongs to one toolset. A profile decides which toolsets are registered, and a
 tool that is not registered is never advertised, so its schema never enters the model's
-context. The `safe` profile registers 30 tools, `lab` registers 45, `HYPERV_MCP_TOOLSETS`
-replaces the set outright, and `all` enables everything (67 tools).
+context. The `safe` profile registers 31 tools, `lab` registers 47, `HYPERV_MCP_TOOLSETS`
+replaces the set outright, and `all` enables everything (69 tools).
 
 | Toolset | Tools | safe | lab |
 |---|---|:--:|:--:|
-| `core` | `hyperv_host_status`, `vm_list`, `vm_get`, `vm_power`, `checkpoint_list`, `checkpoint`, `events_snapshot`, `operation_status` | ✓ | ✓ |
+| `core` | `hyperv_host_status`, `vm_list`, `vm_get`, `vm_power`, `checkpoint_list`, `checkpoint`, `events_snapshot`, `operation_status`, `logs_subscribe` | ✓ | ✓ |
 | `guest` | `guest_report`, `guest_exec`, `guest_transport`, `guest_read_file`, `guest_write_file`, `guest_put_file`, `guest_get_file` | ✓ | ✓ |
 | `console` | `console_info`, `console_input`, `console_wait_for_change`, `console_screenshot` | ✓ | ✓ |
 | `config` | `guest_autologon_configure`, `guest_config_status`, `guest_config_revert` | ✓ | ✓ |
@@ -152,7 +153,7 @@ replaces the set outright, and `all` enables everything (67 tools).
 | `files` | `file_roots`, `host_list_dir`, `host_make_dir`, `host_rename`, `host_delete`, `guest_list_dir`, `guest_make_dir`, `guest_rename`, `guest_delete` | | |
 | `serial` | `serial_status`, `serial_connect`, `serial_read`, `serial_send`, `serial_disconnect` | | |
 | `lab` | `lab_init`, `lab_diagnostics`, `lab_stage`, `lab_verify`, `lab_collect`, `lab_guest_configure`, `lab_verifier`, `lab_driver_service`, `lab_run`, `lab_cycle`, `lab_matrix`, `lab_receipts` | | ✓ |
-| `kd` | `kd_attach`, `kd_status`, `kd_detach`, `kd_execution`, `kd_command`, `kd_wait_event`, `kd_breakpoint`, `kd_inspect`, `vm_inject_nmi` | | ✓ |
+| `kd` | `kd_attach`, `kd_status`, `kd_detach`, `kd_execution`, `kd_command`, `kd_wait_event`, `kd_output_subscribe`, `kd_breakpoint`, `kd_inspect`, `vm_inject_nmi` | | ✓ |
 | `debug` | `debug_status`, `debug_setup` | | ✓ |
 
 Families that only differ by an action share one tool with a typed discriminator, so the
@@ -181,17 +182,17 @@ Media operations use an existing DVD drive and require the VM to be Off. `media_
 
 ## Dashboard and reproducible lab
 
-Start the native dashboard with `python -I scripts\run_dashboard.py` or, after installation, `hyperv-dashboard`. `--vm <name>` picks the VM up front; without it the window opens the fleet and asks from a list when there is more than one, so no VM name is built into the program. It uses the same service and policies as MCP and exposes a fleet page, a multi-VM matrix page, workspace tabs and the activity, console, checkpoint, recovery, media, serial/debugging, guest, lab and file-manager pages. It does not rebuild Hyper-V Manager: the fleet's **Hyper-V Manager** button and the console's **Open VMConnect** button start Windows' own tools, and a file can be dragged from one panel of the file manager to the other. Optional per-request approval of AI mutations is documented in [the dashboard guide](docs/DASHBOARD.md); a pending request is a card in a side queue, never a modal prompt, so the window stays usable while an operation waits.
+Start the native dashboard with `python -I scripts\run_dashboard.py` or, after installation, `hyperv-dashboard`. `--vm <name>` picks the VM up front; without it the window opens the fleet and asks from a list when there is more than one, so no VM name is built into the program. It uses the same service and policies as MCP and exposes a fleet page, a multi-VM matrix page, workspace tabs, the activity, console, checkpoint, recovery, media, serial/debugging, guest, lab and file-manager pages, a **live log dock** along the bottom that follows the unified stream with filters for VM, source and level, a search box, pause and correlation grouping, and a real **terminal** (xterm) over `guest_exec` on the Guest page. It does not rebuild Hyper-V Manager: the fleet's **Hyper-V Manager** button and the console's **Open VMConnect** button start Windows' own tools, and a file can be dragged from one panel of the file manager to the other. Optional per-request approval of AI mutations is documented in [the dashboard guide](docs/DASHBOARD.md); a pending request is a card in a side queue, never a modal prompt, so the window stays usable while an operation waits.
 
 `hyperv-console-mcp` on its own is the same window, and that is the command the Start Menu shortcut runs: a terminal gets the window, an MCP client — which always gives the process a pipe — gets the server, and a shortcut started with no stdin gets the window too. `--stdio` and `--ui` say which one you meant; `--vm NAME` and `--classic` are handed to the window unchanged.
 
 `hyperv-tray` (`pip install hyperv-console-mcp[tray]`) puts the window in the notification area: **Open** starts it, **Status** reports the host, **Quit** closes the icon. Its tooltip carries the live line — `3 VMs · 2 running · lab profile`, or why the service is not answering — so a host that stopped answering is visible without opening anything. It is a client of the same service, keeps no state of its own, and names no VM on the tooltip.
 
-The window is a WebView2 page (`pip install hyperv-console-mcp[ui]`, or pywebview already present). It is loaded from a single HTML file with every asset inline, so it starts no local HTTP server and opens no port. It has a light and a dark theme — following the system until the operator switches it, with the choice kept in the window's own storage and never sent to the service — and every control is reachable by keyboard, including the workspace tabs, the console and the receipt rows. On a host without the WebView2 runtime or without pywebview, `hyperv-dashboard` opens the tkinter window instead of failing; `--classic` asks for that window on any host.
+The window is a WebView2 page (`pip install hyperv-console-mcp[ui]`, or pywebview already present). It is one HTML file with every asset inline — the page as written, plus the vendored xterm it inlines when it is read — so it starts no local HTTP server and opens no port. The same file can be opened in the operator's own browser with `hyperv-console-mcp --serve`: the listener binds `127.0.0.1`, prints a URL carrying a token generated for that run, and requires it on every request, with `Origin`/`Host` checks against DNS rebinding; the page speaks the same calls to the same service, so nothing about the policy changes. See [the dashboard guide](docs/DASHBOARD.md#in-the-browser---serve) and the listener's own section in [SECURITY.md](SECURITY.md#the-one-listener---serve). It has a light and a dark theme — following the system until the operator switches it, with the choice kept in the window's own storage and never sent to the service — and every control is reachable by keyboard, including the workspace tabs, the console and the receipt rows. On a host without the WebView2 runtime or without pywebview, `hyperv-dashboard` opens the tkinter window instead of failing; `--classic` asks for that window on any host.
 
 A host where no VM has a level yet opens on a three-question wizard — which VM, what the AI may do with it, and the guest password once — instead of sending a first-time operator to a config file. It writes the same access file the Overview page writes and stores the password through the service, so it grants nothing extra; it stops opening by itself as soon as one VM has a level, and **Set up another VM** on the fleet brings it back. See [the dashboard guide](docs/DASHBOARD.md#the-first-run).
 
-The MCP server and the dashboard are clients of one background service, so a KD or serial session the AI opens is the session the window shows, and the activity page lists what the other process did. A client that finds no host starts one (`hyperv-service`, or `hyperv-service --pipe NAME`) and joins it; `HYPERV_MCP_SHARED_SERVICE=false` keeps a private copy for a run that must not disturb a live one, and `HYPERV_MCP_SERVICE_PIPE` names a different pipe. The host reads its policy once at startup, so whichever client starts it decides the environment for both — set the level per VM in the access file rather than relying on a client's environment.
+The MCP server and the dashboard are clients of one background service, so a KD or serial session the AI opens is the session the window shows, and the activity page lists what the other process did. Alongside the operation events, `logs_subscribe` reads one structured log stream — `timestamp`, `source` (`worker`, `kd`, `serial`, `ssh`, `wmi`, `lab`, `service`), VM, level, correlation id and a redacted message — from an offset, with filters and the same held-open shape as `events_wait`, so a window can show the AI and the operator working side by side instead of polling. Every operation writes a `started` and a `completed`/`failed` line under the correlation id its events carry, and a line never carries a command, typed text or a secret: the message is scrubbed before it is stored, so what a reader gets back is what the file holds. A client that finds no host starts one (`hyperv-service`, or `hyperv-service --pipe NAME`) and joins it; `HYPERV_MCP_SHARED_SERVICE=false` keeps a private copy for a run that must not disturb a live one, and `HYPERV_MCP_SERVICE_PIPE` names a different pipe. The host reads its policy once at startup, so whichever client starts it decides the environment for both — set the level per VM in the access file rather than relying on a client's environment.
 
 The lab workflow initializes fixed guest directories, stages hash-verified packages and collects evidence. Package sources and evidence downloads are confined to `HYPERV_MCP_LAB_ROOT` and `HYPERV_MCP_EVIDENCE_ROOT`. Running a package is refused outside `HYPERV_MCP_PROFILE=lab`; in that profile `lab_run`/`lab_cycle` run it, checkpoint first, and classify the outcome as `ok`, `failed`, `not_verified`, `bugcheck`, `hang` or `timeout`. A bugcheck is then triaged from the dump the run collected — the newest minidump first, `!analyze -v` through kd, merged with the host's own crash record — and each cycle writes `lab-cycle.json` beside the evidence so two runs of the same package can be diffed. `lab_receipts` reads those records back on the host alone — `action="list"` names every run newest first, `action="get"` returns one run with the host path and SHA-256 of each evidence file, `action="compare"` reports field by field what changed between two runs, marking a field one side never had as absent rather than as changed to nothing, and `action="export"` copies every receipt into one JSON document under `exports/` without moving the originals. `lab_cycle(record=true)` keeps a GIF of the guest console as evidence; `lab_matrix` runs the same package on two to four VMs, one after another with a run id per VM, and returns the rows plus a field-by-field comparison so the difference is a column rather than a memory. `lab_verifier` turns Driver Verifier on for named test drivers and `lab_driver_service` installs, starts, stops and removes a test kernel-driver service, both recorded and revertible in the guest; a refused driver is reported with its Win32 error and NTSTATUS, and signature enforcement is never bypassed. See [the lab guide](docs/LAB.md); no driver or mapper is bundled or run by this repository.
 
@@ -212,7 +213,9 @@ For kernel work, choose **KDNET** after reviewing a suitable network path, or **
 
 ## Security boundaries
 
-- Local stdio only; no HTTP server or unauthenticated network listener.
+- Local stdio by default; no unauthenticated listener. The only port this project can open is
+  `--serve`: `127.0.0.1` only, a token generated per run and required on every request,
+  `Origin`/`Host` checks against DNS rebinding, and `Cache-Control: no-store`.
 - Read-only mode by default; allowlist required for every mutation.
 - The approval gate decides whether a tool call may proceed; it is not a sandbox. It does not protect against an agent that already has a shell on the host, and the lab profile deliberately gives an autonomous loop full control of the allowlisted VMs.
 - `HYPERV_MCP_PROFILE=lab` enables every capability for the allowlisted VMs and skips the per-mutation dashboard approval. It does not widen the allowlist, skip a `confirm_*` field, or stop the audit and event records; an explicit `HYPERV_MCP_ALLOW_*=false` still wins. `lab_run`/`lab_cycle`, which execute a staged package, exist only in this profile.

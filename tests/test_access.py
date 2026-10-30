@@ -234,6 +234,57 @@ def test_the_cli_tells_a_running_service_and_never_needs_one(
     assert result == {"service": "not running"}
 
 
+def test_the_cli_reports_the_records_it_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """set/remove return full records, not load()'s two-item compatibility tuples."""
+    from uuid import uuid4
+
+    from hyperv_console_mcp import access_cli
+
+    monkeypatch.setenv("HYPERV_MCP_ACCESS_FILE", str(tmp_path / "access.json"))
+    monkeypatch.setenv(
+        "HYPERV_MCP_SERVICE_PIPE", rf"\\.\pipe\HyperVConsoleMCP-Service-absent-{uuid4().hex}"
+    )
+    monkeypatch.setattr("sys.argv", ["hyperv-access", "set", "NORTH-Test", "lab"])
+
+    access_cli.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["vms"] == [{
+        "name": "NORTH-Test",
+        "level": "lab",
+        "capabilities": sorted(LEVEL_CAPABILITIES["lab"]),
+    }]
+    assert result["service"] == "not running"
+
+
+def test_the_cli_lists_a_file_it_did_not_just_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """list reads the saved file, whose load() tuples are not report records."""
+    from uuid import uuid4
+
+    from hyperv_console_mcp import access_cli
+
+    path = tmp_path / "access.json"
+    AccessStore(path).set("NORTH-Test", "lab")
+    monkeypatch.setenv("HYPERV_MCP_ACCESS_FILE", str(path))
+    monkeypatch.setenv(
+        "HYPERV_MCP_SERVICE_PIPE", rf"\\.\pipe\HyperVConsoleMCP-Service-absent-{uuid4().hex}"
+    )
+    monkeypatch.setattr("sys.argv", ["hyperv-access", "list"])
+
+    access_cli.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["vms"] == [{
+        "name": "NORTH-Test",
+        "level": "lab",
+        "capabilities": sorted(LEVEL_CAPABILITIES["lab"]),
+    }]
+
+
 def test_a_broken_file_is_an_error_not_an_empty_policy(tmp_path: Path) -> None:
     path = tmp_path / "access.json"
     path.write_text("{not json", encoding="utf-8")
@@ -257,3 +308,129 @@ def test_a_level_name_is_case_insensitive() -> None:
     assert normalise_level(" Lab ") == "lab"
     with pytest.raises(ValidationError):
         normalise_level("")
+
+def test_a_level_can_be_narrowed_to_a_subset_of_its_capabilities(tmp_path: Path) -> None:
+    """The matrix: the level is the ceiling, and the operator can take less.
+
+    A grid of "what I allow" is only honest if unchecking something removes it
+    from what the AI may do — and if checking something the level never had is
+    refused rather than quietly widening the level.
+    """
+    store = AccessStore(tmp_path / "access.json")
+
+    store.set("NORTH-Test", "lab", ["guest", "console"])
+
+    record = store.entries()["north-test"]
+    assert record["level"] == "lab"
+    assert record["capabilities"] == ["console", "guest"]
+
+
+def test_a_capability_outside_the_level_is_refused(tmp_path: Path) -> None:
+    store = AccessStore(tmp_path / "access.json")
+
+    with pytest.raises(ValidationError, match="read-only"):
+        store.set("NORTH-Test", "read-only", ["guest"])
+    with pytest.raises(ValidationError, match="unknown capability"):
+        store.set("NORTH-Test", "lab", ["root"])
+
+
+def test_setting_a_level_again_clears_the_narrowing(tmp_path: Path) -> None:
+    """A level is the whole statement; a stale subset must not survive it."""
+    store = AccessStore(tmp_path / "access.json")
+    store.set("NORTH-Test", "lab", ["guest"])
+
+    store.set("NORTH-Test", "lab")
+
+    assert store.entries()["north-test"]["capabilities"] is None
+
+
+def test_the_policy_honours_the_narrowing(tmp_path: Path) -> None:
+    path = tmp_path / "access.json"
+    AccessStore(path).set("NORTH-Test", "lab", ["console"])
+
+    settings = Settings.from_env({"HYPERV_MCP_ACCESS_FILE": str(path)})
+
+    assert settings.level_for("NORTH-Test") == "lab"
+    assert settings.allows("NORTH-Test", "console") is True
+    assert settings.allows("NORTH-Test", "guest") is False
+    assert settings.allows("NORTH-Test", "debugger") is False
+    # The refusal names the level, which is what the operator can change.
+    assert "lab" in settings.refusal("NORTH-Test", "guest")
+
+
+def test_a_file_that_widens_its_own_level_is_refused(tmp_path: Path) -> None:
+    """A hand-edited file cannot grant past its level, and says so loudly.
+
+    The house rule is loud rather than lenient: a policy file that asks for
+    something impossible stops with a message instead of being silently
+    narrowed into a policy the operator did not write.
+    """
+    path = tmp_path / "access.json"
+    path.write_text(json.dumps({
+        "version": 1,
+        "vms": {"north-test": {
+            "name": "NORTH-Test", "level": "control",
+            "capabilities": ["guest", "power"],
+        }},
+    }), encoding="utf-8")
+
+    with pytest.raises(ValidationError, match="never widen"):
+        Settings.from_env({"HYPERV_MCP_ACCESS_FILE": str(path)})
+
+
+def test_a_hand_built_mapping_cannot_widen_a_level() -> None:
+    """Defence in depth: the policy intersects, whatever it was handed."""
+    settings = Settings(
+        levels={"north-test": "control"},
+        capabilities={"north-test": ("power", "guest")},
+    )
+
+    assert settings.allows("NORTH-Test", "power") is True
+    assert settings.allows("NORTH-Test", "guest") is False
+
+def test_the_cli_narrows_a_level_in_one_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--capabilities`` is the matrix without a window open."""
+    from uuid import uuid4
+
+    from hyperv_console_mcp import access_cli
+
+    monkeypatch.setenv("HYPERV_MCP_ACCESS_FILE", str(tmp_path / "access.json"))
+    monkeypatch.setenv(
+        "HYPERV_MCP_SERVICE_PIPE", rf"\\.\pipe\HyperVConsoleMCP-Service-absent-{uuid4().hex}"
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        ["hyperv-access", "set", "NORTH-Test", "lab", "--capabilities", "guest, console"],
+    )
+
+    access_cli.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["vms"] == [{
+        "name": "NORTH-Test",
+        "level": "lab",
+        "capabilities": ["console", "guest"],
+    }]
+
+def test_a_narrowed_capability_says_it_was_unchecked_not_out_of_reach(tmp_path: Path) -> None:
+    """The refusal must name the thing the operator can actually change.
+
+    Telling them the level does not include ``guest`` sends them to raise a
+    level that already had it; the matrix is what took it away.
+    """
+    path = tmp_path / "access.json"
+    AccessStore(path).set("NORTH-Test", "lab", ["console"])
+    settings = Settings.from_env({"HYPERV_MCP_ACCESS_FILE": str(path)})
+
+    message = settings.refusal("NORTH-Test", "guest")
+
+    assert "unchecked" in message
+    assert "does not include" not in message
+    # And a level that never had it still says so.
+    AccessStore(path).set("NORTH-Test", "control")
+    assert "does not include" in Settings.from_env(
+        {"HYPERV_MCP_ACCESS_FILE": str(path)}
+    ).refusal("NORTH-Test", "guest")
+

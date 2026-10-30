@@ -159,6 +159,9 @@ class Settings:
     # the state the guest is expected to return to, so the service refuses to
     # delete it or to let a new checkpoint take its name — for every actor.
     baselines: Mapping[str, str] = field(default_factory=dict)
+    # casefolded VM name -> the capabilities the operator kept, when they took
+    # some away. The level is the ceiling; this can only be a subset of it.
+    capabilities: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     access_path: Path | None = None
     profile: str = "safe"
     toolsets: frozenset[str] = DEFAULT_TOOLSETS["safe"]
@@ -237,6 +240,13 @@ class Settings:
                 key: str(record["baseline"])
                 for key, record in entries.items()
                 if record["baseline"]
+            },
+            # Only the narrowed VMs appear: an absent key means "the whole level",
+            # which is what most files say and what an operator expects.
+            capabilities={
+                key: tuple(record["capabilities"] or ())
+                for key, record in entries.items()
+                if record["capabilities"] is not None
             },
             access_path=path,
             profile=profile,
@@ -324,7 +334,12 @@ class Settings:
         """
         level = self.level_for(vm_name)
         if level is not None:
-            return LEVEL_CAPABILITIES[level]
+            kept = self.capabilities.get(vm_name.strip().casefold())
+            if kept is None:
+                return LEVEL_CAPABILITIES[level]
+            # Intersected, not trusted: a hand-edited file can name a capability
+            # its own level does not have, and the level still wins.
+            return frozenset(kept) & LEVEL_CAPABILITIES[level]
         flags = (
             ("power", self.allow_power),
             ("checkpoints", self.allow_checkpoints),
@@ -345,6 +360,16 @@ class Settings:
         """Why this VM may not do this, in the words of whatever decided it."""
         level = self.level_for(vm_name)
         if level is not None:
+            # Two different sentences, because they are two different mistakes:
+            # the level never had it, or the operator took it away with a grid
+            # that the AI cannot see. Saying the wrong one sends the operator to
+            # change a level that was never the problem.
+            if capability in LEVEL_CAPABILITIES[level]:
+                return (
+                    f"VM {vm_name!r} has access level {level!r}, but {capability} was unchecked "
+                    f"in its capability list. Restore it with: "
+                    f"hyperv-access set \"{vm_name}\" {level}"
+                )
             return (
                 f"VM {vm_name!r} has access level {level!r}, which does not include {capability}. "
                 f"Raise it with: hyperv-access set \"{vm_name}\" control|lab"

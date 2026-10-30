@@ -38,6 +38,8 @@ hyperv-console-mcp — the MCP server, and the window that belongs to it.
   hyperv-console-mcp --ui         always open the window.
   hyperv-console-mcp --vm NAME    open the window on one virtual machine.
   hyperv-console-mcp --classic    open the tkinter window instead of WebView2.
+  hyperv-console-mcp --serve      serve the same page in your browser, on
+                                  127.0.0.1 with a token (--port N, --vm NAME).
   hyperv-console-mcp --version    print the version and exit.
 """
 
@@ -83,6 +85,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     first = arguments[0]
     if first == "--stdio":
         return _serve()
+    if first == "--serve":
+        return _browser(arguments[1:])
     if first in WINDOW_FLAGS or first.startswith("--vm="):
         return _window([item for item in arguments if item not in WINDOW_ONLY])
     if first in ("-h", "--help"):
@@ -104,10 +108,68 @@ def _serve() -> int:
 
 
 def _window(arguments: list[str]) -> int:
+    """The interface: the page in a WebView2 window, or the dashboard without it.
+
+    Since v0.4 the page is the interface, and this is what ``hyperv-console-mcp``
+    with no arguments runs. Opening it also brings the shared service up: the
+    window connects through ``open_service``, which starts the host when nothing
+    is listening — one command, nothing to configure, and a second launch joins
+    the service instead of starting another.
+
+    The tkinter dashboard stays as the fallback for a host without the WebView2
+    runtime, because the alternative is a command that opens nothing at all.
+    """
+    from .webui import window as interface
+
+    if interface.available() and interface.run(_vm_flag(arguments)):
+        return 0
     from .dashboard import main as dashboard_main
 
     dashboard_main(arguments)
     return 0
+
+
+def _vm_flag(arguments: Sequence[str]) -> str | None:
+    """``--vm NAME`` or ``--vm=NAME``, which is all the window takes."""
+    rest = list(arguments)
+    while rest:
+        item = rest.pop(0)
+        if item == "--vm" and rest:
+            return rest.pop(0)
+        if item.startswith("--vm="):
+            return item.split("=", 1)[1]
+    return None
+
+
+def _browser(arguments: list[str]) -> int:
+    """``--serve``: the same page in the operator's browser, loopback and token.
+
+    The options are parsed here rather than by the page's own module so a typo
+    is answered in the terminal instead of opening a listener that ignores it.
+    """
+    port = 0
+    vm_name = ""
+    rest = list(arguments)
+    while rest:
+        item = rest.pop(0)
+        try:
+            if item == "--port" and rest:
+                port = int(rest.pop(0))
+            elif item.startswith("--port="):
+                port = int(item.split("=", 1)[1])
+            elif item == "--vm" and rest:
+                vm_name = rest.pop(0)
+            elif item.startswith("--vm="):
+                vm_name = item.split("=", 1)[1]
+            else:
+                _say(f"hyperv-console-mcp: {item} is not a --serve option.\n")
+                return 2
+        except ValueError:
+            _say(f"hyperv-console-mcp: {item} needs a number.\n")
+            return 2
+    from .webui.serve import run
+
+    return run(port=port, open_browser=True, vm_name=vm_name)
 
 
 if __name__ == "__main__":

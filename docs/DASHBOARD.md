@@ -11,13 +11,40 @@ The window is one HTML file with its CSS and JavaScript inline, loaded through p
 
 ## Start
 
-Run from an elevated PowerShell when Hyper-V management requires elevation:
+Run from an elevated PowerShell when Hyper-V management requires elevation. The installed launcher asks for elevation itself, so a shortcut or a double-click still starts the window with the rights it needs:
 
 ```powershell
 python -I scripts\run_dashboard.py
 ```
 
 `--vm <name>` picks the VM up front. Without it the window opens the fleet, and nothing in this program names a VM of its own. When `HYPERV_MCP_ALLOWED_VMS` is set it narrows what is listed, so an allowlist of one still opens without a prompt. After installation, `hyperv-dashboard` is equivalent, and so is `hyperv-console-mcp` with no arguments — the same command a client's config names, which opens the window when a person runs it and serves stdio when a client does. Use the same protected environment as the MCP host; a `.env` file is not loaded automatically.
+
+## In the browser: `--serve`
+
+The same page can be opened in the operator's own browser instead of the WebView2 window:
+
+```powershell
+hyperv-console-mcp --serve              # prints the URL, opens the browser
+hyperv-console-mcp --serve --port 8080  # a fixed port, for a bookmark
+hyperv-console-mcp --serve --vm Lab-VM  # open on one VM
+```
+
+It prints `http://127.0.0.1:<port>/?token=<token>` and opens it. Three things are worth knowing:
+
+- **The token is per run.** It is generated when the listener starts, printed with the URL, and
+  required on every call; it is never written to disk. A URL without it answers 401, and a new
+  run has a different one — so a bookmark needs `--port`, not a saved token.
+- **The listener is loopback only.** It binds `127.0.0.1` and refuses a `Host` or `Origin` that is
+  not a loopback name, which is what stops DNS rebinding and a page on another site from driving
+  it. For another machine, tunnel to the loopback; nothing here listens on the network.
+- **It is the same window.** Every call goes to the same `Api` the WebView2 page uses and so to
+  the same service, the same policy and the same audit trail. What the page shows and what it
+  refuses are identical in both modes; only the transport differs — the bridge in the window,
+  HTTP here.
+
+The page in a tab is a picture of the same thing, not a second implementation: the live feeds
+(`events`, `logs`, `kd_output`) are the held-open service calls, so they stream over plain HTTP
+long-polling and this mode needs no websocket.
 
 ## The notification-area icon
 
@@ -36,9 +63,14 @@ The **fleet** is the home page: every VM Hyper-V reported, its state, the level 
 - **Recovery** — power and checkpoint actions, including the forced ones that ask for a confirmation.
 - **Media** — an ISO, the DVD drive and boot order.
 - **Debugger** — COM1 serial, the kd session and the symbols it resolves.
-- **Guest** — the credential source, the automation toggles and one command.
+- **Guest** — the credential source, the automation toggles, the guest-only BCD toggles, one command, and a
+  **terminal**: xterm over `guest_exec`, one line per command, with the output and exit code printed as they
+  come back. The transcript lives in the widget, so a redraw starts a new session and the page stores no
+  command. Ctrl+C clears the line.
 - **Lab** — diagnostics, package staging, verification, the cycle that runs a package, receipts with export, and the crash triage.
 - **Files** — the host's four roots beside the guest's own disk.
+
+Along the bottom of the window is the **log dock**: the unified stream from `logs_subscribe`, live, with a filter for the VM, one for the source (`worker`, `kd`, `serial`, `ssh`, `wmi`, `lab`, `service`), one for the minimum level, a search box, **Pause** and **Clear**. An operation's correlation id is drawn on the first line of its group and left blank on the rest, so a run reads as one run rather than as unrelated lines that happen to be adjacent. The dock keeps the tail it can draw — the oldest line leaves first — and stops asking while it is paused, keeping its offset so nothing is missed and nothing is drawn twice. It is the one place where the AI's work and the operator's clicks appear in the same column.
 
 Closing the window does not stop a VM or guarantee that an already-running guest command was cancelled, and changing pages does not cancel a background operation.
 
@@ -46,7 +78,7 @@ Closing the window does not stop a VM or guarantee that an already-running guest
 
 This is not a second Hyper-V Manager. Creating a VM and editing its hardware are rare, and the manager already does them well, so **Hyper-V Manager** on the fleet opens `mmc.exe virtmgmt.msc` and the window stops there. The console page carries the same idea: the display is a picture, so **Open VMConnect** starts `vmconnect.exe localhost "<vm>"` for full fidelity instead of telling the operator to type that command somewhere else.
 
-Both are the window's own methods rather than service calls, because the service is a background process and a window it started would belong to that process's desktop rather than the operator's. The decision is still Python's, not the page's: `open_vmconnect` asks the service for `list_vms` first and refuses a name the host did not report, which is the allowlist standing between a name and a process. The VM name goes in as one argument, so a VM called `Lab VM` is still one argument and no shell ever parses it. A host without the management tools gets an answer that says so rather than a traceback.
+Both are the window's own methods rather than service calls, because the service is a background process and a window it started would belong to that process's desktop rather than the operator's. The decision is still Python's, not the page's: `open_vmconnect` asks the service for `list_vms` first and refuses a name the host did not report, which is the allowlist standing between a name and a process. The VM name goes in as one argument, so a VM called `Lab VM` is still one argument and no shell ever parses it. A host without the management tools gets an answer that says so rather than a traceback. The WebView2 fleet row and the classic tkinter window's Overview page both carry the action, next to **Start**.
 
 ## Two palettes, one set of names
 

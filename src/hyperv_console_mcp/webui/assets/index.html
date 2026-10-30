@@ -3,6 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Empty in the WebView2 window, where the page talks to Python over the
+     bridge and needs no token. `--serve` rewrites this attribute with the
+     token the listener was opened with, and the page then speaks HTTP. -->
+<meta name="hyperv-token" content="">
 <title>Hyper-V Control Center</title>
 <style>
   /* One palette in two sets of values. The page is built by the script, so the
@@ -85,7 +89,83 @@
   .app {
     display: grid;
     grid-template-columns: 232px minmax(0, 1fr) auto;
+    /* Two rows: the work above, the live log dock below. The dock is a row of
+       the grid rather than a fixed overlay, so it can never cover the last row
+       of a table — the thing a fixed footer always eventually does. */
+    grid-template-rows: minmax(0, 1fr) auto;
     height: 100vh;
+  }
+  /* ---------- the log dock ---------- */
+  #dock {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+  }
+  #dock .dock-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: .78rem;
+    color: var(--muted);
+    flex: 0 0 auto;
+  }
+  #dock .dock-bar strong { color: var(--text); letter-spacing: .04em; }
+  #dock .dock-bar input, #dock .dock-bar select {
+    background: var(--surface); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 3px 6px; font: inherit;
+  }
+  #dock .dock-bar input#log-vm { width: 110px; }
+  #dock .dock-bar input#log-search { flex: 1 1 auto; min-width: 80px; }
+  #dock .dock-body {
+    flex: 1 1 auto;
+    max-height: 200px;
+    overflow-y: auto;
+    font-family: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+    font-size: .76rem;
+    padding: 4px 0;
+  }
+  #dock.collapsed .dock-body { display: none; }
+  #dock .log-line {
+    display: grid;
+    grid-template-columns: 62px 72px 58px 104px 64px minmax(0, 1fr);
+    gap: 8px;
+    padding: 1px 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  #dock .log-line:hover { background: var(--hover); }
+  #dock .log-line .t { color: var(--muted); }
+  #dock .log-line .src { color: var(--blue); }
+  #dock .log-line .corr { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+  #dock .log-line.warning .msg { color: var(--warning); }
+  #dock .log-line.error .msg { color: var(--error); }
+  #dock .log-empty { color: var(--muted); padding: 6px 12px; }
+  /* A real terminal widget: xterm paints its own canvas, so this is only the
+     frame. Its colours come from the palette at runtime, which keeps the light
+     theme working without a second definition. */
+  /* The permission matrix: one chip per capability, greyed when the level
+     cannot grant it, so a checkbox never offers something the service refuses. */
+  #cap-grid { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 0; }
+  #cap-grid .cap {
+    display: flex; align-items: center; gap: 5px;
+    padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px;
+    background: var(--surface); font-size: .78rem; color: var(--text);
+  }
+  #cap-grid .cap.off { color: var(--muted); border-style: dashed; }
+  #cap-grid .cap input { accent-color: var(--accent); }
+  .terminal {
+    height: 300px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px;
+    overflow: hidden;
   }
   /* ---------- navigation ---------- */
   nav {
@@ -357,6 +437,8 @@
     main { padding: 16px; }
     aside.approvals { width: auto; border-left: 0; border-top: 1px solid var(--border); max-height: 45vh; }
   }
+  /* Vendored: xterm.js 5.3.0, MIT. Inlined by webui/page.py. */
+  /*__VENDOR_CSS__*/
 </style>
 </head>
 <body>
@@ -390,6 +472,36 @@
     <p class="hint">The MCP server holds one operation open for each card. Nothing here is sent to the AI.</p>
     <div id="approval-list"></div>
   </aside>
+
+  <section id="dock" aria-label="Live log">
+    <header class="dock-bar">
+      <strong>Logs</strong>
+      <button class="act" id="log-toggle" aria-expanded="true" aria-controls="log-body">Hide</button>
+      <input id="log-vm" placeholder="VM" aria-label="Filter the dock by virtual machine">
+      <select id="log-source" aria-label="Filter the dock by source">
+        <option value="">every source</option>
+        <option value="worker">worker</option>
+        <option value="kd">kd</option>
+        <option value="serial">serial</option>
+        <option value="ssh">ssh</option>
+        <option value="wmi">wmi</option>
+        <option value="lab">lab</option>
+        <option value="service">service</option>
+      </select>
+      <select id="log-level" aria-label="Minimum level shown in the dock">
+        <option value="">every level</option>
+        <option value="debug">debug</option>
+        <option value="info">info</option>
+        <option value="warning">warning</option>
+        <option value="error">error</option>
+      </select>
+      <input id="log-search" placeholder="Search the dock" aria-label="Search the dock">
+      <button class="act" id="log-pause" aria-pressed="false">Pause</button>
+      <button class="act" id="log-clear">Clear</button>
+      <span id="log-status" role="status" aria-live="polite">connecting…</span>
+    </header>
+    <div class="dock-body" id="log-body" role="log" aria-live="polite" aria-label="Log lines"></div>
+  </section>
 </div>
 
 <div id="chooser">
@@ -415,6 +527,8 @@
 </div>
 
 <script>
+/* Vendored: xterm.js 5.3.0, MIT. Inlined by webui/page.py. */
+/*__VENDOR_JS__*/
 "use strict";
 
 const PAGES = [
@@ -427,6 +541,7 @@ const PAGES = [
   ["Recovery", "recovery", "Power, checkpoints and the forced actions that ask for a confirmation."],
   ["Media", "media", "The DVD drive, an ISO and boot order."],
   ["Debugger", "debugger", "COM1 serial, the kd session and the symbols it resolves."],
+  ["Login", "login", "The guest credential, typed once and kept in the Windows vault."],
   ["Guest", "guest", "Credential source, automation toggles and one command."],
   ["Lab", "lab", "Directories, packages, diagnostics, and the cycle that runs one."],
   ["Files", "files", "Two panels: the host roots this window may browse, and the guest's own disk."],
@@ -499,7 +614,38 @@ if (window.matchMedia) {
   if (preference.addEventListener) preference.addEventListener("change", follow);
 }
 
-const api = () => window.pywebview && window.pywebview.api;
+/* Two transports, one surface. The WebView2 window exposes `pywebview.api`;
+   `--serve` puts a token in the page and answers the same method names over
+   HTTP on loopback, so nothing below this line knows which one it is talking
+   to — and a refusal arrives as the same `{error}` envelope from both. */
+const TOKEN = (document.querySelector('meta[name="hyperv-token"]') || {}).content || "";
+function httpApi() {
+  return new Proxy({}, {
+    get: (_target, name) => async (...args) => {
+      let response;
+      try {
+        response = await fetch("/api", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-HyperV-Token": TOKEN },
+          body: JSON.stringify({ method: String(name), arguments: args }),
+        });
+      } catch (error) {
+        return { error: { code: "unreachable", message: "The page lost the local host." } };
+      }
+      let body = {};
+      try { body = await response.json(); } catch (error) { /* an empty answer is a refusal too */ }
+      if (body && body.error) return { error: body.error };
+      if (!response.ok) {
+        return { error: { code: "http_" + response.status, message: "The host refused the call." } };
+      }
+      // The window's methods answer `{ok: ...}`, the same envelope the bridge
+      // hands the page, so nothing here has to unwrap a second layer.
+      return body;
+    },
+  });
+}
+const HTTP_API = TOKEN ? httpApi() : null;
+const api = () => (window.pywebview && window.pywebview.api) || HTTP_API;
 const el = (tag, attrs = {}, ...children) => {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
@@ -623,7 +769,11 @@ const builders = {
                action("Save", "power", () => ({ vm_name: name, action: "save" }), null, render),
                action("Turn off", "power", () => ({ vm_name: name, action: "turn_off", confirm_vm: name }), "danger", render)]
             : [action("Start", "power", () => ({ vm_name: name, action: "start" }), null, render)],
-          el("button", { class: "act", onclick: () => openVm(name) }, "Open"))));
+          el("button", { class: "act", onclick: () => openVm(name) }, "Open"),
+          el("button", {
+            class: "act",
+            onclick: () => openViewer("open_vmconnect", () => api().open_vmconnect(name)),
+          }, "VMConnect"))));
     });
 
     const empty = vms.length
@@ -711,7 +861,7 @@ const builders = {
       api().call("guest_transport_status", { ...vmArg(), probe: true }),
     ]);
     const record = (vm && vm.ok && vm.ok.vm) || {};
-    const levelSelect = el("select", { id: "level" },
+    const levelSelect = el("select", { id: "level", onchange: (event) => renderCaps(event.target.value) },
       ...(state.hello.levels || []).map((name) => el("option", { value: name, selected: name === state.hello.level ? "selected" : null }, name)));
     return el("div", { class: "grid" },
       panel("State", "Read from the host, not from the guest.",
@@ -736,7 +886,10 @@ const builders = {
           ? state.vm + " is " + state.hello.level + "."
           : state.vm + " has no level, so no tool can reach it."),
         el("div", { class: "row" }, field("Level", levelSelect)),
-        el("div", { class: "row", style: "margin:0" },
+        el("p", { class: "hint", style: "margin:6px 0 0" },
+          "What this VM may do. The level sets the ceiling; unchecking here takes one away."),
+        el("div", { id: "cap-grid", role: "group", "aria-label": "Capabilities this VM allows" }),
+        el("div", { class: "row", style: "margin:10px 0 0" },
           el("button", { class: "act primary", onclick: () => writeLevel(fieldValue("level")) }, "Apply level"),
           el("button", { class: "act", onclick: () => writeLevel("") }, "Remove level"))),
       panel("Checkpoints", "Restoring one discards everything after it.",
@@ -1079,7 +1232,7 @@ const builders = {
         field("Guest BCD: test signing", el("input", { id: "prep-testsigning", type: "checkbox" })),
         field("Guest BCD: kernel debug", el("input", { id: "prep-kernel-debug", type: "checkbox" })),
         field("Crash dump", el("select", { id: "prep-crash-dump" },
-          ...["", "none", "small", "kernel", "full"].map((value) =>
+          ...["", "none", "kernel", "complete"].map((value) =>
             el("option", { value }, value || "(leave as it is)"))))),
       el("div", { class: "row", style: "margin:0" },
         action("Apply guest BCD", "lab_guest_configure", () => ({
@@ -1133,6 +1286,47 @@ const builders = {
       preparePanel);
   },
 
+  async login() {
+    // The vault is the only place the password goes, so this screen exists to
+    // type it once. It opens by itself only when a VM has none: a window that
+    // asks again for a credential it already has is a window that lost it.
+    const credential = state.hello.credential || { source: "missing", username: null };
+    const stored = credential.source === "credential_manager";
+    const fromEnvironment = credential.source === "environment";
+    const status = el("p", { class: "hint", id: "cred-state" },
+      stored ? "Stored for " + (credential.username || "this VM") + " in the Windows Credential Manager."
+        : fromEnvironment ? "Coming from the environment this process was started with."
+          : "This VM has no credential yet, so its guest cannot be reached.");
+    // The credential and the guest capability are different locks, and this
+    // screen only turns one of them: saying so here saves a refused button.
+    const blocked = (state.hello.capabilities || {}).guest === false
+      ? el("p", { class: "hint", id: "cred-blocked", style: "color:var(--danger)" },
+        "The guest capability is unchecked for this VM, so the service will refuse the test. "
+        + "Re-check guest on Overview first.")
+      : null;
+    return el("div", { class: "grid" },
+      panel("Guest credential", "Typed once, here. It goes to the Windows Credential Manager and is never sent back to this page.",
+        status,
+        blocked,
+        el("div", { class: "row" },
+          field("Username", el("input", {
+            id: "cred-user", type: "text", autocomplete: "username",
+            value: credential.username || "", placeholder: "Administrator",
+          })),
+          field("Password", el("input", {
+            id: "cred-pass", type: "password", autocomplete: "current-password",
+            placeholder: stored ? "a credential is already stored" : "",
+          }))),
+        el("div", { class: "row", style: "margin:0" },
+          el("button", { class: "act primary", onclick: () => saveCredential() }, "Save and test"),
+          el("button", { class: "act", onclick: () => checkCredential() }, "Test stored"),
+          el("button", { class: "act danger", onclick: () => forgetCredential() }, "Forget")),
+        el("p", { class: "hint", style: "margin:10px 0 0" },
+          "Saving replaces what the vault holds for this VM. The password is not kept in this page, not logged, and not part of any audit record.")),
+      panel("What the service reports", "The same status the Guest page shows — source and account, never the secret.",
+        el("pre", { id: "cred-status", style: "margin:0;font-size:.78rem;white-space:pre-wrap" }, "Press \u201cTest stored\u201d to ask.")));
+  },
+
   async guest() {
     const [credential, config] = await Promise.all([
       api().call("guest_credential_status", vmArg()), api().call("guest_config_status", vmArg()),
@@ -1158,7 +1352,21 @@ const builders = {
       panel("One command", "Through PowerShell Direct or SSH, whichever the transport reports.",
         el("div", { class: "row" }, el("textarea", { id: "guest-command", placeholder: "hostname" })),
         el("div", { class: "row", style: "margin:0" },
-          action("Run", "guest_exec", () => ({ vm_name: state.vm, command: fieldValue("guest-command") }), "primary"))));
+          action("Run", "guest_exec", () => ({ vm_name: state.vm, command: fieldValue("guest-command") }), "primary"))),
+      (() => {
+        // The terminal needs an element with a size, so it is mounted once this
+        // render is in the document rather than while it is being built.
+        const host = el("div", {
+          class: "terminal", id: "guest-term", role: "application",
+          "aria-label": "Guest terminal. Type a command and press Enter.",
+        });
+        requestAnimationFrame(() => mountTerminal(host, state.vm));
+        return panel(
+          "Terminal",
+          "A terminal over guest_exec: one line is one command, and the transcript stays in this widget.",
+          host,
+        );
+      })());
   },
 
   async lab() {
@@ -1432,12 +1640,104 @@ const builders = {
 };
 
 /* ---------- the pieces that are not a form ---------- */
+/* The matrix: the level is the ceiling, and these are the ones kept from it.
+   Unchecking removes a capability; the page never offers one the level does not
+   have, because the service would refuse it and a refused checkbox is a lie. */
+const MATRIX = ["power", "checkpoints", "guest", "console", "screenshots", "debugger", "media"];
+
+function renderCaps(level) {
+  const grid = document.getElementById("cap-grid");
+  if (!grid) return;
+  const byLevel = (state.hello && state.hello.capabilities_by_level) || {};
+  const allowed = byLevel[level] || [];
+  // hello reports the current VM's capabilities as a map of answers; a level
+  // that is not the saved one starts from its own full set.
+  const answers = (state.hello && state.hello.capabilities) || {};
+  const kept = level === state.hello.level ? allowed.filter((name) => answers[name]) : allowed;
+  grid.replaceChildren(...MATRIX.map((name) => {
+    const offered = allowed.includes(name);
+    return el("label", { class: "cap" + (offered ? "" : " off"), title: offered ? "" : level + " does not include " + name },
+      el("input", {
+        type: "checkbox", id: "cap-" + name,
+        checked: offered && kept.includes(name) ? "checked" : null,
+        disabled: offered ? null : "disabled",
+      }),
+      name);
+  }));
+}
+
+function keptCaps(level) {
+  const byLevel = (state.hello && state.hello.capabilities_by_level) || {};
+  const allowed = byLevel[level] || [];
+  const kept = MATRIX.filter((name) => {
+    const box = document.getElementById("cap-" + name);
+    return box && box.checked;
+  });
+  // The whole set is not a narrowing: say nothing rather than write a list that
+  // means the same as the level.
+  return kept.length === allowed.length ? null : kept;
+}
+
 async function writeLevel(level) {
+  const kept = level ? keptCaps(level) : null;
+  // An empty matrix is not a narrowing, it is a VM that may do nothing — and
+  // that has a plainer way to say it, which also takes the badge away.
+  if (level && kept && !kept.length) {
+    show("set_level", { error: { message: "Nothing is checked. Remove the level instead of allowing nothing." } });
+    return;
+  }
   try {
-    const response = level ? await api().set_level(level) : await api().remove_level();
+    const response = level
+      ? await api().set_level(level, kept)
+      : await api().remove_level();
     show(level ? "set_level" : "remove_level", response);
   } catch (error) {
     show("set_level", { error: { message: String(error) } });
+  }
+  await refreshHello();
+  await render();
+}
+
+/* The credential screen's three verbs. None of them keeps the password: it is
+   read once, handed to the service, and the field is cleared before the call
+   even starts, so nothing here can echo it back. */
+async function saveCredential() {
+  const user = fieldValue("cred-user").trim();
+  const secret = fieldValue("cred-pass");
+  const input = document.getElementById("cred-pass");
+  if (input) input.value = "";
+  if (!user || !secret) {
+    show("set_credential", { error: { message: "A username and a password are both needed." } });
+    return;
+  }
+  try {
+    show("set_credential", await api().set_credential(user, secret));
+  } catch (error) {
+    show("set_credential", { error: { message: String(error) } });
+  }
+  await refreshHello();
+  await render();
+  await checkCredential();
+}
+
+async function checkCredential() {
+  const pre = document.getElementById("cred-status");
+  try {
+    const status = await api().check_credential();
+    const body = (status && status.ok) || (status && status.error) || status;
+    if (pre) pre.textContent = JSON.stringify(body, null, 2);
+  } catch (error) {
+    if (pre) pre.textContent = String(error);
+  }
+  await refreshHello();
+}
+
+async function forgetCredential() {
+  try {
+    show("guest_credential_forget",
+      await api().call("guest_credential_forget", { ...vmArg(), confirm_vm: state.vm }));
+  } catch (error) {
+    show("guest_credential_forget", { error: { message: String(error) } });
   }
   await refreshHello();
   await render();
@@ -2462,6 +2762,12 @@ async function render() {
   if (state.page === "activity") drawActivity();
   if (state.page === "files") drawTransfer();
   if (state.page === "lab") drawCycle();
+  // The matrix draws into an element this render just created, and it starts
+  // from the level the select names so the two never disagree.
+  if (state.page === "overview") {
+    const select = document.getElementById("level");
+    if (select) renderCaps(select.value);
+  }
   if (state.page === "matrix") drawMatrix();
   // The serial loop draws into an element this render just replaced, so it is
   // restarted here and left to die on its next tick when the page moves on.
@@ -2489,6 +2795,11 @@ async function openVm(name) {
     return;
   }
   if (state.page === "fleet") state.page = "overview";
+  // A VM with no credential cannot be used at all, so opening one goes to the
+  // screen that fixes it rather than to a workspace full of refusals.
+  if (((state.hello && state.hello.credential) || {}).source === "missing" && state.page === "overview") {
+    state.page = "login";
+  }
   await render();
 }
 
@@ -2833,6 +3144,215 @@ async function finishWizard(withPassword) {
   drawWizard();
 }
 
+/* ---------- the log dock ---------- */
+/* One stream, one offset: the dock asks for what came after the last line it
+   drew, so nothing is missed and nothing is drawn twice. Pause stops asking
+   without losing the offset; the filters are the service's own, so the dock
+   never re-filters what the host already chose not to send. */
+const dock = { offset: 0, paused: false, lastCorrelation: "", failed: 0 };
+let watchingLogs = false;
+
+function setDockStatus(text, state) {
+  const node = document.getElementById("log-status");
+  node.textContent = text;
+  node.dataset.state = state || "";
+}
+
+function logLine(record) {
+  const time = String(record.timestamp || "").slice(11, 19);
+  // The first line of an operation carries the id; the rest of its group leaves
+  // the column blank, which is what makes a run read as one run.
+  const grouped = record.correlation_id && record.correlation_id === dock.lastCorrelation;
+  dock.lastCorrelation = record.correlation_id || "";
+  return el("div", { class: "log-line " + (record.level || "info") },
+    el("span", { class: "t" }, time),
+    el("span", { class: "src" }, record.source || ""),
+    el("span", { class: "level" }, record.level || ""),
+    el("span", { class: "vm" }, record.vm || ""),
+    el("span", { class: "corr", title: record.correlation_id || "" },
+      grouped ? "" : String(record.correlation_id || "").slice(0, 6)),
+    el("span", { class: "msg" }, record.message || ""));
+}
+
+function applyLogSearch() {
+  const needle = fieldValue("log-search").trim().toLowerCase();
+  for (const line of document.getElementById("log-body").children) {
+    line.hidden = Boolean(needle) && !line.textContent.toLowerCase().includes(needle);
+  }
+}
+
+function appendLog(record) {
+  const body = document.getElementById("log-body");
+  const atBottom = body.scrollTop + body.clientHeight >= body.scrollHeight - 8;
+  const empty = body.querySelector(".log-empty");
+  if (empty) empty.remove();
+  const line = logLine(record);
+  const needle = fieldValue("log-search").trim().toLowerCase();
+  if (needle) line.hidden = !line.textContent.toLowerCase().includes(needle);
+  body.append(line);
+  // The dock is a window on the stream, not a store: keep the tail it can draw.
+  while (body.childElementCount > 500) body.firstElementChild.remove();
+  if (atBottom) body.scrollTop = body.scrollHeight;
+}
+
+async function watchLogs() {
+  if (!api() || watchingLogs) return;
+  watchingLogs = true;
+  while (api()) {
+    if (dock.paused) {
+      await sleep(250);
+      continue;
+    }
+    let response = null;
+    try {
+      response = await api().logs(
+        dock.offset, fieldValue("log-vm"), fieldValue("log-source"), fieldValue("log-level"), 10,
+      );
+    } catch (error) {
+      response = null;
+    }
+    if (!response || response.error || !response.ok) {
+      dock.failed += 1;
+      setDockStatus(dock.failed > 2 ? "not answering" : "reconnecting…", "down");
+      await sleep(1200);
+      continue;
+    }
+    dock.failed = 0;
+    const answer = response.ok;
+    for (const record of answer.records || []) appendLog(record);
+    dock.offset = Math.max(dock.offset, answer.latest_sequence || 0);
+    setDockStatus("live", "up");
+  }
+}
+
+function wireDock() {
+  document.getElementById("log-toggle").addEventListener("click", (event) => {
+    const dockNode = document.getElementById("dock");
+    const collapsed = dockNode.classList.toggle("collapsed");
+    event.currentTarget.textContent = collapsed ? "Show" : "Hide";
+    event.currentTarget.setAttribute("aria-expanded", String(!collapsed));
+  });
+  document.getElementById("log-pause").addEventListener("click", (event) => {
+    dock.paused = !dock.paused;
+    event.currentTarget.setAttribute("aria-pressed", String(dock.paused));
+    event.currentTarget.textContent = dock.paused ? "Resume" : "Pause";
+    setDockStatus(dock.paused ? "paused" : "live", dock.paused ? "" : "up");
+  });
+  document.getElementById("log-clear").addEventListener("click", () => {
+    const body = document.getElementById("log-body");
+    body.replaceChildren(el("div", { class: "log-empty" }, "Cleared. New lines keep arriving."));
+    dock.lastCorrelation = "";
+  });
+  document.getElementById("log-search").addEventListener("input", applyLogSearch);
+  // A changed filter starts from where the stream is now, not from the
+  // beginning: the dock is a window on what happens next.
+  for (const id of ["log-vm", "log-source", "log-level"]) {
+    document.getElementById(id).addEventListener("change", () => {
+      dock.lastCorrelation = "";
+    });
+  }
+  const body = document.getElementById("log-body");
+  if (!body.children.length) {
+    body.append(el("div", { class: "log-empty" }, "Nothing yet. Operations appear here as they happen."));
+  }
+}
+
+/* ---------- the guest terminal ---------- */
+/* xterm over `guest_exec`: one line is one command, run through the transport
+   the service chose. The transcript lives in the widget and nowhere else — the
+   page stores no command and no output, and a redraw starts a new session. */
+const term = { instance: null, buffer: "", busy: false, vm: "" };
+
+function terminalTheme() {
+  // Read from the palette rather than restating it, so the light theme works
+  // and no colour is written twice.
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return {
+    background: css("--bg"),
+    foreground: css("--text"),
+    cursor: css("--accent"),
+    selectionBackground: css("--surface"),
+  };
+}
+
+function promptTerminal() {
+  if (term.instance) term.instance.write("\r\n" + (term.vm || "guest") + "> ");
+}
+
+async function submitTerminal() {
+  const instance = term.instance;
+  const command = term.buffer;
+  term.buffer = "";
+  instance.write("\r\n");
+  if (!command.trim()) {
+    promptTerminal();
+    return;
+  }
+  term.busy = true;
+  let response = null;
+  try {
+    response = await api().call("guest_exec", { vm_name: term.vm, command });
+  } catch (error) {
+    response = { error: { message: String(error) } };
+  }
+  term.busy = false;
+  if (response && response.ok) {
+    const execution = response.ok.execution || {};
+    const output = String(execution.output || "");
+    instance.write(output || "(no output)");
+    if (execution.exit_code !== undefined && execution.exit_code !== null) {
+      instance.write("\r\n[exit " + execution.exit_code + "]");
+    }
+  } else {
+    const failure = (response && response.error) || {};
+    instance.write("\u001b[31m" + (failure.message || "the call failed") + "\u001b[0m");
+  }
+  promptTerminal();
+}
+
+function mountTerminal(host, vm) {
+  if (!window.Terminal) {
+    host.textContent = "The terminal component did not load, so this panel stays empty.";
+    return;
+  }
+  if (term.instance) {
+    try { term.instance.dispose(); } catch (error) { /* already gone with the page */ }
+  }
+  const instance = new window.Terminal({
+    convertEol: true, fontSize: 12, scrollback: 2000, theme: terminalTheme(),
+    cursorBlink: true,
+  });
+  instance.open(host);
+  term.instance = instance;
+  term.vm = vm;
+  term.buffer = "";
+  instance.write((vm || "guest") + "> ");
+  instance.onData((data) => {
+    if (term.busy) return;  // one command at a time: the transport is serial
+    if (data === "\r") {
+      submitTerminal();
+      return;
+    }
+    if (data === "\u007f") {
+      if (term.buffer) {
+        term.buffer = term.buffer.slice(0, -1);
+        instance.write("\b \b");
+      }
+      return;
+    }
+    if (data === "\u0003") {  // Ctrl+C clears the line, as in a shell
+      term.buffer = "";
+      instance.write("^C");
+      promptTerminal();
+      return;
+    }
+    if (data >= " " || data === "\t") {
+      term.buffer += data;
+      instance.write(data);
+    }
+  });
+}
+
 /* ---------- boot ---------- */
 async function boot() {
   document.getElementById("chooser-open").addEventListener("click", () => pick(fieldValue("chooser-typed")));
@@ -2846,10 +3366,18 @@ async function boot() {
   await render();
   pollApprovals();
   watchEvents();
+  wireDock();
+  watchLogs();
   await openWizardIfNeeded();
 }
 
-window.addEventListener("pywebviewready", boot);
+if (HTTP_API) {
+  // Served mode: there is no bridge to wait for, only the document itself.
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+  else boot();
+} else {
+  window.addEventListener("pywebviewready", boot);
+}
 </script>
 </body>
 </html>

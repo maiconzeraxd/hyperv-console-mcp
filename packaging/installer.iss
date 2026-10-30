@@ -2,9 +2,10 @@
 ;
 ; Per-user on purpose. The files land under %LOCALAPPDATA%\Programs and
 ; installing asks for no elevation, which matters for a tool whose first screen
-; should be the window and not a UAC prompt. Elevation is needed only for what
-; the setup routine does afterwards — enabling Hyper-V, which needs a restart it
-; does not take on its own.
+; should be the window and not a UAC prompt. The launcher itself is built with
+; a requireAdministrator manifest, so opening it after the install asks for
+; elevation exactly once. The setup routine may still enable Hyper-V, which
+; needs a restart it does not take on its own.
 ;
 ; Built by .github/workflows/release.yml:
 ;

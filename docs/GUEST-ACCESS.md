@@ -56,6 +56,8 @@ The same call takes tri-state switches — `None` (or omitted) leaves the settin
 | `windows_update` | blocks automatic update reboots |
 | `restart` | reboots the guest at the end (needs `HYPERV_MCP_ALLOW_POWER`) |
 
+The same Guest page also carries the guest-only BCD toggles — test signing, kernel debugging, crash dump and HVCI/VBS — which are recorded in the same `guest-config.json` and reverted by the same button.
+
 Example:
 
 ```python

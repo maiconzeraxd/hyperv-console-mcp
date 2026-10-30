@@ -762,6 +762,28 @@ def create_server(
         return await _invoke(service.event_snapshot, after_sequence)
 
     @tool(
+        "logs_subscribe", annotations=READ_ONLY,
+        description="Read the unified log stream from an offset: one record per line with timestamp, "
+        "source (worker, kd, serial, ssh, wmi, lab, service), VM, level, correlation id and a "
+        "redacted message. Filters narrow by VM, source, a minimum level and correlation id; the "
+        "call is held open until a matching line arrives or timeout_seconds runs out, so a client "
+        "subscribes instead of polling. Commands, typed text and secrets never appear.",
+    )
+    async def logs_subscribe(
+        after_sequence: int = 0,
+        vm_name: str | None = None,
+        source: str | None = None,
+        level: str | None = None,
+        correlation_id: str | None = None,
+        timeout_seconds: float = 15.0,
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.logs_subscribe, after_sequence,
+            vm=vm_name, source=source, level=level,
+            correlation_id=correlation_id, timeout_seconds=timeout_seconds,
+        )
+
+    @tool(
         "console_info", annotations=READ_ONLY,
         description="Read guest video-head resolutions for mouse coordinate planning.",
     )
@@ -991,6 +1013,21 @@ def create_server(
     )
     async def kd_wait_event(vm_name: str, timeout_ms: int | None = None) -> dict[str, Any]:
         return await _invoke(service.kd_wait_event, vm_name, timeout_ms)
+
+    @tool(
+        "kd_output_subscribe", annotations=READ_ONLY,
+        description="Follow the attached session's own log from a byte offset: the text kd wrote, "
+        "including output nobody asked for — a module load, a break-in, a bugcheck. Returns "
+        "text, the new offset to resume from, the state and whether the debugger is alive; the "
+        "call is held open until something arrives or timeout_seconds runs out, so a window "
+        "streams the debugger instead of polling it. Read-only: it never sends a command.",
+    )
+    async def kd_output_subscribe(
+        vm_name: str, after: int = 0, timeout_seconds: float = 10.0
+    ) -> dict[str, Any]:
+        return await _invoke(
+            service.kd_output_subscribe, vm_name, after, timeout_seconds
+        )
 
     @tool(
         "kd_breakpoint", annotations=MUTATION,

@@ -37,6 +37,21 @@ class FakeService:
         self.calls.append(("capture_screenshot", {"region": region, "max_width": max_width}))
         return Screenshot(b"fake-png-bytes", {"vm": vm_name, "region": region})
 
+    def guest_credential_set(
+        self, vm_name: str, username: str, password: str
+    ) -> dict[str, Any]:
+        # The password is deliberately not recorded: nothing the bridge does
+        # should leave it in a list a test (or a log) can read.
+        self.calls.append(("guest_credential_set", {"vm_name": vm_name, "username": username}))
+        return {"vm": vm_name, "source": "credential_manager", "username": username}
+
+    def guest_credential_status(self, vm_name: str) -> dict[str, Any]:
+        self.calls.append(("guest_credential_status", {"vm_name": vm_name}))
+        return {
+            "vm": vm_name, "source": "credential_manager", "username": "lab",
+            "psdirect": {"ok": True, "error": None}, "ssh": {"provisioned": False},
+        }
+
     def reload_policy(self) -> dict[str, Any]:
         self.calls.append(("reload_policy", {}))
         return {"levels": {}, "allowlist": []}
@@ -48,6 +63,22 @@ class FakeService:
     def events_wait(self, after: int = 0, timeout_seconds: float = 15.0) -> dict[str, Any]:
         self.calls.append(("events_wait", {"after": after, "timeout_seconds": timeout_seconds}))
         return {"events": [], "latest_sequence": after}
+
+    def logs_subscribe(
+        self,
+        after: int = 0,
+        *,
+        vm: str | None = None,
+        source: str | None = None,
+        level: str | None = None,
+        correlation_id: str | None = None,
+        timeout_seconds: float = 15.0,
+    ) -> dict[str, Any]:
+        self.calls.append(("logs_subscribe", {
+            "after": after, "vm": vm, "source": source, "level": level,
+            "timeout_seconds": timeout_seconds,
+        }))
+        return {"records": [], "latest_sequence": after}
 
     def _secret(self) -> str:
         raise AssertionError("a private method must never be reachable from the page")
@@ -155,6 +186,45 @@ def test_a_level_written_here_shows_up_in_this_window(tmp_path: Path) -> None:
     assert api.hello()["level"] == "control"
     assert api.hello()["levels_by_vm"] == {"lab-vm": "control"}
     assert api.hello()["capabilities"]["power"] is True
+
+def test_the_window_can_narrow_a_level_and_the_service_hears_it(tmp_path: Path) -> None:
+    """The matrix is a promise: unchecking takes the capability away for real.
+
+    It is written to the same file ``hyperv-access`` writes, and the running
+    service is told to read it again, so the AI's next call is refused by the
+    policy rather than by the page.
+    """
+    api = _api(tmp_path, level="lab")
+
+    result = api.set_level("lab", ["console", "guest"])
+
+    stored = json.loads((tmp_path / "access.json").read_text(encoding="utf-8"))
+    assert stored["vms"]["lab-vm"]["capabilities"] == ["console", "guest"]
+    assert result["capabilities"] == ["console", "guest"]
+    assert api.service.calls[-1][0] == "reload_policy"
+    assert api.hello()["capabilities"]["guest"] is True
+    assert api.hello()["capabilities"]["power"] is False
+
+
+def test_the_window_cannot_hand_out_a_capability_the_level_lacks(tmp_path: Path) -> None:
+    """Only the operator can widen, and only by changing the level itself."""
+    api = _api(tmp_path, level="lab")
+
+    with pytest.raises(Exception):
+        api.set_level("read-only", ["guest"])
+
+
+def test_hello_carries_the_whole_matrix(tmp_path: Path) -> None:
+    """What each level offers, and what each VM actually kept."""
+    from hyperv_console_mcp.access import LEVEL_CAPABILITIES
+
+    hello = _api(tmp_path).hello()
+
+    assert hello["capabilities_by_level"] == {
+        level: sorted(names) for level, names in LEVEL_CAPABILITIES.items()
+    }
+    assert hello["capabilities_by_vm"] == {"lab-vm": sorted(LEVEL_CAPABILITIES["lab"])}
+
 
 def test_a_level_the_file_does_not_know_is_refused(tmp_path: Path) -> None:
     api = _api(tmp_path)
@@ -325,8 +395,14 @@ def test_hyperv_manager_is_the_manager_and_not_a_reimplementation(
 
 
 def test_the_page_asks_for_no_network_and_loads_nothing_remote() -> None:
-    """The window is a file, not a site: no port, no CDN, no fetch."""
-    html = window.page()
+    """The window is a file, not a site: no port, no CDN, no fetch.
+
+    The scan strips block comments first, because the vendored xterm carries its
+    MIT header and a URL inside a comment is not a load. Everything that could
+    fetch — a `src`, a `link`, a dynamic import, an absolute URL in code — still
+    fails it.
+    """
+    html = re.sub(r"/\*.*?\*/", "", window.page(), flags=re.S)
     assert "http://" not in html
     assert "https://" not in html
     assert "<script src" not in html
@@ -368,3 +444,109 @@ def test_a_host_without_pywebview_falls_back_instead_of_failing() -> None:
 
 def test_the_runtime_probe_answers_a_bool_everywhere() -> None:
     assert isinstance(window.webview2_installed(), bool)
+
+def test_the_dock_asks_the_service_for_the_lines_after_the_last_one(tmp_path: Path) -> None:
+    """An empty filter is no filter, and the wait is the service's own."""
+    api = _api(tmp_path)
+
+    api.logs(41, "", "kd", "", 7)
+
+    assert api.service.calls[-1] == ("logs_subscribe", {
+        "after": 41, "vm": None, "source": "kd", "level": None, "timeout_seconds": 7,
+    })
+
+def test_the_window_reads_the_file_it_wrote_even_if_the_service_cannot_be_told(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A panel that disagrees with the policy file is worse than a loud error.
+
+    The service refused the pipe (a stale build on this host) and ``set_level``
+    wrote the file, then raised before refreshing the window: the operator had
+    narrowed the VM and the page went on saying nothing was allowed.
+    """
+    api = _api(tmp_path, level="lab")
+
+    def refuse() -> dict[str, Any]:
+        raise RuntimeError("The service host is not a program this install runs.")
+
+    monkeypatch.setattr(api.service, "reload_policy", refuse)
+
+    with pytest.raises(RuntimeError):
+        api.set_level("lab", ["console"])
+
+    # The write landed, and this window says so — the service is a separate
+    # problem, reported as one.
+    assert json.loads((tmp_path / "access.json").read_text(encoding="utf-8"))["vms"][
+        "lab-vm"
+    ]["capabilities"] == ["console"]
+    assert api.hello()["capabilities"]["console"] is True
+    assert api.hello()["capabilities"]["guest"] is False
+
+class FakeVault:
+    """The Windows Credential Manager, without the Windows part."""
+
+    def __init__(self, entry: tuple[str, str] | None = None) -> None:
+        self.entry = entry
+        self.written: list[tuple[str, str, str]] = []
+
+    def read(self, name: str):
+        return self.entry
+
+    def has(self, name: str) -> bool:
+        return self.entry is not None
+
+    def write(self, name: str, username: str, password: str) -> None:
+        self.written.append((name, username, password))
+        self.entry = (username, password)
+
+
+def test_a_vm_with_no_credential_says_so_without_reading_the_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The page asks whether to show a login screen, and gets a word."""
+    monkeypatch.setattr(
+        "hyperv_console_mcp.credentials.CredentialStore", lambda: FakeVault()
+    )
+
+    credential = _api(tmp_path).hello()["credential"]
+
+    assert credential == {"source": "missing", "username": None}
+
+
+def test_a_stored_credential_reports_its_account_and_never_its_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reopening the window must not ask again for a password it already has."""
+    vault = FakeVault(("lab", "not-in-the-answer"))
+    monkeypatch.setattr("hyperv_console_mcp.credentials.CredentialStore", lambda: vault)
+
+    credential = _api(tmp_path).hello()["credential"]
+
+    assert credential["source"] == "credential_manager"
+    assert credential["username"] == "lab"
+    assert "not-in-the-answer" not in json.dumps(credential)
+
+
+def test_saving_a_credential_hands_it_to_the_service_and_keeps_it_out_of_the_answer(
+    tmp_path: Path,
+) -> None:
+    """The password crosses this boundary exactly once, on the way in."""
+    api = _api(tmp_path)
+
+    result = api.set_credential("lab", "s3cret-value")
+
+    assert ("guest_credential_set", {"vm_name": "Lab-VM", "username": "lab"}) in api.service.calls
+    # The answer is the same envelope every other call returns, and it says
+    # where the credential went without repeating it.
+    assert result["ok"]["source"] == "credential_manager"
+    assert "s3cret-value" not in json.dumps(result)
+
+
+def test_testing_a_credential_asks_the_service_not_the_vault(tmp_path: Path) -> None:
+    """Only the service can open a session, so only the service can say it works."""
+    api = _api(tmp_path)
+
+    api.check_credential()
+
+    assert api.service.calls[-1] == ("guest_credential_status", {"vm_name": "Lab-VM"})
+

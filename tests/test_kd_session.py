@@ -223,3 +223,53 @@ def test_a_dump_run_returns_the_output_and_exit_code(tmp_path: Path) -> None:
 def test_a_missing_dump_is_reported_before_starting_kd(tmp_path: Path) -> None:
     with pytest.raises(DebuggerError, match="not found"):
         run_dump(sys.executable, tmp_path / "absent.dmp")
+
+
+def test_output_nobody_asked_for_arrives_through_the_tail(tmp_path: Path) -> None:
+    """A module load happens while the target runs: no command returned it.
+
+    This is what the tail is for. `g` returns when the target breaks, so a
+    module that loads while it runs appears in the session log and in no
+    command's output — and a window watching the debugger must still see it.
+    """
+    session = start_session(tmp_path, "--scenario", "module", timeout=0.1)
+    try:
+        start = session.output_offset
+        went = session.go("g")
+        assert went["timed_out"] is True
+        assert "ModLoad" not in went["output"]
+
+        # A tail hands over what has arrived, so a subscriber loops until the
+        # line it is waiting for shows up — which is what the dock does.
+        deadline = time.monotonic() + 3
+        offset = start
+        text = ""
+        while time.monotonic() < deadline and "ModLoad" not in text:
+            chunk = session.read_output(offset, timeout=1.0)
+            text += chunk["text"]
+            offset = chunk["offset"]
+
+        assert "ModLoad" in text
+        assert "MyDriver.sys" in text
+        assert offset > start
+    finally:
+        session.close()
+
+
+def test_the_tail_resumes_where_it_was_told_to(tmp_path: Path) -> None:
+    """No line is delivered twice, and a quiet session answers empty."""
+    session = start_session(tmp_path, timeout=0.5)
+    try:
+        first = session.read_output(0, timeout=0.1)
+        assert "Connected to target" in first["text"]
+
+        quiet = session.read_output(first["offset"], timeout=0.1)
+        assert quiet["text"] == ""
+        assert quiet["offset"] == first["offset"]
+
+        session.command("lm")
+        later = session.read_output(quiet["offset"], timeout=3.0)
+        assert "MyDriver" in later["text"]
+        assert "Connected to target" not in later["text"]
+    finally:
+        session.close()

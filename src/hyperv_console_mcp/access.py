@@ -96,6 +96,36 @@ def normalise_baseline(value: Any) -> str | None:
     return text
 
 
+def normalise_capabilities(value: Any, level: str) -> list[str] | None:
+    """The operator's narrowing of a level's capabilities, or ``None`` for all.
+
+    A grid can take capabilities away; it cannot hand out one the level never
+    had, because the level is the statement a person made in one word and the
+    grid only refines it. An empty list is a real answer — the VM is listed and
+    read, and nothing more.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple, set, frozenset)):
+        raise ValidationError("capabilities must be a list of capability names, or omitted.")
+    allowed = LEVEL_CAPABILITIES[level]
+    names: list[str] = []
+    for item in value:
+        name = str(item or "").strip().casefold()
+        if name not in CAPABILITIES:
+            raise ValidationError(
+                f"unknown capability {item!r}. Known: {', '.join(CAPABILITIES)}."
+            )
+        if name not in allowed:
+            raise ValidationError(
+                f"access level {level!r} does not include {name}; a capability list can only "
+                "narrow a level, never widen it."
+            )
+        if name not in names:
+            names.append(name)
+    return sorted(names)
+
+
 @dataclass(frozen=True, slots=True)
 class AccessStore:
     """The operator's policy file: one level per VM, keyed case-insensitively."""
@@ -127,10 +157,13 @@ class AccessStore:
                 # The first version wrote a bare level; those files still load.
                 name, level, baseline = key, entry, None
             name = str(name or key).strip()
+            capabilities = entry.get("capabilities") if isinstance(entry, dict) else None
+            chosen = normalise_level(level)
             entries[_key(name)] = {
                 "name": name,
-                "level": normalise_level(level),
+                "level": chosen,
                 "baseline": normalise_baseline(baseline),
+                "capabilities": normalise_capabilities(capabilities, chosen),
             }
         return entries
 
@@ -153,15 +186,25 @@ class AccessStore:
             if record["baseline"]
         }
 
-    def set(self, vm_name: str, level: str) -> dict[str, dict[str, str | None]]:
+    def set(
+        self, vm_name: str, level: str, capabilities: Any = None
+    ) -> dict[str, dict[str, Any]]:
+        """Write one VM's level, and optionally narrow it to named capabilities.
+
+        Omitted capabilities mean the whole level, which is also what a level
+        change does: a subset chosen for the old level has no business
+        outliving it.
+        """
         entries = self.entries()
         key = _key(vm_name)
         # A level change is about the level: the operator's baseline stays.
         baseline = entries.get(key, {}).get("baseline")
+        chosen = normalise_level(level)
         entries[key] = {
             "name": str(vm_name).strip(),
-            "level": normalise_level(level),
+            "level": chosen,
             "baseline": baseline,
+            "capabilities": normalise_capabilities(capabilities, chosen),
         }
         return self._save(entries)
 
@@ -188,7 +231,7 @@ class AccessStore:
             "vms": {
                 key: {
                     field: record[field]
-                    for field in ("name", "level", "baseline")
+                    for field in ("name", "level", "baseline", "capabilities")
                     if record.get(field) is not None
                 }
                 for key, record in sorted(entries.items())

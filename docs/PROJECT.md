@@ -2203,6 +2203,328 @@ to overwrite.
 - Gate: 1117 passed / 1 skipped, ruff clean, MCP stdio smoke green; the Linux job of the tests
   workflow is green on the same commit for the first time.
 
+### 2026-10-30 — the window opens its own viewer, and the launcher asks for the rights it needs
+
+Two gaps the install wave left behind: the frozen launcher started unelevated, so the shortcut
+opened a window that could not read a VM; and the classic tkinter window — still the fallback on a
+host without the WebView2 runtime — had no way to open VMConnect or to prepare a guest's BCD.
+
+- **The launcher is built with a `requireAdministrator` manifest.** `packaging/hyperv-console-mcp.spec`
+  passes `uac_admin=True` to the one windowed program, so a double-click or the Start Menu shortcut
+  asks Windows once instead of opening a window that would answer `access_denied` on every read.
+  The three operator programs keep their own manifest: `hyperv-access` and `hyperv-setup` print,
+  and asking for elevation to read a JSON file would be noise. The installer still asks for none,
+  which is what the QUICKSTART promises.
+- **The tkinter Overview carries `Open VM`.** `vmconnect.exe localhost <vm>` for full fidelity —
+  the same decision the WebView2 page's button already made: the name is checked against
+  `list_vms` before anything is started, so the allowlist still stands between a name and a
+  process, and the name goes in as one argument rather than a command string.
+- **The tkinter Guest page carries the guest-only BCD toggles** — test signing, kernel debugging,
+  crash dump, HVCI/VBS and restart-after-apply — through the same `lab_guest_configure` the page
+  and the tools use, so the fallback window can prepare a VM without a WebView2 runtime.
+- **`hyperv-access list` was broken.** `_report` expects the three-field records `entries()`
+  returns, and `list` was handing it `load()`'s two-item compatibility tuples, so listing a file
+  this run had not just written raised on the missing key. Two tests: the record shape after
+  `set`, and `list` over a file another process wrote.
+- Tests: three (`tests/test_access.py` twice, `tests/test_packaging.py` once) plus the attribute
+  assertion in `tests/test_dashboard.py` that the Guest page builds its BCD variables.
+- Gate: 1120 passed / 1 skipped, ruff clean.
+- **Not validated live:** `vmconnect.exe` has still never been started by either window on a real
+  host, and the installer has not been recompiled with the new launcher manifest — the frozen
+  bundle in `dist/` carries it (`requireAdministrator` is in the built executable), but the Inno
+  installer is built only by the release workflow.
+
+### 2026-10-30 — v0.4 wave 1: one log stream, from an offset, with the secret taken out
+
+The v0.4 prompt's dock needs a stream that says what the subsystems did, not only that an
+operation started and finished. The event bus already had the shape — a sequence, a condition,
+daily JSONL — so this is an extension of it rather than a second bus: `logs.py` holds a `LogBus`
+whose records carry `timestamp, source, vm, level, correlation_id, message`, and
+`EventBus.operation` mirrors each started/completed/failed into it under the operation's own
+correlation id.
+
+- **The sources are a closed set** (`worker`, `kd`, `serial`, `ssh`, `wmi`, `lab`, `service`)
+  and `source_for(operation)` is the single mapping from a tool name to one of them, so a
+  dock's per-source filter means the same thing everywhere. An unknown source or level is
+  refused instead of stored: a filter over an open set filters nothing.
+- **A level is a floor, not an equality** — `level="warning"` returns warnings and errors, which
+  is what a dock that says "show me problems" means.
+- **Readers resume from an offset and never hold the writer.** `snapshot`/`wait` slice the record
+  list without the writer's lock, and `logs_subscribe` joins `events_wait` in the host's
+  `LOCK_FREE` set, so a 30-second subscription does not stop the service from working. A test
+  holds a reader open and asserts a publish still returns immediately.
+- **Redaction happens before storage**, in one function: `password=`, `token:`, `secret`,
+  `api_key` and bare `key=` assignments are masked, and so is a long base64 blob — but not a hex
+  digest, which is a fact worth keeping and is how the two are told apart. `guest_exec`'s command
+  never enters a message at all: the line says the operation started and finished.
+- **Persisted as `logs-YYYYMMDD.jsonl`** beside the event logs, pruned on the same retention
+  setting, and a log that cannot be written never fails the operation it describes.
+- Tools: `logs_subscribe` (core, read-only) is the MCP door; `ServiceBase.logs_subscribe`
+  validates the offset, the source, the level and the timeout, and clamps the wait to 30 s.
+- Tests: `tests/test_logs.py` (nine) — the record shape, the offset, the four filters, a refused
+  source and level, the redaction of a password/token/key and the survival of a plain line, the
+  daily file, the non-blocking reader, and a `guest_exec` producing two lines that share the
+  correlation id its events carry and contain no command text.
+- Counts moved with the tool: core 8→9, safe 30→31, lab 45→46, all 67→68, in
+  `tests/test_server.py`, `tests/mcp_smoke.py` and the README table.
+- Gate: 1130 passed / 1 skipped, ruff clean, MCP stdio smoke green at 31 / 46 / 68.
+- **The smoke was asserting against this host's own policy.** It sets `HYPERV_MCP_ALLOW_*` to
+  false and expects `not_authorized`, but a level the operator saved for `NORTH-Test` is more
+  specific and wins, so on this machine the refusal was Hyper-V's `access_denied` instead — the
+  run failed for a reason that had nothing to do with the change. It now points
+  `HYPERV_MCP_ACCESS_FILE` at a throwaway file.
+- **Not validated live:** no real service host has streamed to a dock yet — there is no dock
+  until the interface wave — and the stream has been exercised in-process and against fakes
+  only. `kd_output_subscribe`, the roadmap's other streaming enabler, is not in this wave.
+
+### 2026-10-30 — v0.4 wave 2: the debugger's own log, followed from an offset
+
+`kd_command` answers the caller that typed. Everything else kd prints — a module load while the
+target runs, a break-in, a bugcheck — belongs to no command, and a window that polls the state
+sees that something happened without seeing what. The session already writes every byte to its log
+and flushes each chunk, so the missing piece was a reader.
+
+- `KdSession.read_output(after, timeout)` tails that log by byte offset and holds until it grows,
+  returning `text`, the new `offset`, the `state` and whether the debugger is alive. The offset is
+  the whole protocol: a reader that keeps it gets every line once, in order, whoever typed.
+- A multi-byte character split across two reads is held back rather than replaced, so a chunk
+  boundary cannot turn a symbol name into a replacement mark.
+- `output_offset` says where the log ends now, which is where a dock opened mid-session starts.
+- `kd_output_subscribe` (kd toolset, read-only) is the door: clamped to a 30 s wait, and in the
+  host's `LOCK_FREE` set because it touches no worker — a subscription must not serialize the
+  service. It is neither audited nor announced, so a poll every second cannot fill the activity
+  page with reads.
+- Tests: `tests/test_kd_session.py` twice, against the fake debugger — a module load that no
+  command returned arriving through the tail (the subscriber loops, as a dock does), and a resume
+  from an offset delivering no line twice; `tests/test_kd_service.py` three times — the offset and
+  the timeout reaching the session, the refusal without a session carrying `kd_not_connected`, and
+  the clamp.
+- Counts: kd 9→10, lab 46→47, all 68→69; `tests/test_server.py`, `tests/mcp_smoke.py` and the
+  README table moved with it.
+- Gate: 1135 passed / 1 skipped, ruff clean, smoke 31 / 47 / 69.
+- **Not validated live:** the tail has run against the fake kd process, not against a real
+  `kd.exe` session on `NORTH-Test`, and no window subscribes to it yet.
+
+### 2026-10-30 — v0.4 wave 3: the same page in the operator's browser, and the one port it opens
+
+The roadmap's second delivery mode. Until now the page could only be reached through the
+WebView2 bridge, which is also why nothing in this project had ever opened a port. `--serve`
+opens exactly one, on loopback, and the locks around it are the substance of the wave.
+
+- **`webui/serve.py`** binds `127.0.0.1` (never `0.0.0.0`), generates a token per run with
+  `secrets.token_urlsafe(32)`, prints it with the URL and requires it on every request. The page
+  gets it in a meta tag; a call sends it in `X-HyperV-Token`.
+- **The token in a header is the CSRF defence.** A page on another site can make the browser
+  send a request, but it cannot set a header on one, and it cannot read the token to put it in a
+  body — so the header alone is the whole mechanism, and the token is never accepted from a
+  cookie or from a call's query string.
+- **`Origin` and `Host` are checked.** A foreign `Origin` is 403 `forbidden_origin`; a `Host`
+  that is not a loopback name is 403 `forbidden_host`, which is the DNS-rebinding case — the
+  socket is local, the name is not.
+- **The listener speaks the window's own surface.** Every call is dispatched to the same `Api`
+  the WebView2 page uses, so the policy, the allowlist, the confirmations, the audit and the
+  refusals are the ones that already existed; a private name (`_store`) and an unknown one are
+  answered with `invalid_argument` rather than raising.
+- **One transport switch in the page, not a second page.** `api()` returns the pywebview bridge
+  when there is one and an HTTP proxy over `/api` when the token meta tag is filled; the envelope
+  (`{ok}`/`{error}`) is the same from both, so nothing below that line knows which mode it is in.
+  The page boots on `DOMContentLoaded` when served and on `pywebviewready` in the window — a
+  browser never fires the second, so a page that only listened for it would open blank.
+- `hyperv-console-mcp --serve [--port N] [--vm NAME]` is the command; a typo is answered in the
+  terminal (exit 2) instead of opening a listener that quietly ignored it.
+- Tests: `tests/test_webui_serve.py` (twelve) — loopback bind, no token, wrong token, foreign
+  `Origin`, non-loopback `Host`, a real call reaching the service, a private name refused, an
+  unknown method answered, the page carrying its token, the page refused without one, two runs
+  never sharing a token, and the port closing on `close()`. `tests/test_cli.py` gained four for
+  the new door and the typo, and `tests/test_webui_page.py` one that both boot paths exist.
+- Gate: 1152 passed / 1 skipped, ruff clean, `node --check` on the page's script clean.
+- **Not validated in a browser.** The page has been exercised over real HTTP with a fake service
+  in the tests, but no browser has rendered the served page against a live host: WebView2 and
+  `--serve` both still owe a real window and a real VM.
+
+### 2026-10-30 — v0.4 wave 4: the log dock, and the page seen in a real browser
+
+Wave 1 built the stream; this wave puts it on screen. The window gains a dock along the bottom
+— the roadmap's "where the AI and the operator are seen working side by side" — and, for the
+first time in this project, the page was rendered in a real browser rather than asserted as text.
+
+- **The dock is a grid row, not a fixed overlay.** `.app` grew a second row so the dock can never
+  cover the last row of a table, which is what a `position: fixed` footer eventually does.
+- **One offset, one stream.** `Api.logs` is the door (`logs_subscribe` with the page's filters and
+  a ten-second wait); the page keeps `dock.offset`, draws what arrives and asks again, so nothing
+  is drawn twice and nothing is missed. Pause stops asking without losing the offset; a filter
+  change keeps the offset too, because the dock is a window on what happens next.
+- **The correlation id is the grouping.** It is drawn on the first line of an operation and left
+  blank on the rest of its group, so a run reads as a run. 500 lines are kept; the oldest leaves
+  first, and the body only auto-scrolls while the operator is at the bottom.
+- **The dock's source list is the service's.** A page test compares the `<option>` values against
+  `logs.SOURCES`, the same shape as the crash-dump select: adding a source on one side fails until
+  the other catches up.
+- **A closed tab is not an error.** The probe run showed `ThreadingHTTPServer` printing a
+  `ConnectionAbortedError` traceback whenever a long-poll was answered after the page had gone —
+  which, with a dock, is every closed window. The listener now treats a connection reset as the
+  end of a request, and a write to a socket the peer closed returns instead of raising.
+- **Verified in a browser, not in WebView2.** A probe host (a fake service over `--serve`) was
+  rendered in headless Chrome at 1500×940: the fleet listed both VMs, the dock drew seven lines
+  with time, source, level, VM, correlation and message aligned in their columns, the toolbar
+  (`every source`, `every level`, search, Pause, Clear, `live`) readable, and nothing clipped. The
+  first-run wizard opened over the page, which is correct for a host where no VM has a level.
+- Tests: `tests/test_webui.py` one (the dock's filters reaching the service, with `""` becoming
+  `None`), `tests/test_webui_page.py` two (the sources match the service's; pause, search and
+  grouping exist, and the buffer is bounded), `tests/test_webui_serve.py` one (a connection reset
+  is not an error).
+- Gate: 1156 passed / 1 skipped, ruff clean, `node --check` clean.
+- **Not validated live:** the dock has never followed a real operation on `NORTH-Test` — the
+  seven lines it drew came from the probe — and the WebView2 window has still not been driven
+  against a live guest. The IDE shell the roadmap describes (terminals in the middle, fleet in a
+  sidebar, permission matrix on a login screen) is the next wave; this one is the dock it needs.
+
+### 2026-10-30 — v0.4 wave 5: a real terminal in the window, and the vendored file that makes it one
+
+The roadmap asks for embedded terminals, which means xterm.js and a decision about how a
+third-party asset reaches a page that is one HTML string. Both halves are here.
+
+- **`webui/page.py` assembles the page.** `index.html` carries two markers — one in the
+  stylesheet, one before the page's own script — and `page_text()` replaces them with the
+  vendored files at read time. The window and `--serve` both get the page from there, so the
+  property the project has held since v0.3 stays true: one page, every asset inline, no port, no
+  CDN. A missing vendor file raises instead of shipping a page whose terminal silently never
+  appears.
+- **`webui/assets/vendor/`** holds `xterm.js` 5.3.0 and its stylesheet exactly as published, with
+  a `NOTICE.md` naming the version, the licence and the URL they came from. `pyproject.toml`
+  ships the directory, and a packaging test fails if either the entry or a file goes missing.
+- **The Guest page gains a terminal**: xterm over `guest_exec`, one line per command, output and
+  exit code printed as they come back, Ctrl+C clearing the line, and input held while a call is in
+  flight because the guest transport is serial. Its colours are read from the page's own tokens at
+  runtime, so the light theme works and no colour is written twice — which is also what keeps the
+  palette scan honest.
+- **The `no remote asset` test got stricter, not looser.** It now scans the *assembled* page and
+  strips block comments first: the vendored file carries its MIT header, and a URL in a comment is
+  not a load, while a `src`, a `link`, a dynamic import or an absolute URL in code still fails it.
+- **Verified in a real browser, end to end.** A CDP driver (the browser tools refuse a loopback
+  URL) opened the served page in headless Chrome, clicked the workspace, opened **Guest**, typed
+  `hostname` through real key events into xterm's own input path, and pressed Enter. The terminal
+  showed `probe ran: hostname` and `[exit 0]` from the service call, then prompted again. The first
+  attempt failed for a reason worth keeping: a constructed `KeyboardEvent` carries no `keyCode`, so
+  the widget ignored it — the probe now sends `Input.dispatchKeyEvent`, which is what a keyboard
+  does.
+- Tests: `tests/test_webui_page.py` three (the page ships its terminals inline, a missing vendor
+  file is an error, and the terminal is a widget over `guest_exec` painted from tokens),
+  `tests/test_packaging.py` one (the wheel carries the vendor directory).
+- Gate: 1160 passed / 1 skipped, ruff clean, `node --check` on the assembled script clean.
+- **Not validated live:** the terminal has run against a probe host, not against a guest on
+  `NORTH-Test`; and it is one terminal, not the divisible grid of KD, serial and guest terminals
+  the roadmap describes. The KD and serial terminals need their own streams (`kd_output_subscribe`
+  exists; serial needs a reader door), and the sidebar/permission-matrix layout is still to come.
+
+### 2026-10-30 — v0.4 wave 6: the permission matrix, and what it costs to take a capability away
+
+The roadmap asks for a grid of "what I allow" per VM, written to the same `access.json`. A grid
+that only re-states the level is decoration, so the file gained a second field and the level
+became a ceiling.
+
+- **`access.json` gains `capabilities`.** `AccessStore.set(vm, level, capabilities=None)` writes the
+  level's whole set when the list is omitted, and a sorted subset when it is given. A list can only
+  **narrow** a level: naming a capability the level never had raises `ValidationError` instead of
+  quietly widening it, and a hand-edited file that tries is refused at load with a message that
+  says so. Setting a level again clears the narrowing, because a subset chosen for the old level
+  has no business outliving it.
+- **The policy intersects, it does not trust.** `Settings.capabilities_for` returns
+  `frozenset(kept) & LEVEL_CAPABILITIES[level]`, so even a `Settings` built by hand cannot hand out
+  a capability its level lacks. `allows` and `refusal` both follow, and `refusal` now has two
+  sentences: one for a level that never had the capability, and one for a capability the operator
+  unchecked — telling someone to raise a level that already had it sends them to the wrong file.
+- **`hyperv-access set VM LEVEL --capabilities a,b`** is the same write without a window, and
+  `list` reports what the VM may actually do rather than what its level implies.
+- **The window's Overview gains the grid**: one chip per capability, checked from the saved state,
+  greyed and disabled when the level cannot grant it, re-drawn when the level select changes, and
+  posted with the level on **Apply**. An unchanged grid sends nothing (the whole set is not a
+  narrowing); an empty one is refused with a pointer to **Remove level**, because a VM that is
+  listed and allowed nothing is a state with a plainer name.
+- **Two bugs the live probe found, both fixed with a regression test.** `set_level` refreshed the
+  window *after* telling the service, so when the service refused the pipe the file was written and
+  the panel went on showing the old policy — the window now re-reads the file it just wrote and
+  reports the service problem separately. And `refusal` used to blame the level for a capability
+  the matrix had taken away.
+- Tests: `tests/test_access.py` eight (narrowing, refusal to widen, a level change clearing it,
+  the policy honouring it, a hand-edited widening refused, a hand-built mapping intersected,
+  the narrowed refusal wording, the CLI flag),
+  `tests/test_webui.py` four (the window narrows and the service hears it, it cannot widen, hello
+  carries the whole matrix, the window reads the file even when the service cannot be told),
+  `tests/test_webui_page.py` four (the chips match `access.CAPABILITIES`, Apply posts the kept list,
+  the grid starts from the saved level after every render, an empty matrix is refused).
+- **Verified live**, served page in headless Chrome, `NORTH-Test` at `lab`: seven chips checked;
+  unchecking **guest** and pressing Apply wrote `capabilities` with the other six; the page
+  re-rendered with guest unchecked; `guest_exec` then answered
+  `VM 'NORTH-Test' has access level 'lab', but guest was unchecked in its capability list` while
+  the other capabilities stayed. Screenshots: `matrix-panel.png`.
+- Gate: 1176 passed / 1 skipped, ruff clean, `node --check` on the assembled script clean.
+- **Not validated live:** the narrowing was exercised against a private service (the shared one on
+  this host is an older build and refuses the pipe), so the `reload_policy` handshake under the
+  narrowed policy is proved by tests, not by a live call from an MCP client. The login screen and
+  the fleet sidebar are still to come.
+
+### 2026-10-30 — v0.4 wave 7: the login screen, and the window that stops asking
+
+The roadmap's §2 has a second half: reopening the interface must not re-ask for anything it
+already has. That needed a screen, and it needed a fact the page did not have.
+
+- **`hello()` now carries `credential`**: a word — `credential_manager`, `environment` or
+  `missing` — and the account, never the secret. It is answered by the vault's own `has()` and a
+  `read()` whose password half is dropped, so drawing the page cannot leak anything. A vault that
+  raises reads as `missing`, because a page that cannot draw is worse than a page that offers the
+  login again.
+- **`Api.set_credential(username, password)`** hands the password to the service's
+  `guest_credential_set`, which writes the Credential Manager entry. The answer is the usual
+  envelope and says where it went, not what it was. **`check_credential`** is the slow one — it
+  opens a session — so it runs on a button, never on a draw.
+- **A Login page** in the sidebar: the account prefilled from the vault, a `type="password"` field
+  that is emptied *before* the call that carries it, and three verbs — Save and test, Test stored,
+  Forget. The password lives in one variable for as long as the call takes; it is not in
+  `state`, not in the answer, and not in any audit record.
+- **Opening a VM with no credential goes to Login** instead of to a workspace whose every card
+  would say `access_denied`. A VM that already has one opens straight on Overview, which is the
+  behaviour the roadmap asks for and the one a live run confirmed.
+- **The screen names the other lock.** A credential and the `guest` capability are different
+  permissions: with `guest` unchecked the service refuses even the status probe, so the panel says
+  so before the button is pressed rather than after. The live run found this by pressing it.
+- Tests: `tests/test_webui.py` four (no credential says `missing`, a stored one reports the account
+  and never the secret, saving hands it to the service and keeps it out of the answer, testing asks
+  the service and not the vault), `tests/test_webui_page.py` three (the screen asks once and never
+  keeps the password — asserted by position, cleared before sent —, opening a credential-less VM
+  lands on Login, the screen names the guest lock).
+- **Verified live** on the served page: opening `NORTH-Test` landed on **Overview** because a
+  credential is stored (`mcn1`); the Login page reported "Stored for mcn1", the password field was
+  empty and of type password, and **Test stored** reached the service and came back with its
+  answer — a policy refusal, because the matrix had `guest` unchecked, which is exactly the case
+  the new warning line names. Screenshots: `login-blocked.png`.
+- Gate: 1183 passed / 1 skipped, ruff clean, `node --check` on the assembled script clean. (The one
+  warning is `test_dashboard`'s Tk `Variable` being collected off the main thread; it predates this
+  wave and is not a failure.)
+- **Not validated live:** no credential was typed into the vault during this run — the live path
+  proved the screen, the stored-credential detection and the service round trip, while
+  `set_credential` is proved by tests with a fake vault. Writing a throwaway credential into the
+  operator's real Credential Manager is not something a probe should do.
+
+### 2026-10-30 — v0.4 wave 8: one command, and the window it was always meant to open
+
+`hyperv-console-mcp` with no arguments opened the **tkinter dashboard**, which v0.4 is retiring. The
+roadmap's §2 is explicit: no arguments means the interface, and the service comes up with it.
+
+- **`cli._window` opens the page in a WebView2 window** when the host can (`pywebview` installed
+  and the WebView2 runtime present), and falls back to the tkinter dashboard when it cannot —
+  a host without the optional `[ui]` extra still gets a window instead of an error. `--vm NAME`
+  (either spelling) picks the VM the window opens on.
+- **The service comes up with it, once.** The window is a client of the shared host through
+  `open_service`, which calls `ensure_running()`: the first launch starts the host, the second
+  joins it, and no run rewrites the operator's configuration.
+- Tests: `tests/test_cli.py` four (the page wins when WebView2 is there and is given the VM, the
+  dashboard still opens without it, and both `--vm` spellings plus the absent case).
+- **Not validated live:** this interpreter has no `pywebview`, so `available()` is `False` here and
+  the bare command takes the fallback path — which is the path the tests prove. Opening a real
+  WebView2 window unattended was left out of this run; the window itself has been exercised in
+  earlier waves through `--serve` in a real browser, which is the same page and the same service.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three
