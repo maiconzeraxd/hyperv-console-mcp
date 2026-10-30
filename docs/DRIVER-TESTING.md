@@ -7,7 +7,7 @@ throw away.
 
 What it is not: a loader for someone else's kernel code. No tool here loads a driver, and none
 bypasses Driver Signature Enforcement. The package supplies `Run-Lab.ps1`, the guest runner
-requires an elevated operator and an exact approval phrase, and the lab profile's `lab_run`
+refuses to start without the phrase only the server can generate, and the lab profile's `lab_run`
 exists only because the operator chose that profile. See [LAB.md](LAB.md) for the boundary and
 [SECURITY.md](../SECURITY.md) for the threat model.
 

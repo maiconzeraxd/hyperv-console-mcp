@@ -133,3 +133,21 @@ def test_the_page_announces_what_changes_on_its_own() -> None:
     text = _page()
     assert 'role="status" aria-live="polite"' in text
     assert 'role="status" aria-live="polite"></pre>' in text
+
+
+def test_a_dragged_file_is_the_same_copy_the_button_makes() -> None:
+    """A drop must not grow a second transfer path.
+
+    Dragging is a shortcut for the row's own "To guest →"/"To host →" button, so
+    it has to end at ``copyEntry`` rather than at a transfer of its own — and the
+    button stays, because a drag is the one gesture a keyboard cannot make.
+    """
+    text = _page()
+    assert 'draggable: "true"' in text
+    assert 'addEventListener("drop"' in text
+    assert "await copyEntry(carried.side, carried.entry" in text
+    # One implementation of each direction, reached by both gestures.
+    assert text.count('call("guest_put_file"') == 1
+    assert text.count('call("guest_get_file"') == 1
+    # The panel a file would land in says so, in the palette's own colour.
+    assert ".card.dropping { outline: 2px dashed var(--accent)" in text

@@ -41,6 +41,10 @@ class FakeService:
         self.calls.append(("reload_policy", {}))
         return {"levels": {}, "allowlist": []}
 
+    def list_vms(self) -> dict[str, Any]:
+        self.calls.append(("list_vms", {}))
+        return {"vms": [{"name": "Lab-VM", "state": "Running"}], "allowlist_active": True}
+
     def events_wait(self, after: int = 0, timeout_seconds: float = 15.0) -> dict[str, Any]:
         self.calls.append(("events_wait", {"after": after, "timeout_seconds": timeout_seconds}))
         return {"events": [], "latest_sequence": after}
@@ -214,6 +218,110 @@ def test_a_screenshot_becomes_a_data_url(tmp_path: Path) -> None:
     response = api.screenshot({"region": "window"})
     assert response["ok"]["src"].startswith("data:image/png;base64,")
     assert api.service.calls[-1] == ("capture_screenshot", {"region": "window", "max_width": 1600})
+
+
+# -- Hyper-V's own windows ---------------------------------------------------
+# The console page is a picture of the display, so the real viewer is a button.
+# It is the window that opens it, but which VM may be opened is decided here,
+# against the service's own list — the allowlist included.
+
+
+def _viewer(tmp_path: Path, *, installed: tuple[str, ...] = ("vmconnect.exe", "mmc.exe", "virtmgmt.msc")):
+    """An Api whose SystemRoot is a temporary directory with the named programs."""
+    system32 = tmp_path / "System32"
+    system32.mkdir(exist_ok=True)
+    for name in installed:
+        (system32 / name).write_bytes(b"")
+    return Api(FakeService(), Settings(allowed_vms=frozenset({"Lab-VM"})), "Lab-VM",
+               environ={"SystemRoot": str(tmp_path)})
+
+
+class FakeProcess:
+    def __init__(self, command: list[str]) -> None:
+        self.command = command
+        self.pid = 4242
+
+
+def test_vmconnect_opens_the_viewer_on_the_vm_the_service_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: list[list[str]] = []
+
+    def popen(command, **kwargs):
+        started.append(list(command))
+        return FakeProcess(list(command))
+
+    monkeypatch.setattr("hyperv_console_mcp.webui.api.subprocess.Popen", popen)
+    api = _viewer(tmp_path)
+    response = api.open_vmconnect("Lab-VM")
+    assert response["ok"]["program"] == "vmconnect.exe"
+    # The name is one argument: a VM called "Lab VM" stays one argument too.
+    assert started == [[str(tmp_path / "System32" / "vmconnect.exe"), "localhost", "Lab-VM"]]
+
+
+def test_a_name_with_a_space_is_still_one_argument(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: list[list[str]] = []
+
+    def popen(command, **kwargs):
+        started.append(list(command))
+        return FakeProcess(list(command))
+
+    monkeypatch.setattr("hyperv_console_mcp.webui.api.subprocess.Popen", popen)
+    (tmp_path / "System32").mkdir()
+    (tmp_path / "System32" / "vmconnect.exe").write_bytes(b"")
+    service = FakeService()
+    service.list_vms = lambda: {"vms": [{"name": "Lab VM"}]}
+    api = Api(service, Settings(), "Lab VM", environ={"SystemRoot": str(tmp_path)})
+    assert api.open_vmconnect("Lab VM")["ok"]["arguments"] == ["localhost", "Lab VM"]
+    assert started[0][-1] == "Lab VM"
+    assert len(started[0]) == 3
+
+
+def test_a_vm_the_host_does_not_report_is_not_opened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The service's list is the gate: nothing starts for a name it did not give."""
+    started: list[list[str]] = []
+    monkeypatch.setattr(
+        "hyperv_console_mcp.webui.api.subprocess.Popen",
+        lambda command, **kwargs: started.append(list(command)),
+    )
+    api = _viewer(tmp_path)
+    response = api.open_vmconnect("Some-Other-VM")
+    assert response["error"]["code"] == "not_authorized"
+    assert "Some-Other-VM" in response["error"]["message"]
+    assert started == []
+
+
+def test_vmconnect_without_a_vm_asks_for_one(tmp_path: Path) -> None:
+    api = Api(FakeService(), Settings(), "", environ={"SystemRoot": str(tmp_path)})
+    assert api.open_vmconnect()["error"]["code"] == "invalid_argument"
+
+
+def test_a_viewer_that_is_not_installed_is_an_answer_not_a_traceback(tmp_path: Path) -> None:
+    """A host without the management tools still has a window that can say so."""
+    api = _viewer(tmp_path, installed=())
+    response = api.open_vmconnect("Lab-VM")
+    assert response["error"]["code"] == "unavailable"
+    assert "vmconnect.exe" in response["error"]["message"]
+
+
+def test_hyperv_manager_is_the_manager_and_not_a_reimplementation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: list[list[str]] = []
+    monkeypatch.setattr(
+        "hyperv_console_mcp.webui.api.subprocess.Popen",
+        lambda command, **kwargs: started.append(list(command)) or FakeProcess(list(command)),
+    )
+    api = _viewer(tmp_path)
+    assert api.open_hyperv_manager()["ok"]["program"] == "mmc.exe"
+    assert started == [[
+        str(tmp_path / "System32" / "mmc.exe"),
+        str(tmp_path / "System32" / "virtmgmt.msc"),
+    ]]
 
 
 def test_the_page_asks_for_no_network_and_loads_nothing_remote() -> None:

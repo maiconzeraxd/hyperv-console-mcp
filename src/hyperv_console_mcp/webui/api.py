@@ -12,6 +12,14 @@ the operator's access file (the same file ``hyperv-access`` writes, which no MCP
 tool can reach), and answering approval requests, which arrive from the broker
 on its own thread and are answered by a click here.
 
+A third thing is also the window's: opening Hyper-V's own viewer. The service is
+a background process and a window it started would belong to that process's
+desktop, not to the operator's; the window is the only client that is certainly
+looking at the operator's screen. What it opens is decided here and not in the
+page — the VM is checked against the service's list first, so the allowlist and
+the host's inventory still stand between a name and a process. The viewer takes
+no credential and changes nothing, which is why it needs no approval card.
+
 The first-run wizard is neither a new door nor a rule of its own: it reads the
 VM list through the service and the credential sources through the vault, and
 writes only the level (the access file above) and the password (the service's
@@ -24,7 +32,9 @@ window, and the window module imports it, not the other way round.
 
 from __future__ import annotations
 
+import os
 import queue
+import subprocess
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -260,6 +270,87 @@ class Api:
             "username": stored or None,
             "credential": "stored" if stored else "skipped",
         }}
+
+    # -- Hyper-V's own windows ---------------------------------------------
+
+    def open_vmconnect(self, vm_name: str = "") -> dict[str, Any]:
+        """Open VMConnect on the operator's desktop, for full fidelity.
+
+        The console page is a picture of the display, so the real viewer is one
+        click away instead of a sentence telling the operator to type a command.
+        The name is checked against ``list_vms`` first, which is both the host's
+        inventory and the allowlist: a VM this window was not given is refused
+        here rather than opened.
+        """
+        name = str(vm_name or self.vm_name or "").strip()
+        if not name:
+            return {"error": {
+                "code": "invalid_argument",
+                "message": "Choose a VM before opening VMConnect.",
+            }}
+        listing = self.call("list_vms")
+        if "error" in listing:
+            return listing
+        known = {
+            str(vm.get("name") or "").casefold()
+            for vm in (listing.get("ok") or {}).get("vms") or []
+        }
+        if name.casefold() not in known:
+            return {"error": {
+                "code": "not_authorized",
+                "message": (
+                    f"{name} is not a virtual machine this host reports to this window, "
+                    "so VMConnect has nothing to open."
+                ),
+            }}
+        return self._launch("vmconnect.exe", "localhost", name)
+
+    def open_hyperv_manager(self) -> dict[str, Any]:
+        """Open Hyper-V Manager, which is where a VM is created or its hardware edited.
+
+        This window is a specialist in the driver-test loop and does not rebuild
+        the manager; it points at it, the same way the empty fleet tells the
+        operator where to make the first VM.
+        """
+        console = self._system32("virtmgmt.msc")
+        if not console.exists():
+            return {"error": {
+                "code": "unavailable",
+                "message": (
+                    f"{console} is not installed on this host, so Hyper-V Manager "
+                    "cannot be opened. The Hyper-V management tools provide it."
+                ),
+            }}
+        return self._launch("mmc.exe", str(console))
+
+    def _system32(self, name: str) -> Path:
+        root = (self.environ or os.environ).get("SystemRoot", r"C:\Windows")
+        return Path(root) / "System32" / name
+
+    def _launch(self, program: str, *arguments: str) -> dict[str, Any]:
+        """Start one of Windows' own consoles, detached, and say what was started.
+
+        Nothing but the program's name and the arguments this module built
+        reaches the command line: the VM name is one argument, never spliced
+        into a shell string, so a name with a space or a quote is still a name.
+        """
+        executable = self._system32(program)
+        if not executable.exists():
+            return {"error": {
+                "code": "unavailable",
+                "message": (
+                    f"{executable} is not installed on this host, so it cannot be opened. "
+                    "The Hyper-V management tools provide it."
+                ),
+            }}
+        try:
+            process = subprocess.Popen([str(executable), *arguments], close_fds=True)
+        except OSError as error:
+            return {"error": {
+                "code": "unavailable",
+                "message": f"{program} could not be started: {error}",
+            }}
+        return {"ok": {"program": program, "pid": process.pid, "arguments": list(arguments)}}
 
     # -- approvals ---------------------------------------------------------
 

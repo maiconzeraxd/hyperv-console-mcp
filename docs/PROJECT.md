@@ -2051,6 +2051,42 @@ WebView, and a window that survives a light theme and a keyboard.
   keyboard paths have been rendered and scanned but not used by a person. `kd_inspect(what="symbols")`
   has not been asked of a real kd session.
 
+### 2026-10-30 — v0.3 dashboard: what the window opens, and a drop that is the same copy
+
+Two of the roadmap's items were still sentences in a document rather than things the window could
+do: "ofereça um botão 'abrir no Hyper-V Manager / VMConnect'" and "arrastar e soltar entre os
+painéis dispara a cópia".
+
+- **The buttons open the real viewers, and the window decides which.** `Api.open_vmconnect` and
+  `Api.open_hyperv_manager` live on the bridge rather than on the service because the service is a
+  background process: a window it started would belong to that process's desktop, not the
+  operator's. `open_vmconnect` asks the service for `list_vms` first and refuses a name the host did
+  not report, so the allowlist still stands between a name and a process, and the name goes in as
+  one argument — `["localhost", "Lab VM"]`, never a command string — so nothing re-parses it. A host
+  without the management tools answers `unavailable` with the path it looked for.
+- **A drop is the row's own copy.** `acceptDrops` puts the dragover/drop handlers on each panel and
+  the drop calls `copyEntry`, so there is still one implementation of each direction; a test asserts
+  that the page contains exactly one `guest_put_file` and one `guest_get_file` call site. Only files
+  drag, because the service copies one file at a time and a folder would need a recursive transfer
+  it does not have. A drop back on the panel it came from is ignored, and the target panel is drawn
+  with a dashed accent outline while the drag is over it.
+- **Two layout defects the screenshots found.** The file table's actions column had been sized by
+  `table-layout: fixed` at roughly a third of the panel, so three buttons stacked into three rows;
+  the columns are now sized (kind 66px, size 60px, actions 232px) and the buttons keep to one line.
+  And the console's "Console info" line was a `<p>` of unwrapped JSON that widened the whole page
+  into a horizontal scrollbar; it is a `pre.log` now, which wraps inside its own 300px box.
+- Tests: six in `tests/test_webui.py` (the viewer's command line, a name with a space staying one
+  argument, an unreported VM refused without starting anything, a missing VM name, an uninstalled
+  viewer as an answer, Hyper-V Manager opening the `.msc`), and one in `tests/test_webui_page.py`
+  (the drop reaching `copyEntry`, one call site per direction, the drop outline in the palette).
+- Gate: 1105 passed / 1 skipped, ruff clean, `node --check` clean.
+- Verified in a browser, not in WebView2: with a stub bridge in headless Edge, a dispatched drag from
+  a host row onto the guest panel produced `guest_put_file` with `local_path C:\Lab\MyDriver.sys`
+  and `guest_path C:\DriverLab\MyDriver.sys`, the reverse produced `guest_get_file`, and a
+  same-panel drop produced no call and left no highlight. The two buttons were rendered and their
+  commands asserted in pytest; **neither `vmconnect.exe` nor `mmc.exe virtmgmt.msc` has actually
+  been started by this window on a real host.**
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three

@@ -42,6 +42,12 @@ The **fleet** is the home page: every VM Hyper-V reported, its state, the level 
 
 Closing the window does not stop a VM or guarantee that an already-running guest command was cancelled, and changing pages does not cancel a background operation.
 
+## What the window opens and what it does not rebuild
+
+This is not a second Hyper-V Manager. Creating a VM and editing its hardware are rare, and the manager already does them well, so **Hyper-V Manager** on the fleet opens `mmc.exe virtmgmt.msc` and the window stops there. The console page carries the same idea: the display is a picture, so **Open VMConnect** starts `vmconnect.exe localhost "<vm>"` for full fidelity instead of telling the operator to type that command somewhere else.
+
+Both are the window's own methods rather than service calls, because the service is a background process and a window it started would belong to that process's desktop rather than the operator's. The decision is still Python's, not the page's: `open_vmconnect` asks the service for `list_vms` first and refuses a name the host did not report, which is the allowlist standing between a name and a process. The VM name goes in as one argument, so a VM called `Lab VM` is still one argument and no shell ever parses it. A host without the management tools gets an answer that says so rather than a traceback.
+
 ## Two palettes, one set of names
 
 Every colour is a variable on `:root`, and the light theme is a second block that redefines the same names — not a second stylesheet. That is a rule with a test behind it (`tests/test_webui_page.py`): a name the light block forgets is a colour that stays dark on a light page, and a hex written straight into a rule is a colour the light theme can never reach. The only literal allowed outside the two blocks is `#000` for the guest's own screen, because that is a picture of a display rather than a surface of this window.
@@ -109,7 +115,7 @@ The result is two tables. The first is one row per VM: outcome, duration, bugche
 
 Two panels, one per side. The host panel is limited to the four roots this server was configured with — `HYPERV_MCP_LAB_ROOT`, `HYPERV_MCP_EVIDENCE_ROOT`, `HYPERV_MCP_TRANSFER_ROOT` and `HYPERV_MCP_ISO_ROOT` — and never to `C:\`: a path is resolved and then compared with the resolved root, so `..` and an absolute path elsewhere fail the same check. The guest panel reaches the lab machine's own disk through the configured transport.
 
-Both sides list, create a folder, rename, delete and copy to the other side. Copying a file either way is `guest_put_file`/`guest_get_file`, so the SHA-256 is verified at the destination and the digest shown is the one the far side computed. Deleting takes two clicks on the same row and the service still requires the path spelled back; a non-empty directory additionally needs the "delete folders recursively" box, and the guest script refuses the tree without it too. Progress comes from the event bus: the bar reads the `progress` events the transfer publishes, so it shows the same numbers on the Activity page.
+Both sides list, create a folder, rename, delete and copy to the other side. Copying a file either way is `guest_put_file`/`guest_get_file`, so the SHA-256 is verified at the destination and the digest shown is the one the far side computed. A file row can also be **dragged onto the other panel**, which is the same copy: the drop calls the row's own path rather than a second transfer, and a drop back on the panel it came from is not a move and does nothing. Directories do not drag, because the service copies one file at a time and a folder would need a recursive transfer it does not offer. The button stays beside the drag, because a drag is the one gesture a keyboard cannot make. Deleting takes two clicks on the same row and the service still requires the path spelled back; a non-empty directory additionally needs the "delete folders recursively" box, and the guest script refuses the tree without it too. Progress comes from the event bus: the bar reads the `progress` events the transfer publishes, so it shows the same numbers on the Activity page.
 
 ## The lab page
 

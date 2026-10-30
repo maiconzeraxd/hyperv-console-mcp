@@ -174,6 +174,8 @@
     padding: 16px 18px;
   }
   .card h2 { margin: 0 0 2px; font-size: 1rem; }
+  /* The panel a dragged file would land in, while the drag is over it. */
+  .card.dropping { outline: 2px dashed var(--accent); outline-offset: 3px; }
   .card .hint { margin: 0 0 12px; color: var(--muted); font-size: .82rem; }
   .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; margin-bottom: 10px; }
   label.field { display: flex; flex-direction: column; gap: 4px; font-size: .8rem; color: var(--muted); flex: 1 1 140px; }
@@ -248,7 +250,15 @@
   .files .card { min-width: 0; }
   .files table.events { table-layout: fixed; }
   .files table.events td { vertical-align: top; overflow-wrap: anywhere; }
+  /* The row's buttons keep to one line, so the actions column is sized for them
+     and the name takes what is left. Left to itself the column was a third of
+     the panel and a row with three buttons was three rows tall. */
+  .files table.events th:nth-child(2), .files table.events td:nth-child(2) { width: 66px; }
+  .files table.events th:nth-child(3), .files table.events td:nth-child(3) { width: 60px; }
+  .files table.events th:nth-child(4), .files table.events td:nth-child(4) { width: 232px; }
   .files table.events td:last-child { white-space: nowrap; }
+  .files table.events td:last-child .row { flex-wrap: nowrap; }
+  .files button.act { padding: 6px 9px; font-size: .8rem; }
   .files .path {
     margin: 0 0 10px; font-family: Consolas, "Cascadia Mono", monospace;
     font-size: .8rem; color: var(--muted); overflow-wrap: anywhere;
@@ -641,7 +651,11 @@ const builders = {
         el("div", { class: "row", style: "margin:12px 0 0" },
           action("Refresh", "list_vms", () => ({}), null, render),
           el("button", { class: "act", onclick: () => openWizard() }, "Set up another VM"),
-          el("button", { class: "act", onclick: openChooser }, "Type a VM name"))));
+          el("button", { class: "act", onclick: openChooser }, "Type a VM name"),
+          el("button", {
+            class: "act",
+            onclick: () => openViewer("open_hyperv_manager", () => api().open_hyperv_manager()),
+          }, "Hyper-V Manager"))));
   },
 
   async matrix() {
@@ -797,10 +811,14 @@ const builders = {
         el("div", { class: "row", style: "margin:10px 0 0" },
           el("button", { class: "act", id: "screen-toggle", onclick: () => toggleScreen() }, "Pause"),
           el("button", { class: "act", onclick: () => captureOnce() }, "Capture once"),
-          el("button", { class: "act", onclick: () => call("console_wait_for_change", { ...vmArg(), timeout_ms: 15000 }) }, "Wait for change")),
+          el("button", { class: "act", onclick: () => call("console_wait_for_change", { ...vmArg(), timeout_ms: 15000 }) }, "Wait for change"),
+          el("button", {
+            class: "act",
+            onclick: () => openViewer("open_vmconnect", () => api().open_vmconnect(state.vm)),
+          }, "Open VMConnect")),
         el("p", { class: "hint", style: "margin:10px 0 0" },
           "Display " + (head.horizontal || "—") + "×" + (head.vertical || "—") +
-          " guest pixels. For full fidelity, open VMConnect.")),
+          " guest pixels. This page is a picture of the display; VMConnect is the real viewer.")),
       panel("Keyboard", "Focus the picture, then type. Characters are sent in short bursts; Enter, Tab, Escape and the arrows go at once.",
         el("div", { class: "row" }, el("textarea", { id: "console-text", placeholder: "Paste text to type into the guest (useful in OOBE)" })),
         el("div", { class: "row" },
@@ -808,8 +826,11 @@ const builders = {
           el("button", { class: "act", onclick: () => call("console_ctrl_alt_delete", vmArg()) }, "Ctrl+Alt+Del"),
           ...["enter", "escape", "tab", "up", "down", "left", "right"].map((key) =>
             el("button", { class: "act", onclick: () => call("console_press_keys", { ...vmArg(), keys: [key] }) }, key))),
-        el("p", { class: "hint", style: "margin:10px 0 0" },
-          "Console info: " + JSON.stringify((info && (info.ok || info.error)) || {}))),
+        // The whole answer is here because it is what the service said, but it
+        // wraps inside its own box: an unbroken line of JSON would widen the
+        // page and turn the layout into a horizontal scrollbar.
+        el("pre", { class: "log", style: "margin:10px 0 0" },
+          JSON.stringify((info && (info.ok || info.error)) || {}, null, 2))),
       panel("Mouse", "Coordinates are guest-display pixels; clicking the picture fills them in.",
         el("div", { class: "row" },
           field("X", input_("mouse-x", "0", "number")),
@@ -1329,7 +1350,7 @@ const builders = {
         el("span", { class: "path", style: "margin:0" }, text || "(root)"),
         back ? el("button", { class: "act", onclick: back }, "Up") : null);
 
-    const hostPanel = panel("Host", "The four roots this server was configured with, and nothing outside them. A path that resolves elsewhere is refused.",
+    const hostPanel = panel("Host", "The four roots this server was configured with, and nothing outside them. A path that resolves elsewhere is refused. Drag a file onto the other panel to copy it.",
       listed.length
         ? el("div", { class: "row" },
             field("Root", el("select", { id: "file-root" },
@@ -1363,7 +1384,7 @@ const builders = {
         field("Overwrite a file written here", el("input", { id: "file-to-host-overwrite", type: "checkbox" })),
         field("Delete folders recursively", el("input", { id: "file-host-recursive", type: "checkbox" }))));
 
-    const guestPanel = panel("Guest", "The lab machine's own disk, reached over the configured transport. Deleting asks for a second click.",
+    const guestPanel = panel("Guest", "The lab machine's own disk, reached over the configured transport. Deleting asks for a second click. Drag a file onto the other panel to copy it.",
       el("div", { class: "row" },
         field("Path", input_("file-guest-path", files.guest)),
         el("button", {
@@ -1401,6 +1422,9 @@ const builders = {
             " bytes · sha256 " + files.last.sha256)
         : null);
 
+    acceptDrops(hostPanel, "host", files);
+    acceptDrops(guestPanel, "guest", files);
+
     return el("div", {},
       el("div", { class: "grid files" }, hostPanel, guestPanel),
       el("div", { style: "margin-top:14px" }, transfer));
@@ -1417,6 +1441,17 @@ async function writeLevel(level) {
   }
   await refreshHello();
   await render();
+}
+
+/* Opening one of Hyper-V's own windows is the window's own business: the
+   service is a background process, and what is being opened belongs on the
+   operator's desktop. Which VM may be opened is decided in Python. */
+async function openViewer(name, invoke) {
+  try {
+    show(name, await invoke());
+  } catch (error) {
+    show(name, { error: { message: String(error) } });
+  }
 }
 
 /* ---------- the guest screen ---------- */
@@ -1672,6 +1707,34 @@ const joinPath = (base, name) => {
 
 const hostFull = (rootPath, relative) => joinPath(rootPath, relative);
 
+// The row being dragged, and the panel it came from. A render rebuilds the DOM,
+// so this cannot be a local: the drop happens after the drag started.
+let draggedFile = null;
+
+// A drop is the copy the row's own button performs, so it calls copyEntry
+// rather than growing a second transfer path. Dropping a row back on the panel
+// it came from is not a move and is ignored.
+function acceptDrops(node, side, files) {
+  node.addEventListener("dragover", (event) => {
+    if (!draggedFile || draggedFile.side === side) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    node.classList.add("dropping");
+  });
+  node.addEventListener("dragleave", (event) => {
+    // Moving between the panel's own rows is not leaving it.
+    if (!node.contains(event.relatedTarget)) node.classList.remove("dropping");
+  });
+  node.addEventListener("drop", async (event) => {
+    node.classList.remove("dropping");
+    const carried = draggedFile;
+    draggedFile = null;
+    if (!carried || carried.side === side) return;
+    event.preventDefault();
+    await copyEntry(carried.side, carried.entry, files, carried.chosen);
+  });
+}
+
 function fileTable(entries, side, files, chosen) {
   if (!entries.length) return el("p", { class: "hint" }, "This directory is empty.");
   return el("table", { class: "events" },
@@ -1719,7 +1782,24 @@ function fileRow(entry, side, files, chosen) {
         onclick: async () => { files.pending = { key }; files.renaming = null; await render(); },
       }, "Delete"));
 
-  return el("tr", { class: pending ? "pending" : "" },
+  // A file can be dragged onto the other panel. A directory cannot: the copy
+  // is per file, and a folder would need a recursive transfer the service does
+  // not offer, so the row does not pretend to.
+  const drag = entry.type === "file"
+    ? {
+        draggable: "true",
+        ondragstart: (event) => {
+          draggedFile = { entry, side, files, chosen };
+          if (event.dataTransfer) {
+            event.dataTransfer.effectAllowed = "copy";
+            event.dataTransfer.setData("text/plain", entry.name);
+          }
+        },
+        ondragend: () => { draggedFile = null; },
+      }
+    : {};
+
+  return el("tr", { class: pending ? "pending" : "", ...drag },
     el("td", {}, nameCell),
     el("td", {}, entry.type),
     el("td", {}, isDirectory || entry.size === null || entry.size === undefined ? "—" : entry.size),
