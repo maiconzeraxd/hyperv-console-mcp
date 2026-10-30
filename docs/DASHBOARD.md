@@ -58,6 +58,24 @@ Two panels, one per side. The host panel is limited to the four roots this serve
 
 Both sides list, create a folder, rename, delete and copy to the other side. Copying a file either way is `guest_put_file`/`guest_get_file`, so the SHA-256 is verified at the destination and the digest shown is the one the far side computed. Deleting takes two clicks on the same row and the service still requires the path spelled back; a non-empty directory additionally needs the "delete folders recursively" box, and the guest script refuses the tree without it too. Progress comes from the event bus: the bar reads the `progress` events the transfer publishes, so it shows the same numbers on the Activity page.
 
+## The lab page
+
+The lab page is built around one rule: a cycle is a single service call, so the page cannot know how far it got by watching a spinner. It reads the `started`/`progress`/`completed` events the service publishes for `lab_cycle` and `lab_run` — the same records the Activity page shows, under one correlation id — and draws the newest phase with its percentage. The numbers are the service's, not the page's estimate.
+
+Running a package is offered only in the lab profile, because that is where the server accepts it. Staging (`lab_stage`) is a host-to-guest copy of a directory under `HYPERV_MCP_LAB_ROOT` with a manifest built on both sides; `lab_verify` compares the published package with an approved digest; `lab_collect` reads evidence without executing anything. The wave in the roadmap called this pair `lab_plan`/`lab_apply`; the service has no such methods and the page does not invent them, so the staging panel calls what exists.
+
+**Receipts** are the read side of `lab-cycle.json`. `lab_receipts(action="list")` names every run under the evidence root, newest first and optionally for one VM; a directory holding no readable record is listed as skipped rather than guessed at. Clicking a row opens it: the record's fields, and every evidence file with its host path and SHA-256, each with a jump into the file manager. Clicking two rows and then "Compare" runs `lab_receipts(action="compare")`, which reports what matched and what changed, and marks a field one side never had as `absent` — a run that crashed has a blamed driver and a run that passed does not, and that is not the same as "changed to nothing".
+
+**Crash triage** formats `!analyze -v` instead of showing it: the bugcheck code and its name, the bucket, the blamed driver, whether the symbols resolved, the parameters and the top frames, with the dump and kd's log named where they are. It reads either the report the cycle just returned or the receipt it wrote, because the record keeps the crash — the stack included — so a run can be triaged long after the window that ran it closed.
+
+## The debugger page
+
+kd is driven through `kd_attach`/`kd_status`/`kd_detach`, with `kd_break`, `kd_go`, `kd_command`, `kd_breakpoint` (set, clear, break-on-load) and the read-only `kd_stack`, `kd_modules`, `kd_analyze`, `kd_symbols` and `kd_dump_open`. The page shows the state the service reports and nothing else: an unattached VM says so, and a command that needs a session is offered only as a button the service will refuse rather than as one that looks armed.
+
+The serial console reads COM1 in a loop through `serial_read`, replacing the tail on each tick rather than appending to it, and stops the moment the page moves on, the read fails or the operator stops it. One reader per pipe is the rule: `kd_attach` detaches the serial reader when it takes the pipe, so the page says which of the two owns it and does not offer a read that would be refused. Typed text goes through `serial_send`, which tells the approval card only how many characters it carried.
+
+The "prepare the guest" buttons each fire one service call and show its result: guest BCD (`lab_guest_configure`), Driver Verifier (`lab_verifier`), autologon (`guest_autologon_configure`), password rotation and forget (`guest_password_rotate`, `guest_credential_forget`), KDNET (`debug_kdnet_prepare`, `debug_kdnet_deprovision`) and the COM1 pipe (`debug_serial_prepare`). The password and the KDNET key are generated and stored by the service; the page never receives them and has no field to type them into.
+
 ## Delivery waves
 
 The dashboard was delivered in waves, each one gated by the full test suite before it was committed:
@@ -68,10 +86,10 @@ The dashboard was delivered in waves, each one gated by the full test suite befo
 | 1 | The fleet, the live activity feed, the non-modal approval queue, host status and a connection indicator. |
 | 2 | The clickable console, the checkpoint tree with a locked baseline, and in-place two-click confirmations. |
 | 3 | The host↔guest file manager: four roots, both directions, digest and progress. |
-| 4 | Lab plan/apply/receipts, the debugger's crash triage, the serial console and the prepare-guest buttons. |
+| 4 | Lab receipts and comparison, the live cycle, the crash triage, the kd console and breakpoints, the serial reader and the prepare-guest buttons. |
 | 5 | Multi-VM matrix, run recording and per-VM transport health. |
 
-Waves 4 and 5 are not built yet.
+Wave 5 is not built yet.
 
 ## Cross-process activity
 

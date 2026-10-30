@@ -1593,6 +1593,59 @@ rendered from a live VM — the capture path needs an elevated session.
 - Still open: waves 4–5, a light theme for the window, live numbers for the console cadence, and
   that elevated run of `tests/live_files.py`.
 
+### 2026-10-29 — v0.3 dashboard wave 4: receipts, the live cycle and the crash triage
+
+- **A receipt is a read, so its read side is a module, not a tool.** `lab/receipts.py` opens the
+  `lab-cycle.json` files `lab/report.py` already writes: `list_receipts` sorts them newest first by
+  the time the cycle finished (a record with no time sorts last, because an unknown time is not a
+  recent one) and puts a directory holding no readable record in `skipped` instead of guessing at
+  it; `get_receipt` names each evidence file by its host path and digest; `compare` walks the
+  twenty fields two runs can differ on.
+- **`absent_on` is the reason `compare` exists.** A run that bugchecked has a blamed driver and a
+  run that passed does not, and reporting that as "changed from MyDriver.sys to nothing" would be a
+  worse answer than saying the second run never had one. Each difference therefore carries which
+  side lacks the field, and a field both sides lack is not compared at all.
+- **A run id is checked before it is joined.** `_RUN_ID` allows only `[A-Za-z0-9_.-]`, which `..`
+  and `.` pass, so `_run_id` also refuses a name that is nothing but dots — the two directory names
+  that would leave the evidence root. An evidence entry whose path contains `..` is dropped from
+  the listing for the same reason.
+- **The record now keeps the triage, not just its summary.** `lab/report._crash` retains
+  `bugcheck_str`, the parameters, the top frames, `sources` and kd's log path, so a receipt opened
+  weeks later answers "where did it die" without the dump being read again. `receipts.crash_view`
+  hands that to the window in the shape the triage panel draws.
+- **`lab_receipts` is one tool with three actions.** It is a read of the host and touches no VM;
+  `list`, `get` and `compare` share one implementation of what a record means, and the `lab` profile
+  is 43 tools with the budget unchanged (`safe` stays 29, `all` is 65).
+- **A cycle is one blocking call, so its phases come from the bus.** `LabService._tracked` wraps
+  `lab_run`/`lab_cycle` in one `EVENTS.operation` and hands the step a `ProgressReporter`, and
+  `lab/run.py` reports the share of wall time each phase usually takes — the guest's execution is a
+  single blocking call and has no progress of its own to report. `_band` maps a nested step's 0–100
+  onto a slice of the cycle's scale, so the two never publish two competing scales.
+- **The page draws the service's numbers.** The Lab tab shows the newest `lab_cycle`/`lab_run`
+  event's phase and percentage, the receipt list with pick-two-to-compare, the open receipt with a
+  jump into the file manager per evidence file, and the crash triage formatted from `!analyze -v`
+  (code, name, bucket, blamed driver, symbols, parameters, top frames, dump and kd log). The
+  Debugger tab drives `kd_status`/`kd_attach`/`kd_break`/`kd_go`/`kd_command`/`kd_breakpoint`/
+  `kd_break_on_load`/`kd_inspect`'s reads, the serial reader as a loop that stops when the page
+  moves on or the read fails, and the prepare-guest buttons — each one service call, with the
+  password and the KDNET key generated and stored by the service and never sent to the page.
+- **One reader per pipe, said out loud.** `kd_attach` detaches the serial reader when it takes
+  COM1, so the page reports which of the two owns the pipe and disables the read it knows the
+  service would refuse.
+- Tests: `tests/test_lab_receipts.py` (listing and its order, the VM filter, skipped directories,
+  path-shaped run ids, a missing root, evidence paths that climb out, the not-found answer, a
+  comparison and its `absent_on`, identical runs, a missing side, the evidence hash, and the
+  service's action and argument checks); `tests/test_lab_run.py` gains the phase scale, the nested
+  band and the one-operation-three-phases assertions; `tests/test_lab_report.py` asserts the stack
+  survives into the record; `tests/test_webui_contract.py` covers the new buttons because every one
+  of them names a real service method.
+- Gate: 923 passed / 1 skipped, ruff clean, 13 PowerShell files parse, 0 analyzer findings, smoke
+  29 / 43 / 65.
+- Not validated live: the wave's own definition of done — a `lab_cycle` run from the window with a
+  debugger attached and a bugcheck triaged on screen — needs a payload, and running one remains a
+  separate operator decision. What is proved without a VM is the reading: the receipt, the
+  comparison and the triage shape are covered by fakes.
+
 ## Phase 4 report
 
 **What changed.** `hostwmi/` now serves 30 host operations over COM/WMI (`vm_get`, power, checkpoints,

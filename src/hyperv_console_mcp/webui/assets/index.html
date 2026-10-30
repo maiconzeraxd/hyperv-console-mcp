@@ -180,6 +180,20 @@
   progress.transfer { width: 100%; height: 10px; accent-color: var(--accent); }
   .transfer-line { display: flex; justify-content: space-between; gap: 12px; font-size: .78rem; color: var(--muted); margin-top: 6px; }
   .transfer-line .digest { font-family: Consolas, "Cascadia Mono", monospace; overflow-wrap: anywhere; }
+  /* ---------- lab, debugger and crash triage ---------- */
+  .mono { font-family: Consolas, "Cascadia Mono", monospace; overflow-wrap: anywhere; }
+  /* The bugcheck code is the one line an operator reads first, so it gets the
+     size of a heading and the colour of a failure. */
+  .triage-code { margin: 0 0 10px; font-family: Consolas, "Cascadia Mono", monospace; font-size: 1.4rem; color: var(--error); }
+  .triage-code small { margin-left: 10px; font-size: .78rem; color: var(--muted); }
+  .outcome { border: 1px solid var(--border); border-radius: 999px; padding: 0 7px; font-size: .72rem; white-space: nowrap; }
+  .outcome.ok { color: var(--accent); border-color: #2f6b57; }
+  .outcome.bugcheck, .outcome.failed, .outcome.hang, .outcome.timeout { color: var(--error); border-color: #6b2f2f; }
+  .outcome.not_verified { color: var(--warning); border-color: #6b4b12; }
+  table.events tr.picked { background: rgba(70, 160, 120, .10); }
+  table.events.changed td { font-family: Consolas, "Cascadia Mono", monospace; font-size: .78rem; vertical-align: top; }
+  table.events.changed td:first-child { color: var(--muted); font-family: inherit; }
+  pre.log { margin: 0; max-height: 300px; overflow: auto; padding: 10px; border-radius: 7px; background: var(--surface); font-size: .78rem; white-space: pre-wrap; word-break: break-word; }
   /* ---------- output ---------- */
   #output {
     position: sticky;
@@ -312,6 +326,13 @@ const state = {
   // row waiting for a second click, and the digest of the last transfer. It
   // outlives a render, because navigating a directory is a render.
   files: null,
+  // The lab's own state: the last cycle's report (the crash triage reads it
+  // after the raw answer has scrolled away), the runs picked to compare, and
+  // the receipt that is open. A render rebuilds the page, not this.
+  lab: null,
+  // The debugger's own state: the last analysis, the serial tail and whether
+  // the serial loop is running. It survives a render for the same reason.
+  debug: null,
 };
 
 /* ---------- small helpers ---------- */
@@ -687,42 +708,184 @@ const builders = {
   },
 
   async debugger() {
-    const status = await api().call("debug_serial_status", vmArg());
-    const kd = await api().call("kd_status", vmArg());
+    const debug = debugState();
+    const [status, kd, kdnet] = await Promise.all([
+      api().call("debug_serial_status", vmArg()),
+      api().call("kd_status", vmArg()),
+      api().call("debug_kdnet_status", vmArg()),
+    ]);
+    const kdState = (kd && kd.ok) || {};
+    const serial = (kdState.serial || (status && status.ok && status.ok.console) || {});
+    // One reader per pipe: kd detaches the serial reader when it takes COM1, so
+    // the page says which of the two owns it instead of offering a refused read.
+    const kdOwns = Boolean(kdState.attached);
+
+    const console_ = panel("Serial console", "COM1 read as a stream. kd and this reader cannot own the same pipe at once.",
+      el("div", { class: "row", style: "margin:0 0 8px;align-items:center" },
+        el("span", { class: "outcome " + (serial.connected ? "ok" : "failed") },
+          serial.connected ? "connected" : "not connected"),
+        el("span", { class: "mono", style: "font-size:.76rem;color:var(--muted)" },
+          (serial.pipe_path || "no pipe") + (serial.log_path ? " → " + serial.log_path : "")),
+        el("span", { id: "serial-note", class: "hint", style: "margin:0" }, "")),
+      el("pre", { class: "log", id: "serial-log" }, ""),
+      el("div", { class: "row", style: "margin:10px 0 0" },
+        field("Pipe", input_("pipe-name", "")),
+        field("Log", input_("pipe-log", ""))),
+      el("div", { class: "row" },
+        action("Connect reader", "serial_connect", () => ({
+          vm_name: state.vm, pipe_name: fieldValue("pipe-name"), log_path: fieldValue("pipe-log"), confirm_vm: state.vm,
+        }), "primary"),
+        el("button", {
+          class: "act",
+          id: "serial-toggle",
+          disabled: serial.connected ? null : "disabled",
+          onclick: async () => {
+            debug.serialOn = !debug.serialOn;
+            startSerial();
+            drawSerial();
+          },
+        }, debug.serialOn ? "Stop reading" : "Read live"),
+        el("button", {
+          class: "act",
+          disabled: serial.connected ? null : "disabled",
+          onclick: async () => {
+            const response = await call("serial_read", { vm_name: state.vm, tail_chars: 65536 });
+            debug.serial = String((response && response.ok && response.ok.text) || "");
+            debug.note = response && response.error ? (response.error.message || "the read failed") : "";
+            drawSerial();
+          },
+        }, "Read once"),
+        action("Disconnect", "serial_disconnect", vmArg, "danger")),
+      kdOwns
+        ? el("p", { class: "hint", style: "margin:10px 0 0" },
+            "kd.exe owns COM1 right now. Detach it before connecting the serial reader; kd did not detach one for you.")
+        : null,
+      el("div", { class: "row" }, el("textarea", { id: "serial-text", placeholder: "Text for the serial console" })),
+      el("div", { class: "row", style: "margin:0" },
+        action("Send", "serial_send", () => ({ vm_name: state.vm, text: fieldValue("serial-text"), append_newline: true }))));
+
+    const kdPanel = panel("kd.exe", "The state the server reports, never a guessed one.",
+      facts([
+        ["Attached", kdState.attached === undefined ? "—" : String(kdState.attached)],
+        ["Transport", kdState.transport],
+        ["State", kdState.state],
+        ["Target", kdState.target],
+        ["Log", kdState.log_path],
+      ]),
+      el("div", { class: "row", style: "margin:12px 0 0" },
+        field("Transport", el("select", { id: "kd-transport" },
+          ...["kdnet", "serial"].map((t) => el("option", { value: t }, t)))),
+        field("Break in on attach", el("input", { id: "kd-break-in", type: "checkbox" }))),
+      el("div", { class: "row" },
+        action("Attach", "kd_attach", () => ({
+          vm_name: state.vm, transport: fieldValue("kd-transport"), initial_break: checked("kd-break-in"),
+        }), "primary"),
+        action("Break", "kd_break", vmArg),
+        action("Go", "kd_go", vmArg),
+        action("Detach", "kd_detach", vmArg, "danger")),
+      el("div", { class: "row" },
+        field("Command", input_("kd-command", "!analyze -v")),
+        el("button", {
+          class: "act",
+          onclick: async () => {
+            const response = await call("kd_command", { vm_name: state.vm, command: fieldValue("kd-command") });
+            debug.lastCommand = (response && response.ok) || null;
+            await render();
+          },
+        }, "Run command")),
+      debug.lastCommand
+        ? el("pre", { class: "log", style: "margin:10px 0 0" }, String(debug.lastCommand.output || ""))
+        : null);
+
+    const breakPanel = panel("Breakpoints", "Set and cleared on the live target. A break-on-load fires when the module loads, not when it is called.",
+      el("div", { class: "row" },
+        field("Target", input_("kd-bp-target", "")),
+        field("Deferred", el("input", { id: "kd-bp-deferred", type: "checkbox" }))),
+      el("div", { class: "row" },
+        action("Set breakpoint", "kd_set_breakpoint", () => ({
+          vm_name: state.vm, target: fieldValue("kd-bp-target"), deferred: checked("kd-bp-deferred"),
+        }), "primary"),
+        action("Clear all", "kd_clear_breakpoints", vmArg, "danger")),
+      el("div", { class: "row", style: "margin:12px 0 0" },
+        field("Module", input_("kd-bol-module", "")),
+        field("Enabled", el("input", { id: "kd-bol-enabled", type: "checkbox", checked: "checked" }))),
+      el("div", { class: "row", style: "margin:0" },
+        action("Break on load", "kd_break_on_load", () => ({
+          vm_name: state.vm, module: fieldValue("kd-bol-module"), enabled: checked("kd-bol-enabled"),
+        }))));
+
+    const inspectPanel = panel("Read the target", "Reads only. The analysis is the same one the crash triage formats.",
+      el("div", { class: "row" },
+        action("Stack", "kd_stack", vmArg),
+        action("Modules", "kd_modules", vmArg),
+        action("Analyze", "kd_analyze", vmArg)),
+      el("div", { class: "row", style: "margin:10px 0 0" },
+        field("Module symbols", input_("kd-symbols-module", "")),
+        action("Resolve symbols", "kd_symbols", () => ({ vm_name: state.vm, module: fieldValue("kd-symbols-module") }))),
+      el("div", { class: "row", style: "margin:0" },
+        field("Dump", input_("kd-dump-path", "")),
+        action("Open dump", "kd_dump_open", () => ({ vm_name: state.vm, dump_path: fieldValue("kd-dump-path") }))));
+
+    // The prepare steps the wave calls "Corrigir": each one is one service call,
+    // and every value it needs stays in the service. A change that needs a
+    // restart says so and does not restart on its own.
+    const preparePanel = panel("Prepare the guest", "Every change is recorded so it can be reverted. Nothing here restarts the guest or bypasses signature enforcement.",
+      el("div", { class: "row" },
+        field("Guest BCD: test signing", el("input", { id: "prep-testsigning", type: "checkbox" })),
+        field("Guest BCD: kernel debug", el("input", { id: "prep-kernel-debug", type: "checkbox" })),
+        field("Crash dump", el("select", { id: "prep-crash-dump" },
+          ...["", "none", "small", "kernel", "full"].map((value) =>
+            el("option", { value }, value || "(leave as it is)"))))),
+      el("div", { class: "row", style: "margin:0" },
+        action("Apply guest BCD", "lab_guest_configure", () => ({
+          vm_name: state.vm, confirm_vm: state.vm,
+          testsigning: checked("prep-testsigning"),
+          kernel_debug: checked("prep-kernel-debug"),
+          crash_dump: fieldValue("prep-crash-dump") || null,
+        }), "primary")),
+      el("div", { class: "row", style: "margin:12px 0 0" },
+        field("Verifier drivers", input_("prep-verifier-drivers", "")),
+        field("Flags", input_("prep-verifier-flags", ""))),
+      el("div", { class: "row", style: "margin:0" },
+        action("Verifier on", "lab_verifier", () => ({
+          vm_name: state.vm, action: "enable", confirm_vm: state.vm,
+          drivers: fieldValue("prep-verifier-drivers") ? fieldValue("prep-verifier-drivers").split(/[,\s]+/).filter(Boolean) : null,
+          flags: fieldValue("prep-verifier-flags") || null,
+        })),
+        action("Verifier off", "lab_verifier", () => ({ vm_name: state.vm, action: "disable", confirm_vm: state.vm }), "danger")),
+      el("div", { class: "row", style: "margin:12px 0 0" },
+        action("Autologon", "guest_autologon_configure", () => ({
+          vm_name: state.vm, enabled: true, confirm_vm: state.vm, restart: false,
+        })),
+        action("Rotate password", "guest_password_rotate", confirmed, "primary"),
+        action("Forget password", "guest_credential_forget", confirmed, "danger")),
+      el("div", { class: "row", style: "margin:12px 0 0" },
+        field("KDNET port", input_("prep-kdnet-port", "", "number")),
+        field("Reuse an existing adapter", el("input", { id: "prep-kdnet-adapter", type: "checkbox" }))),
+      el("div", { class: "row", style: "margin:0" },
+        action("Prepare KDNET", "debug_kdnet_prepare", () => ({
+          vm_name: state.vm, confirm_vm: state.vm,
+          port: Number(fieldValue("prep-kdnet-port")) || null,
+          use_existing_adapter: checked("prep-kdnet-adapter"),
+        }), "primary"),
+        action("Remove KDNET", "debug_kdnet_deprovision", confirmed, "danger")),
+      el("div", { class: "row", style: "margin:12px 0 0" },
+        action("Prepare COM1 pipe", "debug_serial_prepare", () => ({
+          vm_name: state.vm, pipe_name: fieldValue("pipe-name"), confirm_vm: state.vm,
+        })),
+        action("Prepare guest BCD", "debug_guest_prepare", confirmed, "danger")),
+      el("p", { class: "hint", style: "margin:10px 0 0" },
+        "KDNET status: " + ((kdnet && kdnet.ok && kdnet.ok.prepared) ? "prepared on port " + (kdnet.ok.port || "?") : "not prepared")));
+
     return el("div", { class: "grid" },
       panel("COM1", "An existing named pipe. WinDbg must not own it at the same time.",
-        el("pre", { style: "margin:0 0 10px;font-size:.78rem;white-space:pre-wrap" },
-          JSON.stringify((status && status.ok) || (status && status.error) || {}, null, 2)),
-        el("div", { class: "row" }, field("Pipe", input_("pipe-name", "")), field("Log", input_("pipe-log", ""))),
-        el("div", { class: "row" },
-          action("Connect reader", "serial_connect", () => ({
-            vm_name: state.vm, pipe_name: fieldValue("pipe-name"), log_path: fieldValue("pipe-log"), confirm_vm: state.vm,
-          }), "primary"),
-          action("Read", "serial_read", vmArg),
-          action("Disconnect", "serial_disconnect", vmArg, "danger")),
-        el("div", { class: "row" }, el("textarea", { id: "serial-text", placeholder: "Text for the serial console" })),
-        el("div", { class: "row", style: "margin:0" },
-          action("Send", "serial_send", () => ({ vm_name: state.vm, text: fieldValue("serial-text"), append_newline: true })))),
-      panel("kd.exe", "The state the server reports, never a guessed one.",
-        el("pre", { style: "margin:0 0 10px;font-size:.78rem;white-space:pre-wrap" },
-          JSON.stringify((kd && kd.ok) || (kd && kd.error) || {}, null, 2)),
-        el("div", { class: "row" },
-          field("Transport", el("select", { id: "kd-transport" },
-            ...["kdnet", "serial"].map((t) => el("option", { value: t }, t)))),
-          field("Command", input_("kd-command", "!analyze -v"))),
-        el("div", { class: "row" },
-          action("Attach", "kd_attach", () => ({ vm_name: state.vm, transport: fieldValue("kd-transport") }), "primary"),
-          action("Break", "kd_break", vmArg),
-          action("Go", "kd_go", vmArg),
-          action("Stack", "kd_stack", vmArg),
-          action("Detach", "kd_detach", vmArg, "danger")),
-        el("div", { class: "row", style: "margin:0" },
-          action("Run command", "kd_command", () => ({ vm_name: state.vm, command: fieldValue("kd-command") })))),
-      panel("Debug preparation", "Host COM1 and guest BCD are separate, confirmed steps. Nothing reboots on its own.",
-        el("div", { class: "row", style: "margin:0" },
-          action("Prepare COM1", "debug_serial_prepare", () => ({ vm_name: state.vm, pipe_name: fieldValue("pipe-name"), confirm_vm: state.vm })),
-          action("Prepare guest BCD", "debug_guest_prepare", confirmed, "danger"),
-          action("KDNET status", "debug_kdnet_status", vmArg))));
+        el("pre", { class: "log", style: "margin:0 0 10px" },
+          JSON.stringify((status && status.ok) || (status && status.error) || {}, null, 2))),
+      kdPanel,
+      console_,
+      breakPanel,
+      inspectPanel,
+      preparePanel);
   },
 
   async guest() {
@@ -754,15 +917,104 @@ const builders = {
   },
 
   async lab() {
-    const diagnostics = await api().call("lab_diagnostics", vmArg());
+    const lab = labState();
+    const [diagnostics, receipts] = await Promise.all([
+      api().call("lab_diagnostics", vmArg()),
+      api().call("lab_receipts", { action: "list", vm_name: state.vm, limit: 25 }),
+    ]);
+    const items = (receipts && receipts.ok && receipts.ok.receipts) || [];
+    const sameVm = (name) => String(name || "").toLowerCase() === String(state.vm || "").toLowerCase();
+    // A workspace change must not leave the previous VM's run open under the
+    // new one's name: the record says which VM it belongs to.
+    if (lab.receipt && !sameVm((lab.receipt.receipt || {}).vm)) lab.receipt = null;
+    if (lab.report && !sameVm(lab.report.vm)) lab.report = null;
+    const factsOf = (diagnostics && diagnostics.ok) || null;
+
     return el("div", { class: "grid" },
-      panel("Diagnostics", "What the guest and the host report, as tokens rather than verdicts.",
-        el("pre", { style: "margin:0 0 10px;font-size:.78rem;white-space:pre-wrap;max-height:260px;overflow:auto" },
-          JSON.stringify((diagnostics && diagnostics.ok) || (diagnostics && diagnostics.error) || {}, null, 2)),
-        el("div", { class: "row", style: "margin:0" }, action("Refresh", "lab_diagnostics", vmArg))),
-      panel("Directories", "Fixed guest paths, created once, confirmed with the VM name.",
-        el("div", { class: "row", style: "margin:0" },
-          action("Initialize", "lab_init", confirmed, "primary"))),
+      panel("The cycle", "One blocking call. Its phases come from the service's own events, not from a guess at how far it got.",
+        el("div", { id: "cycle-live" }, "No lab operation has run in this window yet.")),
+      // Running a package exists only in the lab profile: elsewhere the server
+      // refuses the call, so the page does not offer a button that cannot work.
+      state.hello && state.hello.profile === "lab"
+        ? panel("Run the package", "Checkpoints first, then executes the staged package. The manifest hash below is the one the run must match.",
+            el("div", { class: "row" },
+              field("Package id", input_("lab-cycle-package", "")),
+              field("Manifest SHA-256", input_("lab-cycle-sha", ""))),
+            el("div", { class: "row" },
+              field("Run id", input_("lab-cycle-run", "run-1")),
+              field("Timeout (s)", input_("lab-timeout", "600", "number")),
+              field("Debugger", el("select", { id: "lab-debugger" },
+                ...["none", "serial", "kdnet"].map((name) => el("option", { value: name }, name))))),
+            el("div", { class: "row" },
+              field("Revert the checkpoint afterwards", el("input", { id: "lab-revert", type: "checkbox" })),
+              field("Collect the kernel dump", el("input", { id: "lab-dump", type: "checkbox", checked: "checked" }))),
+            el("div", { class: "row", style: "margin:0" },
+              action("Run", "lab_run", () => ({
+                vm_name: state.vm, package_id: fieldValue("lab-cycle-package"),
+                run_id: fieldValue("lab-cycle-run"), expected_manifest_sha256: fieldValue("lab-cycle-sha"),
+                timeout_seconds: Number(fieldValue("lab-timeout")) || 600,
+              })),
+              el("button", {
+                class: "act primary",
+                onclick: async (event) => {
+                  const button = event.currentTarget;
+                  button.disabled = true;
+                  try {
+                    const response = await call("lab_cycle", {
+                      vm_name: state.vm, package_id: fieldValue("lab-cycle-package"),
+                      run_id: fieldValue("lab-cycle-run"), expected_manifest_sha256: fieldValue("lab-cycle-sha"),
+                      timeout_seconds: Number(fieldValue("lab-timeout")) || 600,
+                      revert_after: checked("lab-revert"),
+                      include_kernel_dump: checked("lab-dump"),
+                      debugger: fieldValue("lab-debugger") || "none",
+                    });
+                    // The triage reads this report: a cycle that bugchecked
+                    // answers here before the receipt is even listed.
+                    if (response && response.ok) {
+                      labState().report = response.ok;
+                      labState().picked = [];
+                      labState().comparison = null;
+                    }
+                    await render();
+                  } finally {
+                    button.disabled = false;
+                  }
+                },
+              }, "Cycle")))
+        : panel("Manual run", "Outside the lab profile a package runs only by hand: an elevated operator invokes the runner in the guest with the approval phrase it asks for. Nothing here executes it.",
+            el("div", { class: "row", style: "margin:0" },
+              el("code", {}, "Invoke-DriverLabRun.ps1 -PackageId … -RunId … -ExpectedManifestSha256 … -ApproveExecution 'EXECUTE <package> <run>'"))),
+      lab.report
+        ? triagePanel(lab.report, "Read from this window's cycle: kd's !analyze -v merged with the host's crash record. The dump stays where it was collected.")
+        : null,
+      panel("Receipts", "One record per run under the evidence root, newest first. Click a row to pick it; two picks compare.",
+        receiptTable(items, lab),
+        el("div", { class: "row", style: "margin:12px 0 0" },
+          el("button", {
+            class: "act primary",
+            disabled: lab.picked.length === 2 ? null : "disabled",
+            onclick: comparePicks,
+          }, "Compare the two picked"),
+          el("button", {
+            class: "act",
+            onclick: async () => { lab.picked = []; lab.comparison = null; await render(); },
+          }, "Clear"),
+          el("button", { class: "act", onclick: async () => { await render(); } }, "Refresh"),
+          el("span", { class: "hint", style: "margin:0" },
+            lab.picked.length ? "picked: " + lab.picked.join(" and ") : "no run picked")),
+        receipts && receipts.ok && receipts.ok.truncated
+          ? el("p", { class: "hint", style: "margin:8px 0 0" },
+              "Showing the newest 25 of " + receipts.ok.count + " runs.")
+          : null,
+        receipts && receipts.ok && (receipts.ok.skipped || []).length
+          ? el("p", { class: "hint", style: "margin:8px 0 0" },
+              "Skipped, because no readable record was there: " + receipts.ok.skipped.join(", "))
+          : null),
+      receiptPanel(lab),
+      lab.receipt
+        ? triagePanel(lab.receipt, "Read from the receipt: the record keeps the crash, stack included, so a run can be triaged long after the window that ran it closed.")
+        : (lab.report ? null : triagePanel(null)),
+      comparePanel(lab),
       panel("Stage a package", "Hash-verified on both sides before anything else sees it.",
         el("div", { class: "row" },
           field("Source directory", input_("lab-source", "")),
@@ -772,52 +1024,59 @@ const builders = {
       panel("Verify and collect", "Reading evidence, never running it.",
         el("div", { class: "row" },
           field("Package id", input_("lab-verify-package", "")),
-          field("Manifest SHA-256", input_("lab-sha", ""))),
+          field("Manifest SHA-256", input_("lab-verify-sha", ""))),
         el("div", { class: "row" },
           field("Run id", input_("lab-run", "run-1")),
-          field("Kernel dump", el("input", { id: "lab-dump", type: "checkbox", checked: "checked" }))),
+          field("Kernel dump", el("input", { id: "lab-collect-dump", type: "checkbox", checked: "checked" }))),
         el("div", { class: "row", style: "margin:0" },
           action("Verify", "lab_verify", () => ({
-            vm_name: state.vm, package_id: fieldValue("lab-verify-package"), expected_manifest_sha256: fieldValue("lab-sha"),
+            vm_name: state.vm, package_id: fieldValue("lab-verify-package"), expected_manifest_sha256: fieldValue("lab-verify-sha"),
           })),
           action("Collect", "lab_collect", () => ({
             vm_name: state.vm, package_id: fieldValue("lab-verify-package"),
-            run_id: fieldValue("lab-run"), include_kernel_dump: checked("lab-dump"),
+            run_id: fieldValue("lab-run"), include_kernel_dump: checked("lab-collect-dump"),
           }), "primary"))),
-      // Running a package exists only in the lab profile: elsewhere the server
-      // refuses the call, so the page does not offer a button that cannot work.
-      state.hello && state.hello.profile === "lab"
-        ? panel("Run the package", "Checkpoints first, then executes the staged package. The manifest hash above is the one the run must match.",
-            el("div", { class: "row" },
-              field("Run id", input_("lab-cycle-run", "run-1")),
-              field("Timeout (s)", input_("lab-timeout", "600", "number")),
-              field("Debugger", el("select", { id: "lab-debugger" },
-                ...["none", "serial", "kdnet"].map((name) => el("option", { value: name }, name))))),
-            el("div", { class: "row" },
-              field("Revert the checkpoint afterwards", el("input", { id: "lab-revert", type: "checkbox" }))),
-            el("div", { class: "row", style: "margin:0" },
-              action("Run", "lab_run", () => ({
-                vm_name: state.vm, package_id: fieldValue("lab-verify-package"),
-                run_id: fieldValue("lab-cycle-run"), expected_manifest_sha256: fieldValue("lab-sha"),
-                timeout_seconds: Number(fieldValue("lab-timeout")) || 600,
-              })),
-              action("Cycle", "lab_cycle", () => ({
-                vm_name: state.vm, package_id: fieldValue("lab-verify-package"),
-                run_id: fieldValue("lab-cycle-run"), expected_manifest_sha256: fieldValue("lab-sha"),
-                timeout_seconds: Number(fieldValue("lab-timeout")) || 600,
-                revert_after: checked("lab-revert"),
-                include_kernel_dump: checked("lab-dump"),
-                debugger: fieldValue("lab-debugger") || "none",
-              }), "primary")))
-        : panel("Manual run", "Outside the lab profile a package runs only by hand: an elevated operator invokes the runner in the guest with the approval phrase it asks for. Nothing here executes it.",
-            el("div", { class: "row", style: "margin:0" },
-              el("code", {}, "Invoke-DriverLabRun.ps1 -PackageId … -RunId … -ExpectedManifestSha256 … -ApproveExecution 'EXECUTE <package> <run>'"))));
+      panel("Diagnostics", "What the guest and the host report, as tokens rather than verdicts.",
+        factsOf
+          ? facts([
+              ["VM", factsOf.vm],
+              ["Test signing", factsOf.test_signing === undefined ? "—" : String(factsOf.test_signing)],
+              ["Kernel debug", factsOf.debug_enabled === undefined ? "—" : String(factsOf.debug_enabled)],
+              ["OS", factsOf.os],
+              ["Collected", factsOf.collected === undefined ? "—" : String(factsOf.collected)],
+            ])
+          : el("p", { class: "hint", style: "margin:0" },
+              (diagnostics && diagnostics.error && diagnostics.error.message) || "The guest did not answer."),
+        el("pre", { class: "log", style: "margin:10px 0 0" },
+          JSON.stringify(factsOf || (diagnostics && diagnostics.error) || {}, null, 2)),
+        el("div", { class: "row", style: "margin:10px 0 0" }, action("Refresh", "lab_diagnostics", vmArg))),
+      panel("Directories", "Fixed guest paths, created once, confirmed with the VM name.",
+        el("div", { class: "row", style: "margin:0" },
+          action("Initialize", "lab_init", confirmed, "primary"))));
   },
 
   async files() {
     const files = fileState();
     const roots = await api().call("file_roots", {});
     const listed = (roots && roots.ok && roots.ok.roots) || [];
+    // A jump from another page names an absolute path; this manager works in a
+    // root plus a relative path, so the root is found by prefix and the rest
+    // becomes the listing path. A path under no configured root is said out
+    // loud rather than shown as an empty directory.
+    if (files.open) {
+      const target = files.open;
+      const match = listed
+        .filter((root) => root.path && target.toLowerCase().startsWith(String(root.path).toLowerCase()))
+        .sort((a, b) => String(b.path).length - String(a.path).length)[0];
+      if (match) {
+        files.root = match.name;
+        files.host = target.slice(String(match.path).length).replace(/^\\+/, "");
+        files.note = "";
+      } else {
+        files.note = target + " is outside every configured host root, so the file manager cannot show it.";
+      }
+      files.open = "";
+    }
     // A root that vanished from the configuration must not stay selected: the
     // page asks for what the service named, not for what it remembered.
     if (!listed.some((root) => root.name === files.root)) {
@@ -862,6 +1121,7 @@ const builders = {
               },
             }, "Open"))
         : el("p", { class: "hint" }, "No host root is configured."),
+      files.note ? el("p", { class: "hint", style: "margin:0 0 10px" }, files.note) : null,
       chosen ? pathLine(hostFull(chosen.path, files.host), files.host ? up("host", files.host) : null) : null,
       hostDirectory
         ? fileTable(hostDirectory.entries, "host", files, chosen)
@@ -1158,7 +1418,11 @@ async function confirmCheckpoint(pending) {
 // A render rebuilds the page, so this cannot live in a local variable.
 function fileState() {
   if (!state.files) {
-    state.files = { root: "", host: "", guest: "C:\\DriverLab", renaming: null, pending: null, last: null };
+    state.files = {
+      root: "", host: "", guest: "C:\\DriverLab", renaming: null, pending: null, last: null,
+      // A path another page asked to show, and what became of it.
+      open: "", note: "",
+    };
   }
   return state.files;
 }
@@ -1308,6 +1572,318 @@ function drawTransfer() {
   if (detail) detail.textContent = state.files && state.files.last ? "sha256 " + state.files.last.sha256 : "";
 }
 
+/* ---------- the lab, the debugger and the crash triage ---------- */
+// Both pages keep their own memory here. A render rebuilds the DOM, so the
+// last report, the picked runs and the serial tail cannot be locals.
+function labState() {
+  if (!state.lab) state.lab = { report: null, picked: [], comparison: null, receipt: null };
+  return state.lab;
+}
+
+function debugState() {
+  if (!state.debug) {
+    state.debug = { serial: "", serialOn: false, note: "", lastCommand: null };
+  }
+  return state.debug;
+}
+
+function outcomeBadge(outcome) {
+  const name = String(outcome || "running");
+  return el("span", { class: "outcome " + name }, name);
+}
+
+// The triage reads one of two shapes, because a cycle can leave both: the
+// report a cycle returns, where kd's reading is nested under `bugcheck`, and
+// the receipt `lab_receipts` returns, where the record already flattened it.
+// They carry the same field names, so the page draws whichever it was handed.
+function triageView(source) {
+  if (!source || typeof source !== "object") return null;
+  const crash = source.crash && typeof source.crash === "object" ? source.crash : null;
+  if (!crash) return null;
+  const debug = source.debugger && typeof source.debugger === "object" ? source.debugger : null;
+  const flat = crash.bugcheck && typeof crash.bugcheck === "object" ? crash.bugcheck : crash;
+  return {
+    code: flat.bugcheck_code,
+    name: flat.bugcheck_str,
+    parameters: flat.bugcheck_parameters || [],
+    bucket: flat.failure_bucket_id || flat.default_bucket_id,
+    driver: flat.blamed_driver,
+    symbol: flat.symbol_name,
+    resolved: flat.symbols_resolved,
+    frames: flat.top_frames || [],
+    sources: flat.sources || [],
+    analyzed: crash.analyzed,
+    dump: crash.dump,
+    kdLog: crash.kd_log,
+    reason: crash.reason || crash.message || crash.error || null,
+    transport: debug ? debug.transport : null,
+    event: debug ? debug.event : null,
+    symbols: debug && debug.symbols ? debug.symbols : null,
+  };
+}
+
+function triagePanel(source, hint) {
+  const view = triageView(source);
+  if (!view) {
+    return panel("Crash triage", hint || "What kd said about the last crash, formatted instead of raw.",
+      el("p", { class: "hint", style: "margin:0" },
+        "No crash to read yet. A cycle that bugchecks fills this in on its own."));
+  }
+  const frames = view.frames.length
+    ? el("table", { class: "events changed" },
+        el("thead", {}, el("tr", {}, ...["Frame", "Address", "Symbol"].map((head) => el("th", {}, head)))),
+        el("tbody", {}, ...view.frames.map((frame) => el("tr", {},
+          el("td", {}, String(frame.frame ?? "—")),
+          el("td", {}, frame.address || "—"),
+          el("td", {}, frame.symbol || "—")))))
+    : el("p", { class: "hint", style: "margin:10px 0 0" },
+        view.analyzed === false
+          ? "kd did not analyze this run's crash: " + (view.reason || "no dump was collected")
+          : "kd reported no stack frames.");
+  return panel("Crash triage", hint || "Read from kd's !analyze -v and the host's crash record. The dump stays where it was collected.",
+    el("p", { class: "triage-code" }, view.code || "no bugcheck code",
+      view.name ? el("small", {}, view.name) : null),
+    facts([
+      ["Bucket", view.bucket],
+      ["Blamed driver", view.driver],
+      ["Symbol", view.symbol],
+      ["Symbols resolved", view.resolved === undefined || view.resolved === null ? "—" : String(view.resolved)],
+      ["Parameters", view.parameters.length ? view.parameters.join(" ") : ""],
+      ["Sources", view.sources.length ? view.sources.join(", ") : ""],
+      ["Debugger", view.transport ? view.transport + " · " + (view.event || "—") : ""],
+      ["Dump", view.dump],
+      ["kd log", view.kdLog],
+    ]),
+    view.symbols && view.symbols.all_loaded !== undefined
+      ? el("p", { class: "hint", style: "margin:8px 0 0" },
+          "Driver symbols: " + (view.symbols.resolved || []).join(", ") +
+          ((view.symbols.unresolved || []).length ? " · unresolved: " + view.symbols.unresolved.join(", ") : "") +
+          (view.symbols.all_loaded ? " · all loaded" : ""))
+      : null,
+    el("div", { style: "margin-top:12px" }, frames),
+    view.dump
+      ? el("div", { class: "row", style: "margin:10px 0 0" },
+          el("button", { class: "act", onclick: () => openFiles(dropLast(view.dump)) }, "Show the dump in Files"),
+          el("span", { class: "mono", style: "font-size:.74rem;color:var(--muted)" }, view.dump))
+      : null);
+}
+
+// A jump from another page names an absolute path; the file manager works in a
+// root plus a relative path, so it resolves the root by prefix when it opens.
+function openFiles(absolute) {
+  fileState().open = String(absolute || "");
+  state.page = "files";
+  render();
+}
+
+/* ---------- the live serial console ---------- */
+// The kd console and the serial reader share one COM pipe, so only one of them
+// may read it. `kd_attach` detaches the serial reader when it takes the pipe;
+// the page shows which of the two owns it instead of offering a refused button.
+const SERIAL_INTERVAL_MS = 1000;
+let serialTimer = null;
+
+function stopSerial() {
+  if (serialTimer) { clearTimeout(serialTimer); serialTimer = null; }
+}
+
+function startSerial() {
+  stopSerial();
+  if (debugState().serialOn) serialTimer = setTimeout(serialPump, 0);
+}
+
+function drawSerial() {
+  const box = document.getElementById("serial-log");
+  if (!box) return;
+  const debug = debugState();
+  box.textContent = debug.serial || "";
+  box.scrollTop = box.scrollHeight;
+  const note = document.getElementById("serial-note");
+  if (note) note.textContent = debug.note || (debug.serialOn ? "reading the pipe" : "not reading");
+  // The loop stops itself when the pipe is gone, so the button says what the
+  // loop is doing rather than what was last clicked.
+  const toggle = document.getElementById("serial-toggle");
+  if (toggle) toggle.textContent = debug.serialOn ? "Stop reading" : "Read live";
+}
+
+async function serialPump() {
+  serialTimer = null;
+  const debug = debugState();
+  const box = document.getElementById("serial-log");
+  // The page was rebuilt or the workspace moved on: the element is what says
+  // the loop is still wanted.
+  if (!box || !debug.serialOn || state.page !== "debugger") return;
+  const response = await api().call("serial_read", { vm_name: state.vm, tail_chars: 65536 });
+  if (!debug.serialOn) return;
+  if (response && response.ok) {
+    // `read` returns the tail of the whole buffer, so the newest read replaces
+    // the last one instead of being appended to it.
+    debug.serial = String(response.ok.text || "");
+    debug.note = "";
+  } else {
+    debug.note = (response && response.error && response.error.message) || "the serial read failed";
+    // A pipe that is gone is not a transient failure: stop asking.
+    debug.serialOn = false;
+  }
+  drawSerial();
+  if (debug.serialOn && state.page === "debugger") serialTimer = setTimeout(serialPump, SERIAL_INTERVAL_MS);
+}
+
+/* ---------- the lab's live cycle ---------- */
+// A cycle is one blocking service call; the service publishes its phases on the
+// shared bus, and this draws the newest one rather than inventing progress.
+const LAB_OPERATIONS = new Set(["lab_cycle", "lab_run", "lab_stage", "lab_collect"]);
+
+function drawCycle() {
+  const host = document.getElementById("cycle-live");
+  if (!host) return;
+  const relevant = state.events.filter((event) =>
+    LAB_OPERATIONS.has(event.operation) &&
+    String(event.vm_name || "").toLowerCase() === String(state.vm || "").toLowerCase());
+  const last = relevant[relevant.length - 1];
+  if (!last) {
+    host.textContent = "No lab operation has run in this window yet.";
+    return;
+  }
+  const same = relevant.filter((event) => event.correlation_id === last.correlation_id);
+  const progress = [...same].reverse().find((event) => event.phase === "progress");
+  const failed = same.some((event) => event.phase === "failed");
+  const done = same.some((event) => event.phase === "completed");
+  const percent = failed ? 100 : progress ? Number(progress.progress) || 0 : done ? 100 : 0;
+  host.replaceChildren(
+    el("div", { class: "row", style: "margin:0 0 6px;align-items:center" },
+      el("span", { class: "mono" }, last.operation),
+      outcomeBadge(failed ? "failed" : done ? "ok" : "running")),
+    el("progress", { class: "transfer", max: "100", value: String(percent) }),
+    el("div", { class: "transfer-line" },
+      el("span", {}, failed ? "failed" : progress ? (progress.message || "") : done ? "completed" : "starting"),
+      el("span", {}, String(last.started_utc || "").slice(11, 19))));
+}
+
+/* ---------- receipts ---------- */
+// A value as the comparison reported it: a string stands for itself, anything
+// structured is shown as the JSON the record holds.
+function shown(value) {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function receiptTable(items, lab) {
+  if (!items.length) {
+    return el("p", { class: "hint", style: "margin:0" },
+      "No run has left a receipt under the evidence root yet.");
+  }
+  return el("table", { class: "events" },
+    el("thead", {}, el("tr", {}, ...["Run", "Finished", "Outcome", "Package", "Blame", "Files", ""].map((head) => el("th", {}, head)))),
+    el("tbody", {}, ...items.map((item) => {
+      const picked = lab.picked.includes(item.run_id);
+      return el("tr", { class: picked ? "picked" : null, style: "cursor:pointer", onclick: () => pickReceipt(item.run_id) },
+        el("td", { class: "mono" }, item.run_id || "—"),
+        el("td", {}, String(item.finished_utc || "").replace("T", " ").slice(0, 19)),
+        el("td", {}, outcomeBadge(item.outcome)),
+        el("td", { class: "mono" }, item.package_id || "—"),
+        el("td", {}, item.blamed_driver || "—"),
+        el("td", {}, String(item.evidence_files === undefined ? 0 : item.evidence_files)),
+        el("td", {}, el("button", {
+          class: "act",
+          onclick: (event) => { event.stopPropagation(); openReceipt(item.run_id); },
+        }, "Open")));
+    })));
+}
+
+async function openReceipt(runId) {
+  const response = await call("lab_receipts", { action: "get", run_ids: [runId] });
+  const lab = labState();
+  lab.receipt = response && response.ok && response.ok.found ? response.ok : null;
+  await render();
+}
+
+function pickReceipt(runId) {
+  const lab = labState();
+  const index = lab.picked.indexOf(runId);
+  if (index >= 0) lab.picked.splice(index, 1);
+  else {
+    lab.picked.push(runId);
+    // A comparison is two runs; a third pick replaces the oldest, which is what
+    // a second click on a different row is asking for.
+    if (lab.picked.length > 2) lab.picked.shift();
+  }
+  lab.comparison = null;
+  render();
+}
+
+async function comparePicks() {
+  const lab = labState();
+  if (lab.picked.length !== 2) return;
+  const response = await call("lab_receipts", { action: "compare", run_ids: [...lab.picked] });
+  lab.comparison = (response && response.ok) || null;
+  await render();
+}
+
+function receiptPanel(lab) {
+  if (!lab.receipt) return null;
+  const receipt = lab.receipt.receipt || {};
+  const evidence = lab.receipt.evidence || [];
+  return panel("Open receipt: " + (receipt.run_id || ""),
+    "The record and the files it collected. The host path is where each one is now.",
+    facts([
+      ["VM", receipt.vm],
+      ["Outcome", receipt.outcome],
+      ["Detail", receipt.detail],
+      ["Package", receipt.package_id],
+      ["Manifest SHA-256", receipt.manifest_sha256],
+      ["Verified", receipt.verified === undefined ? "—" : String(receipt.verified)],
+      ["Files verified", receipt.files_verified],
+      ["Started", receipt.started_utc],
+      ["Finished", receipt.finished_utc],
+      ["Duration (s)", receipt.duration_seconds],
+      ["Payload executed", receipt.payload_executed === undefined ? "—" : String(receipt.payload_executed)],
+      ["Debugger", receipt.debugger_transport],
+      ["Debugger event", receipt.debugger_event],
+      ["Checkpoint", receipt.checkpoint],
+      ["Reverted", receipt.reverted === undefined ? "—" : String(receipt.reverted)],
+      ["Record", receipt.path],
+      ["Record SHA-256", receipt.sha256],
+    ]),
+    evidence.length
+      ? el("table", { class: "events changed", style: "margin-top:12px" },
+          el("thead", {}, el("tr", {}, ...["File", "Size", "SHA-256", ""].map((head) => el("th", {}, head)))),
+          el("tbody", {}, ...evidence.map((item) => el("tr", {},
+            el("td", { class: "mono" }, item.path),
+            el("td", {}, String(item.size === undefined || item.size === null ? "—" : item.size)),
+            el("td", { class: "mono" }, item.sha256 || "—"),
+            el("td", {}, el("button", { class: "act", onclick: () => openFiles(dropLast(item.host_path)) }, "Show"))))))
+      : el("p", { class: "hint", style: "margin:12px 0 0" }, "This run collected no files."),
+    el("div", { class: "row", style: "margin:12px 0 0" },
+      el("button", { class: "act", onclick: async () => { labState().receipt = null; await render(); } }, "Close")));
+}
+
+function comparePanel(lab) {
+  const compared = lab.comparison;
+  if (!compared) return null;
+  if (!compared.compared) {
+    return panel("Comparison", "Two receipts, field by field.",
+      el("p", { class: "hint", style: "margin:0" }, compared.reason || "The comparison could not be made."));
+  }
+  const first = compared.first || {};
+  const second = compared.second || {};
+  const rows = compared.different.length
+    ? el("table", { class: "events changed" },
+        el("thead", {}, el("tr", {}, ...["Field", first.run_id || "first", second.run_id || "second"].map((head) => el("th", {}, head)))),
+        el("tbody", {}, ...compared.different.map((item) => el("tr", {},
+          el("td", {}, item.field),
+          el("td", {}, item.absent_on === "first" ? "(absent)" : shown(item.first)),
+          el("td", {}, item.absent_on === "second" ? "(absent)" : shown(item.second))))))
+    : el("p", { class: "hint", style: "margin:0" }, "The two runs are identical in every field compared.");
+  return panel("Comparison", "What changed between the two runs. A field one side never had is marked absent, not changed to nothing.",
+    el("p", { class: "hint", style: "margin:0 0 10px" },
+      compared.identical
+        ? "Identical in all " + compared.same.length + " fields."
+        : compared.different.length + " of " + (compared.same.length + compared.different.length) + " fields differ."),
+    rows);
+}
+
 /* ---------- chrome ---------- */
 function renderConn() {
   const node = document.getElementById("conn");
@@ -1392,6 +1968,10 @@ async function render() {
   }
   if (state.page === "activity") drawActivity();
   if (state.page === "files") drawTransfer();
+  if (state.page === "lab") drawCycle();
+  // The serial loop draws into an element this render just replaced, so it is
+  // restarted here and left to die on its next tick when the page moves on.
+  if (state.page === "debugger") { drawSerial(); startSerial(); } else { stopSerial(); }
 }
 
 function go(key) {
@@ -1463,6 +2043,7 @@ async function watchEvents() {
             state.cursor = Math.max(state.cursor, response.ok.latest_sequence || 0);
             if (state.page === "activity") drawActivity();
             if (state.page === "files") drawTransfer();
+            if (state.page === "lab") drawCycle();
           } else if ((response.ok.latest_sequence || 0) > state.cursor) {
             state.cursor = response.ok.latest_sequence;
           }
