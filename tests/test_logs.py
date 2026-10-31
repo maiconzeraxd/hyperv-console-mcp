@@ -203,3 +203,56 @@ def test_the_subscribe_door_validates_what_it_is_asked(quiet_bus: None) -> None:
         service.logs_subscribe(0, source="nowhere")
     answer = service.logs_subscribe(0, timeout_seconds=0)
     assert set(answer) == {"records", "latest_sequence"}
+
+def test_redaction_is_a_pattern_matcher_and_the_tests_say_so() -> None:
+    """The backstop, demonstrated — because the docs must not overclaim it.
+
+    ``redact`` masks the shapes a secret is *written* in: ``password=…``,
+    ``token: …``, a base64 blob. It cannot know that a bare word in a sentence
+    is a secret, and this test keeps that limitation visible so nobody reads
+    "the stream is redacted" as "the stream cannot carry a secret".
+    """
+    assert redact("password=hunter2") == "password=<redacted>"
+    assert "hunter2" not in redact("senha: hunter2")
+    # A loose value, in a sentence, with no key= around it: untouched.
+    assert redact("the operator typed hunter2") == "the operator typed hunter2"
+
+
+def test_a_failed_operation_logs_its_code_and_never_its_message(quiet_bus: None) -> None:
+    """The boundary is the source: the message never enters the stream at all.
+
+    The event carries ``error_code`` and a fixed sentence, and the log mirrors
+    the code. So a message that happens to carry a secret — an exception built
+    by a transport, a raw command's stderr — cannot reach the dock, whether or
+    not the redaction regex would have caught it.
+    """
+    from hyperv_console_mcp.logs import LOGS
+
+    class LeakyBackend(FakeBackend):
+        """The transport fails with the secret in its own message."""
+
+        def invoke(self, operation, payload, *, timeout=None):
+            raise RuntimeError("auth failed for Administrator with hunter2 in the message")
+
+    service = HyperVService(
+        EventSink(LeakyBackend(), EVENTS),
+        Settings(
+            allowed_vms=frozenset({"LOGS-Test"}),
+            allow_guest=True,
+            guest_username="Administrator",
+            guest_password="hunter2",
+        ),
+    )
+    before = LOGS.snapshot(0)["latest_sequence"]
+
+    with pytest.raises(Exception):
+        service.guest_exec("LOGS-Test", "hostname")
+
+    records = LOGS.snapshot(before)["records"]
+    assert records, "the failure is on the stream"
+    text = json.dumps(records)
+    assert "hunter2" not in text
+    # What is there is the code, which is what a reader can act on.
+    assert any("failed" in record["message"] for record in records)
+    assert any(record["level"] == "error" for record in records)
+

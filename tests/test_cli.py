@@ -9,6 +9,8 @@ at all. The guess is a guess, which is why ``--stdio`` and ``--ui`` exist.
 
 from __future__ import annotations
 
+import importlib
+import sys
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +18,7 @@ from typing import Any
 
 import pytest
 
+import hyperv_console_mcp
 from hyperv_console_mcp import __version__, cli
 
 
@@ -229,6 +232,7 @@ def test_the_help_lists_the_three_doors(
     assert "127.0.0.1" in printed
     assert ran == []
 
+
 def test_the_window_is_the_page_when_webview2_is_installed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -269,4 +273,57 @@ def test_without_webview2_the_dashboard_still_opens(
 )
 def test_the_vm_flag_is_read_from_either_spelling(arguments: list[str], expected: str | None) -> None:
     assert cli._vm_flag(arguments) == expected
+
+
+def _without_tkinter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``import tkinter`` fail the way a Python built without it does.
+
+    ``None`` in ``sys.modules`` is the documented way to say "this module is
+    not importable", and it is what the interpreter does when Tk is missing —
+    no dependence on whether the test host happens to have it.
+    """
+    monkeypatch.setitem(sys.modules, "tkinter", None)
+    for name in ("tkinter.ttk", "tkinter.filedialog", "tkinter.messagebox"):
+        monkeypatch.setitem(sys.modules, name, None)
+    monkeypatch.delitem(sys.modules, "hyperv_console_mcp.dashboard_tk", raising=False)
+    monkeypatch.delitem(sys.modules, "hyperv_console_mcp.dashboard", raising=False)
+    # ``from package import submodule`` answers from the package attribute when it
+    # is already there, so a module another test imported has to be forgotten in
+    # both places or the block is never consulted.
+    monkeypatch.delattr(hyperv_console_mcp, "dashboard_tk", raising=False)
+    monkeypatch.delattr(hyperv_console_mcp, "dashboard", raising=False)
+
+
+def test_the_classic_window_module_imports_on_a_host_without_tkinter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback is optional since v0.4, so importing it must not need Tk.
+
+    It did: ``dashboard.py`` imported tkinter at module level, and the Linux CI
+    job — which runs the suite without ``python3-tk`` — failed to even collect
+    the tests that reach the fallback path.
+    """
+    _without_tkinter(monkeypatch)
+
+    module = importlib.import_module("hyperv_console_mcp.dashboard")
+
+    assert module.main is not None
+    # And nothing dragged the drawing module in with it.
+    assert "hyperv_console_mcp.dashboard_tk" not in sys.modules
+
+
+def test_the_fallback_without_tk_says_what_to_install(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A missing Tk is a named problem with a fix, not a traceback."""
+    _without_tkinter(monkeypatch)
+    monkeypatch.setattr("hyperv_console_mcp.webui.window.available", lambda: False)
+
+    with pytest.raises(SystemExit) as caught:
+        cli._window([])
+
+    assert caught.value.code == 2
+    message = capsys.readouterr().err
+    assert "tkinter" in message
+    assert "python3-tk" in message
 

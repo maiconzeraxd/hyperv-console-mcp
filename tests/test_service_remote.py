@@ -278,7 +278,11 @@ def test_every_service_method_a_client_calls_exists_on_the_service() -> None:
     # The parenthesis keeps a module path (``service.host``) out of the sweep:
     # only a call is a call.
     server = _called_names(PACKAGE / "server.py", r"service\.([a-z_]+)\(")
-    dashboard = _called_names(PACKAGE / "dashboard.py", r"self\.service\.([a-z_]+)\(")
+    # The window's calls live in dashboard_tk since the tkinter half moved out of
+    # dashboard.py, so both files are swept: the sweep is about names, not files.
+    dashboard = _called_names(PACKAGE / "dashboard.py", r"self\.service\.([a-z_]+)\(") | _called_names(
+        PACKAGE / "dashboard_tk.py", r"self\.service\.([a-z_]+)\("
+    )
     assert server and dashboard
     # ``settings`` is a local attribute, not a remote method; everything else a
     # client touches must exist on the façade.

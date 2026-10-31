@@ -2525,6 +2525,100 @@ roadmap's §2 is explicit: no arguments means the interface, and the service com
   WebView2 window unattended was left out of this run; the window itself has been exercised in
   earlier waves through `--serve` in a real browser, which is the same page and the same service.
 
+### 2026-10-30 — v0.4 fixes 1: tkinter is optional, so it is not imported to be optional
+
+The Linux CI job runs the suite without `python3-tk`, and it could not even collect two tests:
+`dashboard.py` imported tkinter at module level, and `cli._window`'s fallback imports
+`dashboard.main`. Since v0.4 the classic window is an optional fallback, and importing an optional
+dependency eagerly is simply wrong.
+
+- **The module was split.** `dashboard.py` keeps what does not draw — `initial_vm_name`, the notes,
+  `main` — and imports no tkinter at all. `dashboard_tk.py` holds the four classes and the two
+  functions that open the window, and is imported only when somebody asks for it.
+- **A host without Tk gets a sentence, not a traceback.** `dashboard.NoTkinter` is raised by
+  `_classic_window` and printed by `main` (a missing Tk also means no message box, so the console is
+  the only place left), naming both fixes: `python3-tk` or the `[ui]` extra. Exit code 2.
+- **Two tests moved with the code**: `test_dashboard.py` imports `Dashboard` from `dashboard_tk`, and
+  `test_service_remote.py` sweeps both files for `self.service.<method>(` calls, since the sweep is
+  about names and not about which file they are in.
+- Tests: `tests/test_cli.py` two (importing `dashboard` succeeds with tkinter blocked, and the
+  fallback says what to install instead of raising `ModuleNotFoundError`). Both fail against the old
+  module layout.
+- **Proved with Tk blocked**: the whole suite runs as a host without Tk would —
+  `1179 passed, 2 skipped` (the dashboard tests skip themselves, as they already did), against
+  `1191 passed` with Tk present.
+- Gate: 1191 passed / 1 skipped, ruff clean.
+
+### 2026-10-30 — v0.4 fixes 2: the worker's actions are service calls, so the scripts can go
+
+The two personal scripts (`Start-NorthLabWorker.ps1`, `Invoke-NorthLab.ps1`) were a convenience
+around this service. They are not in this repository, and they do not need to be: every action they
+performed is a method the service already had, with nothing in it that stops to ask a person.
+
+| Action | Service methods |
+| --- | --- |
+| Status | `host_status`, `get_vm`, `guest_status`, `guest_transport_status`, `lab_diagnostics` |
+| StagePackage | `lab_stage`, `guest_publish_package` |
+| SyncSymbols | `kd_symbols` |
+| Checkpoint | `create_checkpoint`, `list_checkpoints` |
+| Reboot | `power` |
+| LiveTest | `lab_run`, `lab_cycle` |
+
+The table lives in code — `hyperv_console_mcp.lab.worker.WORKER_ACTIONS` — and `tests/test_lab_worker.py`
+reads it back against the façade and against this page, so a row cannot name a method that does not
+exist or drift from what is written here. The MCP tool names differ for some of them (`power` is
+`vm_power`, `create_checkpoint` is `checkpoint`); the table names the service method, which is what
+the scripts were doing and what the window calls.
+
+**Why the scripts could be dropped, asserted rather than assumed:**
+
+- `-NonInteractive` on every PowerShell launch the package emits (checked by looking ahead from each
+  launch, since the command lines are built by concatenation), and on the host backend's argument
+  list, which is what runs every Hyper-V command.
+- `-Confirm:$false` on every destructive cmdlet in the bridge (`Stop-VM`, `Restart-VM`,
+  `Checkpoint-VM`, `Restore-VMSnapshot`, `Remove-VMSnapshot`, `Set-VMFirmware`, `Debug-VM`, …).
+- No `Get-Credential` and no `Read-Host` anywhere in the package: the guest credential is built as a
+  `PSCredential` from the vault entry the request carries, and `New-PSSession -Credential` uses it.
+
+**How the worker is replaced in practice:** the operator no longer runs a `.ps1` at all. The service
+is started once (`hyperv-console-mcp`, or the installed service), the interface drives it, and the AI
+drives the same methods over MCP. There is no separate bootstrap path left to keep in sync.
+
+### 2026-10-30 — v0.4 fixes 3: redaction is the second line, and the first one is not writing it
+
+`logs.redact` masks the shapes a secret is written in. That is a pattern matcher, and the docs said
+"a message that never carries a secret" without saying how the guarantee is actually kept.
+
+- **The audit found the boundary is upstream.** Only two places feed the stream: `events._log` and
+  the transfer progress reporter. A failing operation publishes `error_code` and a fixed sentence —
+  never `str(exc)` — and the log mirrors the code; `guest_exec` carries the command and its output
+  nowhere near the stream; progress lines carry byte counts and SHA-256 digests. So the regex only
+  has to catch what a person writes by hand.
+- **`SECURITY.md` now says which is which**: redaction is a backstop, the boundary is the source.
+  A bare secret in a sentence passes the regex untouched, and the test suite asserts that on purpose
+  so the claim cannot quietly grow.
+- Tests: `tests/test_logs.py` two (the limitation, demonstrated — `password=hunter2` masked,
+  `the operator typed hunter2` not; and a transport that fails with the secret in its own message
+  reaches the stream as a code, with the secret absent). The failure test is the one that would
+  fail if `_log` ever logged `str(exc)`: the message has no `key=`, so redaction would not save it.
+
+### 2026-10-30 — v0.4 fixes 4: three ends of the `--serve` listener, closed
+
+- **`Content-Security-Policy` on the page**: `default-src 'none'`, `'unsafe-inline'` for the script
+  and style the single file already contains, `img-src data:` for the console's screenshot,
+  `connect-src 'self'` for the page's own `fetch`, and no frames, forms or base URI. Sent with the
+  document only; a JSON answer has nothing to load.
+- **`SECURITY.md` says what the token is worth**: the listener dispatches with `actor="ui"`, an
+  operator actor, so holding the token means speaking as the operator with no approval card. The
+  policy, allowlist, level, `confirm_*` fields and audit still apply — and the token travels in a
+  URL, so it lands in browser history, which `Referrer-Policy: no-referrer` does not undo.
+- Tests: `tests/test_webui_serve.py` three (the page carries the policy and really is inline-only, a
+  JSON answer does not carry it, and the page is refused without a token *even with a loopback
+  `Host`* — the token is the guard, not the bind address).
+- **Verified live**: the served page answered with the header, and a CDP run loaded it, opened the
+  workspace and mounted the xterm terminal with **zero** console or security entries — the policy
+  costs the page nothing because everything it needs is inline.
+
 ## Install wave report
 
 **What was delivered, by section.** §0: nothing to edit by hand — the wizard asks the three
