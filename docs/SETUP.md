@@ -107,6 +107,54 @@ The notification-area icon is a separate optional extra — `pip install "hyperv
 
 The process must have Hyper-V management permission. Run the MCP host elevated or grant the intended account Hyper-V Administrators access through your normal administrative process. The server never changes host group membership or UAC settings.
 
+### "Hyper-V access denied" — the one-time permission fix
+
+Being a local administrator is not enough. A standard (non-elevated) process has its administrator
+group filtered out by UAC, so unless the account is also in **Hyper-V Administrators** every call
+that touches the host — `hyperv_host_status`, `vm_power`, checkpoints, media, and PowerShell Direct
+— comes back as:
+
+```
+Hyper-V access denied. Run the MCP host elevated or grant Hyper-V Administrators access.
+```
+
+The group is what grants access without elevation, and it is the shape the roadmap asks for:
+**elevation happens once at install, not per action.** In an elevated PowerShell, once:
+
+```powershell
+# "Hyper-V Administrators" on an English Windows;
+# "Administradores do Hyper-V" on a Portuguese one.
+Add-LocalGroupMember -Group 'Administradores do Hyper-V' -Member "$env:COMPUTERNAME\$env:USERNAME"
+```
+
+Then **sign out and back in** (or reboot): a group added to the account is not in the token the
+session already holds, so the process that is running keeps failing until the next logon. Restart
+any service host that was already running for the same reason — it is a client of the same token.
+
+Check it without opening anything:
+
+```powershell
+# A non-elevated PowerShell, after the new logon: this must answer, not refuse.
+$env:PYTHONPATH = 'C:\path\to\hyperv-console-mcp\src'
+python -c "from hyperv_console_mcp.config import Settings; from hyperv_console_mcp.service import HyperVService; from hyperv_console_mcp.hostwmi import create_backend; print(HyperVService(create_backend(), Settings.from_env()).host_status()['hypervisor_present'])"
+```
+
+Once it answers, nothing else needs elevation: the interface, the AI and the command line all drive
+the same per-user host, which now has the rights it needs.
+
+### Credentials are not the reason for the prompt
+
+The guest password lives in the Windows Credential Manager under `HyperVConsoleMCP/<vm>`, and the
+service builds the `PSCredential` from it — there is no `Get-Credential` anywhere in the package
+(`tests/test_lab_worker.py` asserts it). So a credential prompt you see is not the service asking:
+it is the VM's own console (`vmconnect`, where Windows asks for the guest logon) or a script written
+by hand. `guest_credential_status` tells you which account the service will use and where it came
+from, and never returns the secret.
+
+SSH with a key removes the password from the guest path entirely — but provisioning it bootstraps
+through PowerShell Direct, so it needs the permission above first. See
+[the SSH guide](SSH.md).
+
 ## Confined host paths
 
 ISO mounts accept only files under `HYPERV_MCP_ISO_ROOT` (default `%LOCALAPPDATA%\HyperVConsoleMCP\media`). Serial logs must remain under `HYPERV_MCP_SERIAL_LOG_ROOT` (default `%LOCALAPPDATA%\HyperVConsoleMCP\serial`). Set both roots explicitly when using a different library or protected log directory:
