@@ -185,6 +185,22 @@ SSH with a key removes the password from the guest path entirely — but provisi
 through PowerShell Direct, so it needs the permission above first. See
 [the SSH guide](SSH.md).
 
+**Autologon is only half of "no password prompts".** The other half is the lock screen: a guest that
+boots straight into the session and then locks itself after the screensaver asks for the password
+again, which looks exactly like autologon not working. `guest_autologon_configure` takes both:
+
+```python
+# Autologon on, lock screen off, no blanking and no console lock.
+service.guest_autologon_configure("NORTH-Test", True, "NORTH-Test",
+                                  lock_screen=True, power=True)
+```
+
+The tri-state matters: `True` applies the setting, `False` restores what was there, `None` leaves it
+alone. Every applied entry is recorded under `C:\DriverLab\State\guest-config.json` in the guest and
+`guest_config_revert` puts it all back. The password itself goes to LSA private data
+(`password_in_registry: false`) rather than the plaintext `DefaultPassword` value a hand-written
+registry fix leaves behind.
+
 ## Confined host paths
 
 ISO mounts accept only files under `HYPERV_MCP_ISO_ROOT` (default `%LOCALAPPDATA%\HyperVConsoleMCP\media`). Serial logs must remain under `HYPERV_MCP_SERIAL_LOG_ROOT` (default `%LOCALAPPDATA%\HyperVConsoleMCP\serial`). Set both roots explicitly when using a different library or protected log directory:
