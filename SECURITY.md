@@ -74,6 +74,15 @@ not disturb a live one, and `HYPERV_MCP_SERVICE_PIPE` names a different pipe. Th
 broker is fail-closed: with `HYPERV_MCP_REQUIRE_DASHBOARD_APPROVAL=true` and no reachable
 window, a mutation is denied rather than waved through.
 
+**The host can be the elevated part.** Hyper-V management needs privilege, and there are two ways
+to have it without a UAC prompt per action: the account is in *Hyper-V Administrators*, or the host
+runs elevated while every client stays ordinary. `scripts/install_elevated_host.ps1` does the
+second — a scheduled task that starts the host at logon with the highest run level, as the
+operator. The trade is explicit: an administrator-rights process lives for the whole session. It is
+still the operator's own process, on the operator's own pipe, with the operator's own vault, and
+`-Unregister` removes it; what it must never become is a machine-wide service, for the five reasons
+recorded in `docs/PROJECT.md`.
+
 ## The one listener: `--serve`
 
 The WebView2 window opens no port. `hyperv-console-mcp --serve` is the exception and the only
