@@ -142,6 +142,36 @@ python -c "from hyperv_console_mcp.config import Settings; from hyperv_console_m
 Once it answers, nothing else needs elevation: the interface, the AI and the command line all drive
 the same per-user host, which now has the rights it needs.
 
+### "Sempre elevado" without a UAC prompt: the logon task
+
+The group needs one new logon before it takes effect, and a machine may not have Hyper-V
+Administrators at all. The other way to have the rights is for the **host** to run elevated while
+every client stays ordinary — the window, the AI and the command line all reach it over the pipe.
+
+`scripts/install_elevated_host.ps1` registers that: a scheduled task, `HyperVConsoleMCP-Host`, that
+runs at logon with the **highest run level**, as the operator, launching the host under `pythonw`
+(no window). The task is *Interactive* on purpose — the host reads that user's Credential Manager
+and owns that user's pipe, which is why it is not a service account
+([the decision is in PROJECT.md](PROJECT.md)).
+
+```powershell
+# In an elevated PowerShell, once.
+.\scripts\install_elevated_host.ps1 -PythonPath 'C:\Python311\pythonw.exe' -SourceRoot 'C:\tools\hyperv-console-mcp'
+Start-ScheduledTask -TaskName HyperVConsoleMCP-Host   # start it now instead of waiting for the next logon
+```
+
+Remove it the same way it was made:
+
+```powershell
+.\scripts\install_elevated_host.ps1 -Unregister
+```
+
+What it buys: after the next logon the host is already up and elevated, so no client ever asks for
+UAC, and a reboot does not undo it. What it costs: a process with administrator rights running for
+the whole session, owned by the operator and reachable only through that user's pipe. If you would
+rather have no such process, use the group above and leave the task out — the two are alternatives,
+not a sequence.
+
 ### Credentials are not the reason for the prompt
 
 The guest password lives in the Windows Credential Manager under `HyperVConsoleMCP/<vm>`, and the
